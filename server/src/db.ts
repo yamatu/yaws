@@ -28,6 +28,7 @@ function migrate(db: Db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
       interval_sec INTEGER NOT NULL DEFAULT 5,
       agent_key_hash TEXT NOT NULL,
       agent_key_enc TEXT NOT NULL DEFAULT '',
@@ -63,6 +64,7 @@ function migrate(db: Db) {
   `);
 
   ensureColumns(db, "machines", [
+    { name: "sort_order", sql: "ALTER TABLE machines ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0" },
     { name: "agent_key_enc", sql: "ALTER TABLE machines ADD COLUMN agent_key_enc TEXT NOT NULL DEFAULT ''" },
     { name: "agent_ws_url", sql: "ALTER TABLE machines ADD COLUMN agent_ws_url TEXT NOT NULL DEFAULT ''" },
     { name: "expires_at", sql: "ALTER TABLE machines ADD COLUMN expires_at INTEGER" },
@@ -81,6 +83,13 @@ function migrate(db: Db) {
     { name: "load_5", sql: "ALTER TABLE metrics ADD COLUMN load_5 REAL NOT NULL DEFAULT 0" },
     { name: "load_15", sql: "ALTER TABLE metrics ADD COLUMN load_15 REAL NOT NULL DEFAULT 0" },
   ]);
+
+  // Best-effort backfill for existing rows
+  try {
+    db.exec("UPDATE machines SET sort_order = id WHERE sort_order = 0");
+  } catch {
+    // ignore
+  }
 }
 
 function ensureColumns(db: Db, table: string, cols: Array<{ name: string; sql: string }>) {

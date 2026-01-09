@@ -53,6 +53,7 @@ export type Machine = {
   id: number;
   name: string;
   notes: string;
+  sortOrder: number;
   intervalSec: number;
   agentWsUrl: string;
   expiresAt: number | null;
@@ -84,5 +85,8 @@ export type PublicMachine = {
   name: string;
   online: 0 | 1;
   lastSeenAt: number | null;
+  expiresAt: number | null;
+  billingCycle: "month" | "quarter" | "year";
+  autoRenew: 0 | 1;
   latestMetric: (Metric & { netRxBytes: number; netTxBytes: number; load1: number; load5: number; load15: number }) | null;
 };

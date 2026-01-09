@@ -35,6 +35,9 @@ app.get("/api/public/summary", (_req, res) => {
     .prepare(
       `SELECT
          m.id, m.name, m.online, m.last_seen_at as lastSeenAt,
+         m.expires_at as expiresAt,
+         m.billing_cycle as billingCycle,
+         m.auto_renew as autoRenew,
          x.at as metricAt,
          x.cpu_usage as cpuUsage,
          x.mem_used as memUsed, x.mem_total as memTotal,
@@ -45,7 +48,7 @@ app.get("/api/public/summary", (_req, res) => {
        LEFT JOIN metrics x ON x.id = (
          SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
        )
-       ORDER BY m.id DESC`
+       ORDER BY m.sort_order ASC, m.id ASC`
     )
     .all();
 
@@ -55,6 +58,9 @@ app.get("/api/public/summary", (_req, res) => {
       name: r.name,
       online: r.online,
       lastSeenAt: r.lastSeenAt ?? null,
+      expiresAt: r.expiresAt ?? null,
+      billingCycle: r.billingCycle,
+      autoRenew: r.autoRenew,
       latestMetric: r.metricAt
         ? {
             at: r.metricAt,
@@ -142,6 +148,7 @@ app.get("/api/machines", requireAuth, (_req, res) => {
     .prepare(
       `SELECT
         id, name, notes,
+        sort_order as sortOrder,
         interval_sec as intervalSec,
         agent_ws_url as agentWsUrl,
         expires_at as expiresAt,
@@ -150,7 +157,7 @@ app.get("/api/machines", requireAuth, (_req, res) => {
         auto_renew as autoRenew,
         created_at as createdAt, updated_at as updatedAt,
         last_seen_at as lastSeenAt, online
-      FROM machines ORDER BY id DESC`
+      FROM machines ORDER BY sort_order ASC, id ASC`
     )
     .all();
   res.json({ machines: rows });
@@ -163,19 +170,22 @@ app.post("/api/machines", requireAuth, async (req, res) => {
   const agentKey = body.data.agentKey ?? randomAgentKey();
   const agentKeyHash = await bcrypt.hash(agentKey, 12);
   const agentKeyEnc = encryptText(agentKey, agentKeySecret);
+  const nextSortOrder =
+    (db.prepare("SELECT COALESCE(MAX(sort_order), 0) as m FROM machines").get() as any)?.m + 1;
   const info = db
     .prepare(
       `INSERT INTO machines (
-         name, notes, interval_sec,
+         name, notes, sort_order, interval_sec,
          agent_key_hash, agent_key_enc, agent_ws_url,
          expires_at, purchase_amount_cents, billing_cycle, auto_renew,
          created_at, updated_at, online
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
     )
     .run(
       body.data.name,
       body.data.notes ?? "",
+      nextSortOrder,
       body.data.intervalSec,
       agentKeyHash,
       agentKeyEnc,
@@ -188,6 +198,22 @@ app.post("/api/machines", requireAuth, async (req, res) => {
       now
     );
   res.json({ ok: true, id: Number(info.lastInsertRowid), agentKey });
+});
+
+app.put("/api/machines/order", requireAuth, (req, res) => {
+  const body = MachinesOrderSchema.safeParse(req.body);
+  if (!body.success) return res.status(400).json({ error: "bad_request" });
+
+  const ids = body.data.machineIds;
+  const uniq = new Set(ids);
+  if (uniq.size !== ids.length) return res.status(400).json({ error: "duplicate_ids" });
+
+  const tx = db.transaction(() => {
+    const stmt = db.prepare("UPDATE machines SET sort_order = ? WHERE id = ?");
+    ids.forEach((id, idx) => stmt.run(idx + 1, id));
+  });
+  tx();
+  res.json({ ok: true });
 });
 
 app.put("/api/machines/:id", requireAuth, async (req, res) => {
@@ -404,6 +430,10 @@ const MeCredentialsSchema = z.object({
   username: z.string().min(1).optional(),
   currentPassword: z.string().min(1),
   newPassword: z.string().min(6).optional(),
+});
+
+const MachinesOrderSchema = z.object({
+  machineIds: z.array(z.number().int().positive()).min(1).max(10000),
 });
 
 function randomAgentKey() {
