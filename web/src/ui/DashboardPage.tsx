@@ -33,6 +33,8 @@ export function DashboardPage() {
   const [orderError, setOrderError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const dragIdRef = useRef<number | null>(null);
+  const [draggingId, setDraggingId] = useState<number | null>(null);
+  const [dragOverId, setDragOverId] = useState<number | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -63,6 +65,36 @@ export function DashboardPage() {
   useEffect(() => {
     localStorage.setItem("yaws_view_mode", viewMode);
   }, [viewMode]);
+
+  useEffect(() => {
+    if (draggingId == null) return;
+    let lastY = 0;
+    let raf = 0;
+    const onDragOver = (e: DragEvent) => {
+      lastY = e.clientY;
+      e.preventDefault();
+    };
+    window.addEventListener("dragover", onDragOver, { passive: false });
+    const tick = () => {
+      const edge = 90;
+      const maxSpeed = 18;
+      if (lastY > 0) {
+        if (lastY < edge) {
+          const p = (edge - lastY) / edge;
+          window.scrollBy({ top: -Math.ceil(maxSpeed * p), left: 0 });
+        } else if (lastY > window.innerHeight - edge) {
+          const p = (lastY - (window.innerHeight - edge)) / edge;
+          window.scrollBy({ top: Math.ceil(maxSpeed * p), left: 0 });
+        }
+      }
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener("dragover", onDragOver as any);
+    };
+  }, [draggingId]);
 
   function tryConnectWs(machineIds: number[]) {
     try {
@@ -307,31 +339,51 @@ export function DashboardPage() {
             return (
               <div
                 key={m.id}
-                className="rounded-2xl border border-white/15 bg-white/10 p-3 backdrop-blur hover:bg-white/15"
+                className={`rounded-2xl border bg-white/10 p-3 backdrop-blur transition-all duration-150 hover:bg-white/15 ${
+                  dragOverId === m.id ? "border-sky-400/40 ring-2 ring-sky-400/30" : "border-white/15"
+                } ${draggingId === m.id ? "opacity-60" : ""}`}
                 onDragOver={(e) => {
                   if (dragIdRef.current == null) return;
                   e.preventDefault();
+                }}
+                onDragEnter={() => {
+                  if (draggingId == null) return;
+                  setDragOverId(m.id);
+                }}
+                onDragLeave={() => {
+                  if (dragOverId === m.id) setDragOverId(null);
                 }}
                 onDrop={async (e) => {
                   e.preventDefault();
                   const dragId = dragIdRef.current;
                   dragIdRef.current = null;
+                  setDraggingId(null);
+                  setDragOverId(null);
                   if (dragId == null) return;
                   const next = moveBefore(machines, dragId, m.id);
                   setMachines(next);
                   await persistOrder(next);
                 }}
+                onClick={() => setExpanded((p) => ({ ...p, [m.id]: !p[m.id] }))}
               >
                 <div className="flex flex-col gap-2 md:flex-row md:items-center">
                   <div className="flex items-center gap-2 md:w-[420px]">
                     <button
                       className="cursor-grab rounded-lg border border-white/15 bg-white/5 px-2 py-1 text-xs text-white/70 active:cursor-grabbing"
                       draggable
-                      onDragStart={() => {
+                      onClick={(e) => e.stopPropagation()}
+                      onDragStart={(e) => {
                         dragIdRef.current = m.id;
+                        setDraggingId(m.id);
+                        setDragOverId(null);
+                        e.dataTransfer?.setData("text/plain", String(m.id));
+                        e.dataTransfer?.setDragImage(new Image(), 0, 0);
+                        e.dataTransfer!.effectAllowed = "move";
                       }}
                       onDragEnd={() => {
                         dragIdRef.current = null;
+                        setDraggingId(null);
+                        setDragOverId(null);
                       }}
                       title="拖拽排序"
                     >
@@ -341,15 +393,31 @@ export function DashboardPage() {
                       className={`h-2 w-2 rounded-full ${m.online ? "bg-emerald-400" : "bg-white/25"}`}
                       title={m.online ? "在线" : "离线"}
                     />
-                    <Link className="flex-1 font-semibold hover:underline" to={`machines/${m.id}`}>
-                      {m.name}
-                    </Link>
-                    <button
+                    <div className="flex-1 font-semibold">{m.name}</div>
+                    <Link
                       className="rounded-xl border border-white/15 bg-white/10 px-2 py-1 text-xs hover:bg-white/15"
-                      onClick={() => setExpanded((p) => ({ ...p, [m.id]: !p[m.id] }))}
+                      to={`machines/${m.id}`}
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      {isExpanded ? "收起" : "更多"}
-                    </button>
+                      详情
+                    </Link>
+                    <div className="rounded-xl border border-white/10 bg-white/5 px-2 py-1 text-xs text-white/60">
+                      <svg
+                        className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M6 9l6 6 6-6"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs md:flex md:flex-1 md:flex-wrap md:items-center md:justify-end">

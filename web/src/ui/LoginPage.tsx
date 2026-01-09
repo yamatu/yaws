@@ -5,8 +5,8 @@ import { setToken } from "./auth";
 
 export function LoginPage() {
   const nav = useNavigate();
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin123");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -25,6 +25,7 @@ export function LoginPage() {
               className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              placeholder="请输入用户名"
             />
           </div>
           <div>
@@ -34,6 +35,7 @@ export function LoginPage() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              placeholder="请输入密码"
             />
           </div>
 
