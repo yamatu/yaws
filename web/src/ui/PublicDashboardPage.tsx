@@ -198,12 +198,9 @@ export function PublicDashboardPage() {
                       <div>{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
                       <div className="text-white/60">{lm ? `load ${lm.load1.toFixed(2)}` : ""}</div>
                     </div>
-                    <div className="h-2 overflow-hidden rounded-full border border-white/15 bg-white/5">
-                      <div
-                        className="h-full bg-gradient-to-r from-sky-400/90 to-emerald-400/90"
-                        style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }}
-                      />
-                    </div>
+                  <div className="yaws-meter">
+                    <div style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }} />
+                  </div>
                   </div>
 
                   <div>
@@ -214,12 +211,9 @@ export function PublicDashboardPage() {
                         {lm ? `${formatBytes(lm.memUsed)} / ${formatBytes(lm.memTotal)}` : "—"}
                       </div>
                     </div>
-                    <div className="h-2 overflow-hidden rounded-full border border-white/15 bg-white/5">
-                      <div
-                        className="h-full bg-gradient-to-r from-sky-400/90 to-emerald-400/90"
-                        style={{ width: `${Math.round((memP ?? 0) * 100)}%` }}
-                      />
-                    </div>
+                  <div className="yaws-meter">
+                    <div style={{ width: `${Math.round((memP ?? 0) * 100)}%` }} />
+                  </div>
                   </div>
 
                   <div>
@@ -230,29 +224,30 @@ export function PublicDashboardPage() {
                         {lm ? `${formatBytes(lm.diskUsed)} / ${formatBytes(lm.diskTotal)}` : "—"}
                       </div>
                     </div>
-                    <div className="h-2 overflow-hidden rounded-full border border-white/15 bg-white/5">
-                      <div
-                        className="h-full bg-gradient-to-r from-sky-400/90 to-emerald-400/90"
-                        style={{ width: `${Math.round((diskP ?? 0) * 100)}%` }}
-                      />
-                    </div>
+                  <div className="yaws-meter">
+                    <div style={{ width: `${Math.round((diskP ?? 0) * 100)}%` }} />
+                  </div>
                   </div>
 
                   <div className="grid gap-2 text-xs text-white/70">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
+                      <span className="rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-1 text-cyan-200">
                         流量：{lm ? `RX ${formatBytes(lm.netRxBytes)} · TX ${formatBytes(lm.netTxBytes)}` : "—"}
                       </span>
-                      <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
+                      <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-2 py-1 text-violet-200">
                         速度：{lm ? `RX ${formatBps(sp.rxBps)} / TX ${formatBps(sp.txBps)}` : "—"}
                       </span>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
+                      <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 text-amber-200">
                         到期：{m.expiresAt ? new Date(m.expiresAt).toLocaleDateString() : "—"}
-                        {left != null ? `（${left} 天）` : ""}
+                        {left != null ? (
+                          <span className={`ml-1 ${left <= 10 ? "text-rose-300" : "text-amber-100"}`}>（{left} 天）</span>
+                        ) : (
+                          ""
+                        )}
                       </span>
-                      <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
+                      <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-1 text-emerald-200">
                         {cycleLabel(m.billingCycle)}
                         {m.autoRenew ? " · 自动续费" : ""}
                       </span>
@@ -313,10 +308,16 @@ export function PublicDashboardPage() {
                     <div className="text-white/70">CPU：{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
                     <div className="text-white/70">内存：{lm ? `${Math.round((memP ?? 0) * 100)}%` : "—"}</div>
                     <div className="text-white/70">磁盘：{lm ? `${Math.round((diskP ?? 0) * 100)}%` : "—"}</div>
-                    <div className="text-white/70">网速：{lm ? `RX ${formatBps(sp.rxBps)} / TX ${formatBps(sp.txBps)}` : "—"}</div>
-                    <div className="text-white/70">
+                    <div className="text-violet-200/90">
+                      网速：{lm ? `RX ${formatBps(sp.rxBps)} / TX ${formatBps(sp.txBps)}` : "—"}
+                    </div>
+                    <div className="text-amber-200/90">
                       到期：{m.expiresAt ? new Date(m.expiresAt).toLocaleDateString() : "—"}
-                      {left != null ? `（${left}天）` : ""}
+                      {left != null ? (
+                        <span className={`ml-1 ${left <= 10 ? "text-rose-300" : "text-amber-100"}`}>（{left}天）</span>
+                      ) : (
+                        ""
+                      )}
                     </div>
                   </div>
                 </div>
@@ -325,8 +326,10 @@ export function PublicDashboardPage() {
                   <div className="mt-2 grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
                     <div>Last seen: {fmtTime(m.lastSeenAt)}</div>
                     <div>load: {lm ? `${lm.load1.toFixed(2)} / ${lm.load5.toFixed(2)} / ${lm.load15.toFixed(2)}` : "—"}</div>
-                    <div>流量：{lm ? `RX ${formatBytes(lm.netRxBytes)} · TX ${formatBytes(lm.netTxBytes)}` : "—"}</div>
-                    <div>
+                    <div className="text-cyan-200/90">
+                      流量：{lm ? `RX ${formatBytes(lm.netRxBytes)} · TX ${formatBytes(lm.netTxBytes)}` : "—"}
+                    </div>
+                    <div className="text-emerald-200/90">
                       计费：{cycleLabel(m.billingCycle)}
                       {m.autoRenew ? " · 自动续费" : ""}
                     </div>

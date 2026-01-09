@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { apiFetch, type Machine } from "./api";
+import { apiFetch, type MachineSummary } from "./api";
 import { connectUiWs } from "./ws";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, formatMoneyCents, pct } from "./format";
 
@@ -23,7 +23,7 @@ type SortMode = "custom" | "expiry";
 type GroupKey = string; // "__all__" | "__ungrouped__" | groupName
 
 export function DashboardPage() {
-  const [machines, setMachines] = useState<Machine[]>([]);
+  const [machines, setMachines] = useState<MachineSummary[]>([]);
   const [latest, setLatest] = useState<Record<number, LiveMetric>>({});
   const [wsOk, setWsOk] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -48,9 +48,26 @@ export function DashboardPage() {
     const ac = new AbortController();
     (async () => {
       try {
-        const res = await apiFetch<{ machines: Machine[] }>("/api/machines", { signal: ac.signal });
+        const res = await apiFetch<{ machines: MachineSummary[] }>("/api/machines/summary", { signal: ac.signal });
         if (!alive) return;
         setMachines(res.machines);
+        const seed: Record<number, LiveMetric> = {};
+        for (const m of res.machines) {
+          const lm = m.latestMetric;
+          if (!lm) continue;
+          seed[m.id] = {
+            at: lm.at,
+            cpuUsage: lm.cpuUsage,
+            memUsed: lm.memUsed,
+            memTotal: lm.memTotal,
+            diskUsed: lm.diskUsed,
+            diskTotal: lm.diskTotal,
+            netRxBytes: lm.netRxBytes,
+            netTxBytes: lm.netTxBytes,
+            load1: lm.load1,
+          };
+        }
+        setLatest((prev) => ({ ...seed, ...prev }));
         if (localStorage.getItem("yaws_view_mode") == null && res.machines.length >= 12) {
           setViewMode("list");
         }
@@ -200,7 +217,7 @@ export function DashboardPage() {
     return next;
   }, [rows, sortMode]);
 
-  async function persistOrder(next: Machine[]) {
+  async function persistOrder(next: MachineSummary[]) {
     setOrderSaving(true);
     setOrderError(null);
     try {
@@ -215,7 +232,7 @@ export function DashboardPage() {
     }
   }
 
-  function moveBefore(list: Machine[], dragId: number, overId: number) {
+  function moveBefore(list: MachineSummary[], dragId: number, overId: number) {
     if (dragId === overId) return list;
     const from = list.findIndex((m) => m.id === dragId);
     const to = list.findIndex((m) => m.id === overId);
@@ -236,7 +253,7 @@ export function DashboardPage() {
         <div className="flex items-center gap-2">
           <div className="text-xs text-white/60">排序</div>
           <select
-            className="rounded-xl border border-white/15 bg-white/10 px-2 py-2 text-sm text-white outline-none hover:bg-white/15"
+            className="yaws-select text-sm"
             value={sortMode}
             onChange={(e) => setSortMode(e.target.value as SortMode)}
           >
@@ -343,11 +360,8 @@ export function DashboardPage() {
                       <div>{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
                       <div className="text-white/60">{lm?.load1 != null ? `load ${lm.load1.toFixed(2)}` : ""}</div>
                     </div>
-                    <div className="h-2 overflow-hidden rounded-full border border-white/15 bg-white/5">
-                      <div
-                        className="h-full bg-gradient-to-r from-sky-400/90 to-emerald-400/90"
-                        style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }}
-                      />
+                    <div className="yaws-meter">
+                      <div style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }} />
                     </div>
                   </div>
 
@@ -359,11 +373,8 @@ export function DashboardPage() {
                         {lm ? `${formatBytes(lm.memUsed)} / ${formatBytes(lm.memTotal)}` : "—"}
                       </div>
                     </div>
-                    <div className="h-2 overflow-hidden rounded-full border border-white/15 bg-white/5">
-                      <div
-                        className="h-full bg-gradient-to-r from-sky-400/90 to-emerald-400/90"
-                        style={{ width: `${Math.round((memP ?? 0) * 100)}%` }}
-                      />
+                    <div className="yaws-meter">
+                      <div style={{ width: `${Math.round((memP ?? 0) * 100)}%` }} />
                     </div>
                   </div>
 
@@ -375,34 +386,31 @@ export function DashboardPage() {
                         {lm ? `${formatBytes(lm.diskUsed)} / ${formatBytes(lm.diskTotal)}` : "—"}
                       </div>
                     </div>
-                    <div className="h-2 overflow-hidden rounded-full border border-white/15 bg-white/5">
-                      <div
-                        className="h-full bg-gradient-to-r from-sky-400/90 to-emerald-400/90"
-                        style={{ width: `${Math.round((diskP ?? 0) * 100)}%` }}
-                      />
+                    <div className="yaws-meter">
+                      <div style={{ width: `${Math.round((diskP ?? 0) * 100)}%` }} />
                     </div>
                   </div>
 
                   <div className="grid gap-2 text-xs text-white/70">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
+                      <span className="rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-1 text-cyan-200">
                         流量：{lm?.netRxBytes != null ? `RX ${formatBytes(lm.netRxBytes)}` : "RX —"} ·{" "}
                         {lm?.netTxBytes != null ? `TX ${formatBytes(lm.netTxBytes)}` : "TX —"}
                       </span>
-                      <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
+                      <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-2 py-1 text-violet-200">
                         速度：{lm ? `RX ${formatBps(lm.rxBps ?? 0)} / TX ${formatBps(lm.txBps ?? 0)}` : "—"}
                       </span>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
+                      <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 text-amber-200">
                         到期：{m.expiresAt ? new Date(m.expiresAt).toLocaleDateString() : "—"}
                         {left != null ? (
-                          <span className={`ml-1 ${left <= 10 ? "text-rose-300" : ""}`}>（{left} 天）</span>
+                          <span className={`ml-1 ${left <= 10 ? "text-rose-300" : "text-amber-100"}`}>（{left} 天）</span>
                         ) : (
                           ""
                         )}
                       </span>
-                      <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
+                      <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-1 text-emerald-200">
                         {cycleLabel(m.billingCycle)} · {formatMoneyCents(m.purchaseAmountCents)}
                         {m.autoRenew ? " · 自动续费" : ""}
                       </span>
@@ -540,10 +548,10 @@ export function DashboardPage() {
                     </div>
                     <div className="text-white/70">内存：{lm ? `${Math.round((memP ?? 0) * 100)}%` : "—"}</div>
                     <div className="text-white/70">磁盘：{lm ? `${Math.round((diskP ?? 0) * 100)}%` : "—"}</div>
-                    <div className="text-white/70">
+                    <div className="text-violet-200/90">
                       网速：{lm ? `RX ${formatBps(lm.rxBps ?? 0)} / TX ${formatBps(lm.txBps ?? 0)}` : "—"}
                     </div>
-                    <div className="text-white/70">
+                    <div className="text-amber-200/90">
                       到期：{m.expiresAt ? new Date(m.expiresAt).toLocaleDateString() : "—"}
                       {left != null ? <span className={`ml-1 ${expiryClass}`}>（{left}天）</span> : ""}
                     </div>
@@ -553,11 +561,11 @@ export function DashboardPage() {
                 {isExpanded ? (
                   <div className="mt-2 grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
                     <div>Last seen: {fmtTime(m.lastSeenAt)}</div>
-                    <div>
+                    <div className="text-cyan-200/90">
                       流量：{lm?.netRxBytes != null ? `RX ${formatBytes(lm.netRxBytes)}` : "RX —"} ·{" "}
                       {lm?.netTxBytes != null ? `TX ${formatBytes(lm.netTxBytes)}` : "TX —"}
                     </div>
-                    <div>
+                    <div className="text-emerald-200/90">
                       计费：{cycleLabel(m.billingCycle)} · {formatMoneyCents(m.purchaseAmountCents)}
                       {m.autoRenew ? " · 自动续费" : ""}
                     </div>

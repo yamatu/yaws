@@ -32,7 +32,6 @@
     transform: translateZ(0);
     background: radial-gradient(1200px 800px at 10% 10%, rgba(27, 43, 109, 0.95) 0%, rgba(27, 43, 109, 0) 55%),
       radial-gradient(900px 600px at 90% 20%, rgba(61, 23, 87, 0.9) 0%, rgba(61, 23, 87, 0) 60%),
-      radial-gradient(900px 600px at 50% 110%, rgba(0, 0, 0, 0.55) 0%, rgba(0, 0, 0, 0) 60%),
       linear-gradient(180deg, #070a14 0%, #0b1020 70%, #0b1020 100%);
   }
 
@@ -40,5 +39,40 @@
     position: relative;
     z-index: 1;
     min-height: 100vh;
+  }
+}
+
+@layer components {
+  .yaws-meter {
+    height: 0.5rem;
+    overflow: hidden;
+    border-radius: 9999px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .yaws-meter > div {
+    height: 100%;
+    background: linear-gradient(
+      90deg,
+      rgba(34, 197, 94, 0.95) 0%,
+      rgba(59, 130, 246, 0.95) 35%,
+      rgba(234, 179, 8, 0.95) 70%,
+      rgba(239, 68, 68, 0.95) 100%
+    );
+    transition: width 200ms ease;
+  }
+
+  .yaws-select {
+    color: rgba(255, 255, 255, 0.92);
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    outline: none;
+  }
+
+  .yaws-select:focus {
+    border-color: rgba(255, 255, 255, 0.3);
   }
 }

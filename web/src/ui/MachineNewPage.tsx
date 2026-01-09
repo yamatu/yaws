@@ -104,7 +104,7 @@ export function MachineNewPage() {
         <div>
           <div className="mb-1 text-xs text-white/60">计费周期</div>
           <select
-            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-white outline-none focus:border-white/30"
+            className="yaws-select w-full text-sm"
             value={billingCycle}
             onChange={(e) => setBillingCycle(e.target.value as any)}
           >

@@ -166,6 +166,75 @@ app.get("/api/machines", requireAuth, (_req, res) => {
   res.json({ machines: rows });
 });
 
+app.get("/api/machines/summary", requireAuth, (_req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT
+         m.id,
+         m.name,
+         m.notes,
+         m.sort_order as sortOrder,
+         m.group_name as groupName,
+         m.interval_sec as intervalSec,
+         m.agent_ws_url as agentWsUrl,
+         m.expires_at as expiresAt,
+         m.purchase_amount_cents as purchaseAmountCents,
+         m.billing_cycle as billingCycle,
+         m.auto_renew as autoRenew,
+         m.created_at as createdAt,
+         m.updated_at as updatedAt,
+         m.last_seen_at as lastSeenAt,
+         m.online,
+         x.at as metricAt,
+         x.cpu_usage as cpuUsage,
+         x.mem_used as memUsed, x.mem_total as memTotal,
+         x.disk_used as diskUsed, x.disk_total as diskTotal,
+         x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
+         x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
+       FROM machines m
+       LEFT JOIN metrics x ON x.id = (
+         SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
+       )
+       ORDER BY m.sort_order ASC, m.id ASC`
+    )
+    .all();
+
+  res.json({
+    machines: rows.map((r: any) => ({
+      id: r.id,
+      name: r.name,
+      notes: r.notes,
+      sortOrder: r.sortOrder,
+      groupName: r.groupName ?? "",
+      intervalSec: r.intervalSec,
+      agentWsUrl: r.agentWsUrl,
+      expiresAt: r.expiresAt ?? null,
+      purchaseAmountCents: r.purchaseAmountCents,
+      billingCycle: r.billingCycle,
+      autoRenew: r.autoRenew,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      lastSeenAt: r.lastSeenAt ?? null,
+      online: r.online,
+      latestMetric: r.metricAt
+        ? {
+            at: r.metricAt,
+            cpuUsage: r.cpuUsage,
+            memUsed: r.memUsed,
+            memTotal: r.memTotal,
+            diskUsed: r.diskUsed,
+            diskTotal: r.diskTotal,
+            netRxBytes: r.netRxBytes,
+            netTxBytes: r.netTxBytes,
+            load1: r.load1,
+            load5: r.load5,
+            load15: r.load15,
+          }
+        : null,
+    })),
+  });
+});
+
 app.post("/api/machines", requireAuth, async (req, res) => {
   const body = MachineCreateSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });

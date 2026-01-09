@@ -67,6 +67,8 @@ export type Machine = {
   online: 0 | 1;
 };
 
+export type MachineSummary = Machine & { latestMetric: Metric | null };
+
 export type Metric = {
   at: number;
   cpuUsage: number;

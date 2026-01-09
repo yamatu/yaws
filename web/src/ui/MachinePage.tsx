@@ -171,11 +171,15 @@ export function MachinePage() {
         </div>
 
         <div className="flex flex-wrap gap-2 text-xs text-white/70">
-          <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
+          <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 text-amber-200">
             到期：{machine.expiresAt ? new Date(machine.expiresAt).toLocaleDateString() : "—"}
-            {left != null ? `（${left} 天）` : ""}
+            {left != null ? (
+              <span className={`ml-1 ${left <= 10 ? "text-rose-300" : "text-amber-100"}`}>（{left} 天）</span>
+            ) : (
+              ""
+            )}
           </span>
-          <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
+          <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-1 text-emerald-200">
             {cycleLabel(machine.billingCycle)} · {formatMoneyCents(machine.purchaseAmountCents)}
             {machine.autoRenew ? " · 自动续费" : ""}
           </span>
@@ -192,11 +196,8 @@ export function MachinePage() {
             <div className="flex-1" />
             <div className="text-xs text-white/60">{last ? new Date(last.at).toLocaleTimeString() : "—"}</div>
           </div>
-          <div className="h-2 overflow-hidden rounded-full border border-white/15 bg-white/5">
-            <div
-              className="h-full bg-gradient-to-r from-sky-400/90 to-emerald-400/90"
-              style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }}
-            />
+          <div className="yaws-meter">
+            <div className="h-full" style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }} />
           </div>
           <div className="mt-2 text-xs text-white/60">
             load: {last ? `${last.load1.toFixed(2)} / ${last.load5.toFixed(2)} / ${last.load15.toFixed(2)}` : "—"}
@@ -212,11 +213,8 @@ export function MachinePage() {
             <div className="flex-1" />
             <div className="text-xs">{last ? `${Math.round((memP ?? 0) * 100)}%` : "—"}</div>
           </div>
-          <div className="h-2 overflow-hidden rounded-full border border-white/15 bg-white/5">
-            <div
-              className="h-full bg-gradient-to-r from-sky-400/90 to-emerald-400/90"
-              style={{ width: `${Math.round((memP ?? 0) * 100)}%` }}
-            />
+          <div className="yaws-meter">
+            <div className="h-full" style={{ width: `${Math.round((memP ?? 0) * 100)}%` }} />
           </div>
         </div>
 
@@ -229,21 +227,19 @@ export function MachinePage() {
             <div className="flex-1" />
             <div className="text-xs">{last ? `${Math.round((diskP ?? 0) * 100)}%` : "—"}</div>
           </div>
-          <div className="h-2 overflow-hidden rounded-full border border-white/15 bg-white/5">
-            <div
-              className="h-full bg-gradient-to-r from-sky-400/90 to-emerald-400/90"
-              style={{ width: `${Math.round((diskP ?? 0) * 100)}%` }}
-            />
+          <div className="yaws-meter">
+            <div className="h-full" style={{ width: `${Math.round((diskP ?? 0) * 100)}%` }} />
           </div>
         </div>
 
         <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
           <div className="mb-1 text-xs text-white/60">流量（累计）</div>
           <div className="text-sm text-white/80">
-            RX: {last ? formatBytes(last.netRxBytes) : "—"} · TX: {last ? formatBytes(last.netTxBytes) : "—"}
+            <span className="text-cyan-200/90">RX: {last ? formatBytes(last.netRxBytes) : "—"}</span> ·{" "}
+            <span className="text-cyan-200/90">TX: {last ? formatBytes(last.netTxBytes) : "—"}</span>
           </div>
           <div className="mt-1 text-sm text-white/80">
-            速度：RX {formatBps(rxBps)} · TX {formatBps(txBps)}
+            <span className="text-violet-200/90">速度：RX {formatBps(rxBps)} · TX {formatBps(txBps)}</span>
           </div>
           <div className="mt-2 text-xs text-white/50">来自 `/proc/net/dev` 汇总（排除 lo）。</div>
         </div>
@@ -429,7 +425,7 @@ export function MachinePage() {
                 <div>
                   <div className="mb-1 text-xs text-white/60">计费周期</div>
                   <select
-                    className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-white outline-none focus:border-white/30"
+                    className="yaws-select w-full text-sm"
                     value={editBillingCycle}
                     onChange={(e) => setEditBillingCycle(e.target.value as any)}
                   >
