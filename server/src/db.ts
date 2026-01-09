@@ -29,6 +29,7 @@ function migrate(db: Db) {
       name TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
       sort_order INTEGER NOT NULL DEFAULT 0,
+      group_name TEXT NOT NULL DEFAULT '',
       interval_sec INTEGER NOT NULL DEFAULT 5,
       agent_key_hash TEXT NOT NULL,
       agent_key_enc TEXT NOT NULL DEFAULT '',
@@ -65,6 +66,7 @@ function migrate(db: Db) {
 
   ensureColumns(db, "machines", [
     { name: "sort_order", sql: "ALTER TABLE machines ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0" },
+    { name: "group_name", sql: "ALTER TABLE machines ADD COLUMN group_name TEXT NOT NULL DEFAULT ''" },
     { name: "agent_key_enc", sql: "ALTER TABLE machines ADD COLUMN agent_key_enc TEXT NOT NULL DEFAULT ''" },
     { name: "agent_ws_url", sql: "ALTER TABLE machines ADD COLUMN agent_ws_url TEXT NOT NULL DEFAULT ''" },
     { name: "expires_at", sql: "ALTER TABLE machines ADD COLUMN expires_at INTEGER" },

@@ -15,12 +15,13 @@ function defaultAgentWsUrl() {
 export function MachineNewPage() {
   const nav = useNavigate();
   const [name, setName] = useState("");
+  const [groupName, setGroupName] = useState("");
   const [notes, setNotes] = useState("");
   const [intervalSec, setIntervalSec] = useState(5);
   const [agentWsUrl, setAgentWsUrl] = useState(defaultAgentWsUrl());
   const [expiresDate, setExpiresDate] = useState<string>("");
   const [purchaseAmount, setPurchaseAmount] = useState<number>(0);
-  const [billingCycle, setBillingCycle] = useState<"month" | "quarter" | "year">("month");
+  const [billingCycle, setBillingCycle] = useState<"month" | "quarter" | "half_year" | "year" | "two_year" | "three_year">("month");
   const [autoRenew, setAutoRenew] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +43,16 @@ export function MachineNewPage() {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="例如：prod-01"
+          />
+        </div>
+
+        <div>
+          <div className="mb-1 text-xs text-white/60">分组（可选）</div>
+          <input
+            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+            value={groupName}
+            onChange={(e) => setGroupName(e.target.value)}
+            placeholder="例如：香港 / 东京 / AWS"
           />
         </div>
 
@@ -93,13 +104,16 @@ export function MachineNewPage() {
         <div>
           <div className="mb-1 text-xs text-white/60">计费周期</div>
           <select
-            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-white outline-none focus:border-white/30"
             value={billingCycle}
             onChange={(e) => setBillingCycle(e.target.value as any)}
           >
             <option value="month">月付</option>
             <option value="quarter">季付</option>
+            <option value="half_year">半年付</option>
             <option value="year">年付</option>
+            <option value="two_year">两年付</option>
+            <option value="three_year">三年付</option>
           </select>
         </div>
 
@@ -145,6 +159,7 @@ export function MachineNewPage() {
                 method: "POST",
                 body: JSON.stringify({
                   name,
+                  groupName,
                   notes,
                   intervalSec,
                   agentWsUrl,

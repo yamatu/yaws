@@ -20,6 +20,7 @@ type LiveMetric = {
 
 type ViewMode = "cards" | "list";
 type SortMode = "custom" | "expiry";
+type GroupKey = string; // "__all__" | "__ungrouped__" | groupName
 
 export function DashboardPage() {
   const [machines, setMachines] = useState<Machine[]>([]);
@@ -40,6 +41,7 @@ export function DashboardPage() {
   const dragIdRef = useRef<number | null>(null);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragOverId, setDragOverId] = useState<number | null>(null);
+  const [groupKey, setGroupKey] = useState<GroupKey>(() => localStorage.getItem("yaws_group") || "__all__");
 
   useEffect(() => {
     let alive = true;
@@ -74,6 +76,10 @@ export function DashboardPage() {
   useEffect(() => {
     localStorage.setItem("yaws_sort_mode", sortMode);
   }, [sortMode]);
+
+  useEffect(() => {
+    localStorage.setItem("yaws_group", groupKey);
+  }, [groupKey]);
 
   useEffect(() => {
     if (draggingId == null) return;
@@ -159,7 +165,25 @@ export function DashboardPage() {
     }
   }
 
-  const rows = useMemo(() => machines, [machines]);
+  const groups = useMemo(() => {
+    const set = new Set<string>();
+    let hasUngrouped = false;
+    for (const m of machines) {
+      const g = (m.groupName ?? "").trim();
+      if (!g) hasUngrouped = true;
+      else set.add(g);
+    }
+    return {
+      named: Array.from(set).sort((a, b) => a.localeCompare(b, "zh-Hans-CN")),
+      hasUngrouped,
+    };
+  }, [machines]);
+
+  const rows = useMemo(() => {
+    if (groupKey === "__all__") return machines;
+    if (groupKey === "__ungrouped__") return machines.filter((m) => !(m.groupName ?? "").trim());
+    return machines.filter((m) => (m.groupName ?? "").trim() === groupKey);
+  }, [machines, groupKey]);
   const rowsSorted = useMemo(() => {
     if (sortMode !== "expiry") return rows;
     const next = rows.slice();
@@ -212,7 +236,7 @@ export function DashboardPage() {
         <div className="flex items-center gap-2">
           <div className="text-xs text-white/60">排序</div>
           <select
-            className="rounded-xl border border-white/15 bg-white/10 px-2 py-2 text-sm outline-none hover:bg-white/15"
+            className="rounded-xl border border-white/15 bg-white/10 px-2 py-2 text-sm text-white outline-none hover:bg-white/15"
             value={sortMode}
             onChange={(e) => setSortMode(e.target.value as SortMode)}
           >
@@ -247,6 +271,45 @@ export function DashboardPage() {
       {orderError ? (
         <div className="rounded-2xl border border-rose-400/40 bg-rose-500/10 p-3 text-sm">{orderError}</div>
       ) : null}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          className={`rounded-full border px-3 py-1 text-sm ${
+            groupKey === "__all__"
+              ? "border-sky-400/40 bg-sky-400/15 text-white"
+              : "border-white/15 bg-white/10 text-white/80 hover:bg-white/15"
+          }`}
+          onClick={() => setGroupKey("__all__")}
+        >
+          全部
+        </button>
+        {groups.hasUngrouped ? (
+          <button
+            className={`rounded-full border px-3 py-1 text-sm ${
+              groupKey === "__ungrouped__"
+                ? "border-sky-400/40 bg-sky-400/15 text-white"
+                : "border-white/15 bg-white/10 text-white/80 hover:bg-white/15"
+            }`}
+            onClick={() => setGroupKey("__ungrouped__")}
+          >
+            未分组
+          </button>
+        ) : null}
+        {groups.named.map((g) => (
+          <button
+            key={g}
+            className={`rounded-full border px-3 py-1 text-sm ${
+              groupKey === g
+                ? "border-sky-400/40 bg-sky-400/15 text-white"
+                : "border-white/15 bg-white/10 text-white/80 hover:bg-white/15"
+            }`}
+            onClick={() => setGroupKey(g)}
+            title={g}
+          >
+            {g}
+          </button>
+        ))}
+      </div>
 
       {viewMode === "cards" ? (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">

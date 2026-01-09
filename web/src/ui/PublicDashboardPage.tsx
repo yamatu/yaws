@@ -4,6 +4,7 @@ import { apiFetch, type PublicMachine } from "./api";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, pct } from "./format";
 
 type ViewMode = "cards" | "list";
+type GroupKey = string; // "__all__" | "__ungrouped__" | groupName
 
 export function PublicDashboardPage() {
   const [machines, setMachines] = useState<PublicMachine[]>([]);
@@ -15,6 +16,7 @@ export function PublicDashboardPage() {
     return v === "list" || v === "cards" ? (v as ViewMode) : "list";
   });
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const [groupKey, setGroupKey] = useState<GroupKey>(() => localStorage.getItem("yaws_public_group") || "__all__");
 
   useEffect(() => {
     let alive = true;
@@ -65,7 +67,30 @@ export function PublicDashboardPage() {
     localStorage.setItem("yaws_public_view_mode", viewMode);
   }, [viewMode]);
 
+  useEffect(() => {
+    localStorage.setItem("yaws_public_group", groupKey);
+  }, [groupKey]);
+
   const rows = useMemo(() => machines, [machines]);
+  const groups = useMemo(() => {
+    const set = new Set<string>();
+    let hasUngrouped = false;
+    for (const m of machines) {
+      const g = (m.groupName ?? "").trim();
+      if (!g) hasUngrouped = true;
+      else set.add(g);
+    }
+    return {
+      named: Array.from(set).sort((a, b) => a.localeCompare(b, "zh-Hans-CN")),
+      hasUngrouped,
+    };
+  }, [machines]);
+
+  const rowsFiltered = useMemo(() => {
+    if (groupKey === "__all__") return rows;
+    if (groupKey === "__ungrouped__") return rows.filter((m) => !(m.groupName ?? "").trim());
+    return rows.filter((m) => (m.groupName ?? "").trim() === groupKey);
+  }, [rows, groupKey]);
 
   return (
     <div className="mx-auto max-w-6xl px-5 py-5">
@@ -105,9 +130,48 @@ export function PublicDashboardPage() {
         <div className="mb-3 rounded-2xl border border-rose-400/40 bg-rose-500/10 p-3 text-sm">{error}</div>
       ) : null}
 
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <button
+          className={`rounded-full border px-3 py-1 text-sm ${
+            groupKey === "__all__"
+              ? "border-sky-400/40 bg-sky-400/15 text-white"
+              : "border-white/15 bg-white/10 text-white/80 hover:bg-white/15"
+          }`}
+          onClick={() => setGroupKey("__all__")}
+        >
+          全部
+        </button>
+        {groups.hasUngrouped ? (
+          <button
+            className={`rounded-full border px-3 py-1 text-sm ${
+              groupKey === "__ungrouped__"
+                ? "border-sky-400/40 bg-sky-400/15 text-white"
+                : "border-white/15 bg-white/10 text-white/80 hover:bg-white/15"
+            }`}
+            onClick={() => setGroupKey("__ungrouped__")}
+          >
+            未分组
+          </button>
+        ) : null}
+        {groups.named.map((g) => (
+          <button
+            key={g}
+            className={`rounded-full border px-3 py-1 text-sm ${
+              groupKey === g
+                ? "border-sky-400/40 bg-sky-400/15 text-white"
+                : "border-white/15 bg-white/10 text-white/80 hover:bg-white/15"
+            }`}
+            onClick={() => setGroupKey(g)}
+            title={g}
+          >
+            {g}
+          </button>
+        ))}
+      </div>
+
       {viewMode === "cards" ? (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {rows.map((m) => {
+          {rowsFiltered.map((m) => {
             const lm = m.latestMetric;
             const cpu = lm ? lm.cpuUsage : null;
             const memP = lm ? pct(lm.memUsed, lm.memTotal) : null;
@@ -208,7 +272,7 @@ export function PublicDashboardPage() {
         </div>
       ) : (
         <div className="grid gap-2">
-          {rows.map((m) => {
+          {rowsFiltered.map((m) => {
             const lm = m.latestMetric;
             const cpu = lm ? lm.cpuUsage : null;
             const memP = lm ? pct(lm.memUsed, lm.memTotal) : null;

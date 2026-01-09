@@ -35,6 +35,7 @@ app.get("/api/public/summary", (_req, res) => {
     .prepare(
       `SELECT
          m.id, m.name, m.online, m.last_seen_at as lastSeenAt,
+         m.group_name as groupName,
          m.expires_at as expiresAt,
          m.billing_cycle as billingCycle,
          m.auto_renew as autoRenew,
@@ -58,6 +59,7 @@ app.get("/api/public/summary", (_req, res) => {
       name: r.name,
       online: r.online,
       lastSeenAt: r.lastSeenAt ?? null,
+      groupName: r.groupName ?? "",
       expiresAt: r.expiresAt ?? null,
       billingCycle: r.billingCycle,
       autoRenew: r.autoRenew,
@@ -149,6 +151,7 @@ app.get("/api/machines", requireAuth, (_req, res) => {
       `SELECT
         id, name, notes,
         sort_order as sortOrder,
+        group_name as groupName,
         interval_sec as intervalSec,
         agent_ws_url as agentWsUrl,
         expires_at as expiresAt,
@@ -176,17 +179,19 @@ app.post("/api/machines", requireAuth, async (req, res) => {
     .prepare(
       `INSERT INTO machines (
          name, notes, sort_order, interval_sec,
+         group_name,
          agent_key_hash, agent_key_enc, agent_ws_url,
          expires_at, purchase_amount_cents, billing_cycle, auto_renew,
          created_at, updated_at, online
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
     )
     .run(
       body.data.name,
       body.data.notes ?? "",
       nextSortOrder,
       body.data.intervalSec,
+      (body.data.groupName ?? "").trim(),
       agentKeyHash,
       agentKeyEnc,
       body.data.agentWsUrl ?? "",
@@ -233,6 +238,7 @@ app.put("/api/machines/:id", requireAuth, async (req, res) => {
     `UPDATE machines
      SET name = COALESCE(?, name),
          notes = COALESCE(?, notes),
+         group_name = COALESCE(?, group_name),
          interval_sec = COALESCE(?, interval_sec),
          agent_key_hash = COALESCE(?, agent_key_hash),
          agent_key_enc = COALESCE(?, agent_key_enc),
@@ -246,6 +252,7 @@ app.put("/api/machines/:id", requireAuth, async (req, res) => {
   ).run(
     body.data.name ?? null,
     body.data.notes ?? null,
+    body.data.groupName ?? null,
     body.data.intervalSec ?? null,
     keyHash,
     keyEnc,
@@ -401,28 +408,30 @@ const LoginSchema = z.object({ username: z.string().min(1), password: z.string()
 const MachineCreateSchema = z.object({
   name: z.string().min(1),
   notes: z.string().optional(),
+  groupName: z.string().max(64).optional(),
   intervalSec: z.number().int().min(2).max(3600).default(5),
   agentKey: z.string().min(8).optional(),
   agentWsUrl: z.string().optional(),
   expiresAt: z.number().int().nullable().optional(),
   purchaseAmount: z.number().nonnegative().optional(),
-  billingCycle: z.enum(["month", "quarter", "year"]).optional(),
+  billingCycle: z.enum(["month", "quarter", "half_year", "year", "two_year", "three_year"]).optional(),
   autoRenew: z.boolean().optional(),
 });
 const MachineUpdateSchema = z.object({
   name: z.string().min(1).optional(),
   notes: z.string().optional(),
+  groupName: z.string().max(64).optional(),
   intervalSec: z.number().int().min(2).max(3600).optional(),
   agentKey: z.string().min(8).optional(),
   agentWsUrl: z.string().optional(),
   expiresAt: z.number().int().nullable().optional(),
   purchaseAmount: z.number().nonnegative().optional(),
-  billingCycle: z.enum(["month", "quarter", "year"]).optional(),
+  billingCycle: z.enum(["month", "quarter", "half_year", "year", "two_year", "three_year"]).optional(),
   autoRenew: z.boolean().optional(),
 });
 
 const RenewSchema = z.object({
-  cycle: z.enum(["month", "quarter", "year"]),
+  cycle: z.enum(["month", "quarter", "half_year", "year", "two_year", "three_year"]),
   count: z.number().int().min(1).max(36).default(1),
 });
 
@@ -448,9 +457,24 @@ function inferAgentWsUrl(req: Request) {
   return `${wsProto}://${host}/ws/agent`;
 }
 
-function addCycle(baseMs: number, cycle: "month" | "quarter" | "year", count: number) {
+function addCycle(
+  baseMs: number,
+  cycle: "month" | "quarter" | "half_year" | "year" | "two_year" | "three_year",
+  count: number
+) {
   const d = new Date(baseMs);
-  const months = cycle === "month" ? count : cycle === "quarter" ? count * 3 : count * 12;
+  const months =
+    cycle === "month"
+      ? count
+      : cycle === "quarter"
+        ? count * 3
+        : cycle === "half_year"
+          ? count * 6
+          : cycle === "year"
+            ? count * 12
+            : cycle === "two_year"
+              ? count * 24
+              : count * 36;
   d.setMonth(d.getMonth() + months);
   return d.getTime();
 }

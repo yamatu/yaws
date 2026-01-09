@@ -54,11 +54,12 @@ export type Machine = {
   name: string;
   notes: string;
   sortOrder: number;
+  groupName: string;
   intervalSec: number;
   agentWsUrl: string;
   expiresAt: number | null;
   purchaseAmountCents: number;
-  billingCycle: "month" | "quarter" | "year";
+  billingCycle: "month" | "quarter" | "half_year" | "year" | "two_year" | "three_year";
   autoRenew: 0 | 1;
   createdAt: number;
   updatedAt: number;
@@ -86,7 +87,8 @@ export type PublicMachine = {
   online: 0 | 1;
   lastSeenAt: number | null;
   expiresAt: number | null;
-  billingCycle: "month" | "quarter" | "year";
+  billingCycle: "month" | "quarter" | "half_year" | "year" | "two_year" | "three_year";
   autoRenew: 0 | 1;
+  groupName?: string;
   latestMetric: (Metric & { netRxBytes: number; netTxBytes: number; load1: number; load5: number; load15: number }) | null;
 };

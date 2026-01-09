@@ -35,10 +35,13 @@ export function formatMoneyCents(cents: number) {
   return `¥${v.toFixed(2)}`;
 }
 
-export function cycleLabel(cycle: "month" | "quarter" | "year") {
+export function cycleLabel(cycle: "month" | "quarter" | "half_year" | "year" | "two_year" | "three_year") {
   if (cycle === "month") return "月付";
   if (cycle === "quarter") return "季付";
-  return "年付";
+  if (cycle === "half_year") return "半年付";
+  if (cycle === "year") return "年付";
+  if (cycle === "two_year") return "两年付";
+  return "三年付";
 }
 
 export function calcRateBps(prev: { at: number; v: number } | null, cur: { at: number; v: number } | null) {
