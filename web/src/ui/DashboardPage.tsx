@@ -19,6 +19,7 @@ type LiveMetric = {
 };
 
 type ViewMode = "cards" | "list";
+type SortMode = "custom" | "expiry";
 
 export function DashboardPage() {
   const [machines, setMachines] = useState<Machine[]>([]);
@@ -28,6 +29,10 @@ export function DashboardPage() {
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const v = localStorage.getItem("yaws_view_mode");
     return v === "list" || v === "cards" ? (v as ViewMode) : "cards";
+  });
+  const [sortMode, setSortMode] = useState<SortMode>(() => {
+    const v = localStorage.getItem("yaws_sort_mode");
+    return v === "expiry" || v === "custom" ? (v as SortMode) : "custom";
   });
   const [orderSaving, setOrderSaving] = useState(false);
   const [orderError, setOrderError] = useState<string | null>(null);
@@ -65,6 +70,10 @@ export function DashboardPage() {
   useEffect(() => {
     localStorage.setItem("yaws_view_mode", viewMode);
   }, [viewMode]);
+
+  useEffect(() => {
+    localStorage.setItem("yaws_sort_mode", sortMode);
+  }, [sortMode]);
 
   useEffect(() => {
     if (draggingId == null) return;
@@ -151,6 +160,21 @@ export function DashboardPage() {
   }
 
   const rows = useMemo(() => machines, [machines]);
+  const rowsSorted = useMemo(() => {
+    if (sortMode !== "expiry") return rows;
+    const next = rows.slice();
+    next.sort((a, b) => {
+      const da = daysLeft(a.expiresAt);
+      const db = daysLeft(b.expiresAt);
+      const aHas = da != null;
+      const bHas = db != null;
+      if (!aHas && !bHas) return 0;
+      if (!aHas) return 1;
+      if (!bHas) return -1;
+      return da! - db!;
+    });
+    return next;
+  }, [rows, sortMode]);
 
   async function persistOrder(next: Machine[]) {
     setOrderSaving(true);
@@ -186,6 +210,17 @@ export function DashboardPage() {
           <div className="text-xs text-white/60">WS：{wsOk ? "已连接" : "未连接/重连中"}</div>
         </div>
         <div className="flex items-center gap-2">
+          <div className="text-xs text-white/60">排序</div>
+          <select
+            className="rounded-xl border border-white/15 bg-white/10 px-2 py-2 text-sm outline-none hover:bg-white/15"
+            value={sortMode}
+            onChange={(e) => setSortMode(e.target.value as SortMode)}
+          >
+            <option value="custom">自定义</option>
+            <option value="expiry">到期剩余天数（升序）</option>
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
           <button
             className={`rounded-xl border px-3 py-2 text-sm ${
               viewMode === "cards"
@@ -215,7 +250,7 @@ export function DashboardPage() {
 
       {viewMode === "cards" ? (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {rows.map((m) => {
+          {rowsSorted.map((m) => {
             const lm = latest[m.id];
             const cpu = lm?.cpuUsage ?? null;
             const memP = lm ? pct(lm.memUsed, lm.memTotal) : null;
@@ -298,7 +333,11 @@ export function DashboardPage() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
                         到期：{m.expiresAt ? new Date(m.expiresAt).toLocaleDateString() : "—"}
-                        {left != null ? `（${left} 天）` : ""}
+                        {left != null ? (
+                          <span className={`ml-1 ${left <= 10 ? "text-rose-300" : ""}`}>（{left} 天）</span>
+                        ) : (
+                          ""
+                        )}
                       </span>
                       <span className="rounded-full border border-white/15 bg-white/5 px-2 py-1">
                         {cycleLabel(m.billingCycle)} · {formatMoneyCents(m.purchaseAmountCents)}
@@ -327,15 +366,19 @@ export function DashboardPage() {
       ) : (
         <div className="grid gap-2">
           <div className="text-xs text-white/60">
-            提示：按住左侧拖拽图标调整顺序{orderSaving ? "（保存中...）" : ""}
+            提示：
+            {sortMode === "custom"
+              ? `按住左侧拖拽图标调整顺序${orderSaving ? "（保存中...）" : ""}`
+              : "当前为到期排序（不支持拖拽）"}
           </div>
-          {rows.map((m) => {
+          {rowsSorted.map((m) => {
             const lm = latest[m.id];
             const cpu = lm?.cpuUsage ?? null;
             const memP = lm ? pct(lm.memUsed, lm.memTotal) : null;
             const diskP = lm ? pct(lm.diskUsed, lm.diskTotal) : null;
             const left = daysLeft(m.expiresAt);
             const isExpanded = !!expanded[m.id];
+            const expiryClass = left != null && left <= 10 ? "text-rose-300" : "text-white/70";
             return (
               <div
                 key={m.id}
@@ -343,17 +386,21 @@ export function DashboardPage() {
                   dragOverId === m.id ? "border-sky-400/40 ring-2 ring-sky-400/30" : "border-white/15"
                 } ${draggingId === m.id ? "opacity-60" : ""}`}
                 onDragOver={(e) => {
+                  if (sortMode !== "custom") return;
                   if (dragIdRef.current == null) return;
                   e.preventDefault();
                 }}
                 onDragEnter={() => {
+                  if (sortMode !== "custom") return;
                   if (draggingId == null) return;
                   setDragOverId(m.id);
                 }}
                 onDragLeave={() => {
+                  if (sortMode !== "custom") return;
                   if (dragOverId === m.id) setDragOverId(null);
                 }}
                 onDrop={async (e) => {
+                  if (sortMode !== "custom") return;
                   e.preventDefault();
                   const dragId = dragIdRef.current;
                   dragIdRef.current = null;
@@ -369,10 +416,13 @@ export function DashboardPage() {
                 <div className="flex flex-col gap-2 md:flex-row md:items-center">
                   <div className="flex items-center gap-2 md:w-[420px]">
                     <button
-                      className="cursor-grab rounded-lg border border-white/15 bg-white/5 px-2 py-1 text-xs text-white/70 active:cursor-grabbing"
-                      draggable
+                      className={`rounded-lg border border-white/15 bg-white/5 px-2 py-1 text-xs text-white/70 ${
+                        sortMode === "custom" ? "cursor-grab active:cursor-grabbing" : "cursor-not-allowed opacity-50"
+                      }`}
+                      draggable={sortMode === "custom"}
                       onClick={(e) => e.stopPropagation()}
                       onDragStart={(e) => {
+                        if (sortMode !== "custom") return;
                         dragIdRef.current = m.id;
                         setDraggingId(m.id);
                         setDragOverId(null);
@@ -432,7 +482,7 @@ export function DashboardPage() {
                     </div>
                     <div className="text-white/70">
                       到期：{m.expiresAt ? new Date(m.expiresAt).toLocaleDateString() : "—"}
-                      {left != null ? `（${left}天）` : ""}
+                      {left != null ? <span className={`ml-1 ${expiryClass}`}>（{left}天）</span> : ""}
                     </div>
                   </div>
                 </div>
