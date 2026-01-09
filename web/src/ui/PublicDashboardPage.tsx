@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, type PublicMachine } from "./api";
-import { fmtTime, formatBytes, pct } from "./format";
+import { fmtTime, formatBps, formatBytes, pct } from "./format";
 
 export function PublicDashboardPage() {
   const [machines, setMachines] = useState<PublicMachine[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [speed, setSpeed] = useState<Record<number, { rxBps: number; txBps: number }>>({});
+  const lastRef = useRef<Record<number, { at: number; rx: number; tx: number }>>({});
 
   useEffect(() => {
     let alive = true;
@@ -14,6 +16,28 @@ export function PublicDashboardPage() {
       try {
         const res = await apiFetch<{ machines: PublicMachine[] }>("/api/public/summary", { signal: ac.signal });
         if (!alive) return;
+
+        const nextSpeed: Record<number, { rxBps: number; txBps: number }> = {};
+        const nextLast: Record<number, { at: number; rx: number; tx: number }> = { ...lastRef.current };
+        for (const m of res.machines) {
+          const lm = m.latestMetric;
+          if (!lm) continue;
+          const prev = lastRef.current[m.id];
+          const cur = { at: lm.at, rx: lm.netRxBytes ?? 0, tx: lm.netTxBytes ?? 0 };
+          nextLast[m.id] = cur;
+          if (prev && cur.at > prev.at) {
+            const dt = (cur.at - prev.at) / 1000;
+            nextSpeed[m.id] = {
+              rxBps: Math.max(0, (cur.rx - prev.rx) / dt),
+              txBps: Math.max(0, (cur.tx - prev.tx) / dt),
+            };
+          } else {
+            nextSpeed[m.id] = { rxBps: 0, txBps: 0 };
+          }
+        }
+        lastRef.current = nextLast;
+        setSpeed(nextSpeed);
+
         setMachines(res.machines);
         setError(null);
       } catch (e: any) {
@@ -54,6 +78,7 @@ export function PublicDashboardPage() {
           const cpu = lm ? lm.cpuUsage : null;
           const memP = lm ? pct(lm.memUsed, lm.memTotal) : null;
           const diskP = lm ? pct(lm.diskUsed, lm.diskTotal) : null;
+          const sp = speed[m.id] ?? { rxBps: 0, txBps: 0 };
           return (
             <div key={m.id} className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
               <div className="mb-2 flex items-center gap-2">
@@ -113,7 +138,8 @@ export function PublicDashboardPage() {
                 </div>
 
                 <div className="text-xs text-white/70">
-                  流量：{lm ? `RX ${formatBytes(lm.netRxBytes)} · TX ${formatBytes(lm.netTxBytes)}` : "—"}
+                  流量：{lm ? `RX ${formatBytes(lm.netRxBytes)} · TX ${formatBytes(lm.netTxBytes)}` : "—"} · 速度：
+                  {lm ? ` RX ${formatBps(sp.rxBps)} / TX ${formatBps(sp.txBps)}` : " —"}
                 </div>
               </div>
             </div>
