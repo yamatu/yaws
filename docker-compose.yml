@@ -1,0 +1,21 @@
+version: "2.2"
+
+services:
+  yaws:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+      DATABASE_PATH: "../data/yaws.sqlite"
+      JWT_SECRET: "qwertyuioppoiuytr"
+      AGENT_KEY_SECRET: "qwertyuioppoiuytr"
+      CORS_ORIGIN: "http://localhost:3001"
+      METRICS_RETENTION_DAYS: "30"
+      METRICS_PRUNE_INTERVAL_MIN: "10"
+      AGENT_GITHUB_REPO: "OWNER/REPO"
+      # Optional override:
+      # AGENT_RELEASE_BASE_URL: "https://github.com/OWNER/REPO/releases/latest/download"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

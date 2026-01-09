@@ -1,0 +1,10 @@
+node_modules
+**/node_modules
+dist
+**/dist
+data
+.DS_Store
+*.log
+agent/bin
+.git
+
