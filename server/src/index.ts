@@ -735,8 +735,11 @@ fi
 NEED_DOWNLOAD=0
 if [ ! -x "\$BIN" ] || [ "\$FORCE" -eq 1 ]; then
   NEED_DOWNLOAD=1
-elif [ -n "\$LATEST_TAG" ] && [ -n "\$INSTALLED_TAG" ] && [ "\$INSTALLED_TAG" != "\$LATEST_TAG" ]; then
-  NEED_DOWNLOAD=1
+elif [ -n "\$LATEST_TAG" ]; then
+  # If the installed agent doesn't support `-version`, treat it as outdated.
+  if [ -z "\$INSTALLED_TAG" ] || [ "\$INSTALLED_TAG" != "\$LATEST_TAG" ]; then
+    NEED_DOWNLOAD=1
+  fi
 fi
 
 TMP="\$(mktemp -d)"
