@@ -495,6 +495,7 @@ app.get("/api/machines/:id/install-script", requireAuth, (req, res) => {
     wsUrl,
     key,
     intervalSec,
+    agentRepo: env.AGENT_GITHUB_REPO,
     releaseBaseUrl: agentReleaseBaseUrl,
   });
 
@@ -640,6 +641,7 @@ function renderInstallScript(opts: {
   wsUrl: string;
   key: string;
   intervalSec: number;
+  agentRepo: string;
   releaseBaseUrl: string;
 }) {
   const cfg = {
@@ -651,6 +653,7 @@ function renderInstallScript(opts: {
   };
   const cfgJson = JSON.stringify(cfg, null, 2);
   const base = opts.releaseBaseUrl.replace(/\/+$/, "");
+  const repo = opts.agentRepo.trim();
 
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -662,6 +665,21 @@ if [ "\${EUID:-\$(id -u)}" -ne 0 ]; then
   echo "Please run as root." >&2
   exit 1
 fi
+
+FORCE=0
+CHECK_ONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=1 ;;
+    --check) CHECK_ONLY=1 ;;
+    -h|--help)
+      echo "Usage: $0 [--check] [--force]"
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 OS="\$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="\$(uname -m)"
@@ -680,20 +698,64 @@ BIN="/usr/local/bin/yaws-agent"
 CFG="/etc/yaws-agent.json"
 SVC="/etc/systemd/system/yaws-agent.service"
 
-echo "[1/4] Downloading agent: ${base}/\$ASSET"
+REPO="${repo}"
+BASE="${base}"
+
+LATEST_TAG=""
+if [ -n "$REPO" ]; then
+  API="https://api.github.com/repos/$REPO/releases/latest"
+  if command -v curl >/dev/null 2>&1; then
+    JSON="\$(curl -fsSL "\$API" 2>/dev/null || true)"
+  elif command -v wget >/dev/null 2>&1; then
+    JSON="\$(wget -qO- "\$API" 2>/dev/null || true)"
+  else
+    JSON=""
+  fi
+  if [ -n "\$JSON" ]; then
+    LATEST_TAG="\$(printf '%s' "\$JSON" | tr -d '\r' | grep -m1 '\"tag_name\"' | sed -E 's/.*\"tag_name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/')"
+  fi
+
+  # If BASE is a GitHub release URL, prefer downloading by tag so "latest" and version checks stay in sync.
+  if [ -n "\$LATEST_TAG" ] && printf '%s' "\$BASE" | grep -q '^https://github.com/'; then
+    BASE="https://github.com/$REPO/releases/download/\$LATEST_TAG"
+  fi
+fi
+
+INSTALLED_TAG=""
+if [ -x "\$BIN" ]; then
+  INSTALLED_TAG="\$("\$BIN" -version 2>/dev/null | head -n1 | tr -d '\r' || true)"
+fi
+
+if [ "\$CHECK_ONLY" -eq 1 ]; then
+  echo "installed=\${INSTALLED_TAG:-none}"
+  echo "latest=\${LATEST_TAG:-unknown}"
+  exit 0
+fi
+
+NEED_DOWNLOAD=0
+if [ ! -x "\$BIN" ] || [ "\$FORCE" -eq 1 ]; then
+  NEED_DOWNLOAD=1
+elif [ -n "\$LATEST_TAG" ] && [ -n "\$INSTALLED_TAG" ] && [ "\$INSTALLED_TAG" != "\$LATEST_TAG" ]; then
+  NEED_DOWNLOAD=1
+fi
+
 TMP="\$(mktemp -d)"
 trap 'rm -rf "\$TMP"' EXIT
 
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "${base}/\$ASSET" -o "\$TMP/yaws-agent"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO "\$TMP/yaws-agent" "${base}/\$ASSET"
+if [ "\$NEED_DOWNLOAD" -eq 1 ]; then
+  echo "[1/4] Downloading agent: \$BASE/\$ASSET (installed=\${INSTALLED_TAG:-none} latest=\${LATEST_TAG:-unknown})"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "\$BASE/\$ASSET" -o "\$TMP/yaws-agent"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "\$TMP/yaws-agent" "\$BASE/\$ASSET"
+  else
+    echo "Need curl or wget." >&2
+    exit 1
+  fi
+  install -m 0755 "\$TMP/yaws-agent" "\$BIN"
 else
-  echo "Need curl or wget." >&2
-  exit 1
+  echo "[1/4] Agent already latest: \${INSTALLED_TAG:-unknown}"
 fi
-
-install -m 0755 "\$TMP/yaws-agent" "\$BIN"
 
 echo "[2/4] Writing config: \$CFG"
 cat > "\$CFG" <<'JSON'

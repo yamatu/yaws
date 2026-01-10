@@ -3,7 +3,9 @@
 APP := yaws-agent
 PKG := ./cmd/yaws-agent
 BIN_DIR := bin
-LDFLAGS := -s -w
+VERSION ?= dev
+COMMIT ?= $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo "")
+LDFLAGS := -s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT)
 
 build:
 	mkdir -p $(BIN_DIR)
@@ -27,4 +29,3 @@ windows-amd64:
 
 clean:
 	rm -rf $(BIN_DIR)
-

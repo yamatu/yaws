@@ -61,6 +61,11 @@ type helloOkMsg struct {
 	IntervalSec int    `json:"intervalSec"`
 }
 
+var (
+	Version = "dev"
+	Commit  = ""
+)
+
 func main() {
 	var configPath string
 	var wsURL string
@@ -68,6 +73,7 @@ func main() {
 	var key string
 	var interval time.Duration
 	var diskPath string
+	var showVersion bool
 
 	flag.StringVar(&configPath, "config", "", "path to agent config json (download from controller)")
 	flag.StringVar(&wsURL, "url", "", "ws url, e.g. ws://host:3001/ws/agent")
@@ -75,7 +81,13 @@ func main() {
 	flag.StringVar(&key, "key", "", "agent key from controller (keep secret)")
 	flag.DurationVar(&interval, "interval", 5*time.Second, "metrics interval (server may override)")
 	flag.StringVar(&diskPath, "disk", "/", "disk path to measure, default /")
+	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println(Version)
+		return
+	}
 
 	if configPath != "" {
 		cfg, err := readConfig(configPath)

@@ -108,6 +108,7 @@ go build -ldflags="-s -w" -o bin/yaws-agent ./cmd/yaws-agent
 - 自动识别 `linux/amd64` 或 `linux/arm64`
 - 从 `https://github.com/<AGENT_GITHUB_REPO>/releases/latest/download/` 下载对应探针二进制
 - 写入 `/etc/yaws-agent.json` 并安装 systemd 服务（若无 systemd 则 fallback 为后台运行）
+- 会自动检测已安装探针版本，若不是最新 Release 则自动更新（可用 `--check` 只检查，`--force` 强制重装）
 
 注意：
 

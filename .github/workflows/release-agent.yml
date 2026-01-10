@@ -21,8 +21,8 @@ jobs:
       - name: Build agent (linux amd64/arm64)
         working-directory: agent
         run: |
-          make linux-amd64
-          make linux-arm64
+          make linux-amd64 VERSION=${{ github.ref_name }} COMMIT=${{ github.sha }}
+          make linux-arm64 VERSION=${{ github.ref_name }} COMMIT=${{ github.sha }}
 
       - name: Release assets
         uses: softprops/action-gh-release@v2
@@ -30,4 +30,3 @@ jobs:
           files: |
             agent/bin/yaws-agent-linux-amd64
             agent/bin/yaws-agent-linux-arm64
-
