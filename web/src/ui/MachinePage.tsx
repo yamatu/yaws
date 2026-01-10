@@ -127,6 +127,19 @@ export function MachinePage() {
     return `./yaws-agent -config yaws-agent-${machineId}.json`;
   }, [machineId]);
 
+  const sysRows = useMemo(() => {
+    if (!machine) return [];
+    const os = (machine.osVersion ? `${machine.osName ?? ""} ${machine.osVersion}` : machine.osName ?? "").trim();
+    return [
+      ["主机名", (machine.hostname ?? "").trim() || "—"],
+      ["系统", os || "—"],
+      ["内核", (machine.kernelVersion ?? "").trim() || "—"],
+      ["架构", (machine.arch ?? "").trim() || "—"],
+      ["CPU 型号", (machine.cpuModel ?? "").trim() || "—"],
+      ["核心数", machine.cpuCores ? String(machine.cpuCores) : "—"],
+    ] as Array<[string, string]>;
+  }, [machine]);
+
   if (!Number.isInteger(machineId) || machineId <= 0) {
     return <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">bad machine id</div>;
   }
@@ -186,6 +199,18 @@ export function MachinePage() {
         </div>
 
         {machine.notes ? <div className="mt-3 whitespace-pre-wrap text-sm text-white/70">{machine.notes}</div> : null}
+
+        <div className="mt-3 grid grid-cols-1 gap-2 text-sm md:grid-cols-2">
+          {sysRows.map(([k, v]) => (
+            <div
+              key={k}
+              className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-3 py-2"
+            >
+              <div className="text-white/60">{k}</div>
+              <div className="ml-3 text-right text-white/90">{v}</div>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">

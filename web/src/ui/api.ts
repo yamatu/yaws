@@ -109,13 +109,6 @@ export type PublicMachineDetail = {
     notes: string;
     sortOrder: number;
     groupName: string;
-    hostname: string;
-    osName: string;
-    osVersion: string;
-    arch: string;
-    kernelVersion: string;
-    cpuModel: string;
-    cpuCores: number;
     intervalSec: number;
     agentWsUrl: string;
     expiresAt: number | null;

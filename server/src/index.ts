@@ -92,13 +92,6 @@ app.get("/api/public/machines/:id", (req, res) => {
         id, name, notes,
         sort_order as sortOrder,
         group_name as groupName,
-        hostname,
-        os_name as osName,
-        os_version as osVersion,
-        arch,
-        kernel_version as kernelVersion,
-        cpu_model as cpuModel,
-        cpu_cores as cpuCores,
         interval_sec as intervalSec,
         agent_ws_url as agentWsUrl,
         expires_at as expiresAt,
@@ -107,8 +100,8 @@ app.get("/api/public/machines/:id", (req, res) => {
         auto_renew as autoRenew,
         created_at as createdAt,
         updated_at as updatedAt,
-        last_seen_at as lastSeenAt,
-        online
+       last_seen_at as lastSeenAt,
+       online
       FROM machines WHERE id = ?`
     )
     .get(id) as any | undefined;
@@ -271,6 +264,13 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
       notes: r.notes,
       sortOrder: r.sortOrder,
       groupName: r.groupName ?? "",
+      hostname: r.hostname ?? "",
+      osName: r.osName ?? "",
+      osVersion: r.osVersion ?? "",
+      arch: r.arch ?? "",
+      kernelVersion: r.kernelVersion ?? "",
+      cpuModel: r.cpuModel ?? "",
+      cpuCores: r.cpuCores ?? 0,
       intervalSec: r.intervalSec,
       agentWsUrl: r.agentWsUrl,
       expiresAt: r.expiresAt ?? null,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { apiFetch, type PublicMachineDetail } from "./api";
 import { daysLeft, fmtTime, formatBps, formatBytes, pct } from "./format";
@@ -56,18 +56,6 @@ export function PublicMachinePage() {
   const diskP = last ? pct(last.diskUsed, last.diskTotal) : null;
   const left = m ? daysLeft(m.expiresAt) : null;
 
-  const infoRows = useMemo(() => {
-    if (!m) return [];
-    return [
-      ["主机名", m.hostname || "—"],
-      ["系统", m.osVersion ? `${m.osName} ${m.osVersion}` : m.osName || "—"],
-      ["内核", m.kernelVersion || "—"],
-      ["架构", m.arch || "—"],
-      ["CPU 型号", m.cpuModel || "—"],
-      ["核心数", m.cpuCores ? String(m.cpuCores) : "—"],
-    ] as Array<[string, string]>;
-  }, [m]);
-
   if (!Number.isInteger(machineId) || machineId <= 0) {
     return (
       <div className="mx-auto max-w-6xl px-5 py-5">
@@ -119,15 +107,6 @@ export function PublicMachinePage() {
                   ""
                 )}
               </span>
-            </div>
-
-            <div className="grid grid-cols-1 gap-2 text-sm md:grid-cols-2">
-              {infoRows.map(([k, v]) => (
-                <div key={k} className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-                  <div className="text-white/60">{k}</div>
-                  <div className="ml-3 text-right text-white/90">{v}</div>
-                </div>
-              ))}
             </div>
           </div>
 
@@ -191,4 +170,3 @@ export function PublicMachinePage() {
     </div>
   );
 }
-
