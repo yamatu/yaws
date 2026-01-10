@@ -82,6 +82,57 @@ app.get("/api/public/summary", (_req, res) => {
   });
 });
 
+app.get("/api/public/machines/:id", (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
+
+  const m = db
+    .prepare(
+      `SELECT
+        id, name, notes,
+        sort_order as sortOrder,
+        group_name as groupName,
+        hostname,
+        os_name as osName,
+        os_version as osVersion,
+        arch,
+        kernel_version as kernelVersion,
+        cpu_model as cpuModel,
+        cpu_cores as cpuCores,
+        interval_sec as intervalSec,
+        agent_ws_url as agentWsUrl,
+        expires_at as expiresAt,
+        purchase_amount_cents as purchaseAmountCents,
+        billing_cycle as billingCycle,
+        auto_renew as autoRenew,
+        created_at as createdAt,
+        updated_at as updatedAt,
+        last_seen_at as lastSeenAt,
+        online
+      FROM machines WHERE id = ?`
+    )
+    .get(id) as any | undefined;
+  if (!m) return res.status(404).json({ error: "not_found" });
+
+  const metrics = db
+    .prepare(
+      `SELECT
+         at,
+         cpu_usage as cpuUsage,
+         mem_used as memUsed, mem_total as memTotal,
+         disk_used as diskUsed, disk_total as diskTotal,
+         net_rx_bytes as netRxBytes, net_tx_bytes as netTxBytes,
+         load_1 as load1, load_5 as load5, load_15 as load15
+       FROM metrics WHERE machine_id = ? ORDER BY at DESC LIMIT 300`
+    )
+    .all(id) as any[];
+
+  res.json({
+    machine: { ...m, expiresAt: m.expiresAt ?? null, lastSeenAt: m.lastSeenAt ?? null },
+    metrics: metrics.reverse(),
+  });
+});
+
 app.post("/api/auth/bootstrap", async (req, res) => {
   const body = BootstrapSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });
@@ -152,6 +203,13 @@ app.get("/api/machines", requireAuth, (_req, res) => {
         id, name, notes,
         sort_order as sortOrder,
         group_name as groupName,
+        hostname,
+        os_name as osName,
+        os_version as osVersion,
+        arch,
+        kernel_version as kernelVersion,
+        cpu_model as cpuModel,
+        cpu_cores as cpuCores,
         interval_sec as intervalSec,
         agent_ws_url as agentWsUrl,
         expires_at as expiresAt,
@@ -175,6 +233,13 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
          m.notes,
          m.sort_order as sortOrder,
          m.group_name as groupName,
+         m.hostname,
+         m.os_name as osName,
+         m.os_version as osVersion,
+         m.arch,
+         m.kernel_version as kernelVersion,
+         m.cpu_model as cpuModel,
+         m.cpu_cores as cpuCores,
          m.interval_sec as intervalSec,
          m.agent_ws_url as agentWsUrl,
          m.expires_at as expiresAt,

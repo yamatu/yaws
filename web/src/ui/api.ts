@@ -55,6 +55,13 @@ export type Machine = {
   notes: string;
   sortOrder: number;
   groupName: string;
+  hostname?: string;
+  osName?: string;
+  osVersion?: string;
+  arch?: string;
+  kernelVersion?: string;
+  cpuModel?: string;
+  cpuCores?: number;
   intervalSec: number;
   agentWsUrl: string;
   expiresAt: number | null;
@@ -93,4 +100,32 @@ export type PublicMachine = {
   autoRenew: 0 | 1;
   groupName?: string;
   latestMetric: (Metric & { netRxBytes: number; netTxBytes: number; load1: number; load5: number; load15: number }) | null;
+};
+
+export type PublicMachineDetail = {
+  machine: {
+    id: number;
+    name: string;
+    notes: string;
+    sortOrder: number;
+    groupName: string;
+    hostname: string;
+    osName: string;
+    osVersion: string;
+    arch: string;
+    kernelVersion: string;
+    cpuModel: string;
+    cpuCores: number;
+    intervalSec: number;
+    agentWsUrl: string;
+    expiresAt: number | null;
+    purchaseAmountCents: number;
+    billingCycle: "month" | "quarter" | "half_year" | "year" | "two_year" | "three_year";
+    autoRenew: 0 | 1;
+    createdAt: number;
+    updatedAt: number;
+    lastSeenAt: number | null;
+    online: 0 | 1;
+  };
+  metrics: Metric[];
 };

@@ -93,8 +93,30 @@ export function attachWebSockets(opts: {
           machineId = row.id;
           agents.set(machineId, { ws, machineId });
           opts.db
-            .prepare("UPDATE machines SET online = 1, last_seen_at = ? WHERE id = ?")
-            .run(Date.now(), machineId);
+            .prepare(
+              `UPDATE machines
+               SET online = 1,
+                   last_seen_at = ?,
+                   hostname = COALESCE(NULLIF(?, ''), hostname),
+                   os_name = COALESCE(NULLIF(?, ''), os_name),
+                   os_version = COALESCE(NULLIF(?, ''), os_version),
+                   arch = COALESCE(NULLIF(?, ''), arch),
+                   kernel_version = COALESCE(NULLIF(?, ''), kernel_version),
+                   cpu_model = COALESCE(NULLIF(?, ''), cpu_model),
+                   cpu_cores = COALESCE(?, cpu_cores)
+               WHERE id = ?`
+            )
+            .run(
+              Date.now(),
+              msg.hostname ?? "",
+              msg.osName ?? "",
+              msg.osVersion ?? "",
+              msg.arch ?? "",
+              msg.kernelVersion ?? "",
+              msg.cpuModel ?? "",
+              msg.cpuCores ?? null,
+              machineId
+            );
 
           broadcastUi({
             type: "machine_status",
@@ -195,6 +217,12 @@ const AgentMessageSchema = z.discriminatedUnion("type", [
     machineId: z.number().int().positive(),
     key: z.string().min(1),
     hostname: z.string().optional(),
+    osName: z.string().optional(),
+    osVersion: z.string().optional(),
+    arch: z.string().optional(),
+    kernelVersion: z.string().optional(),
+    cpuModel: z.string().optional(),
+    cpuCores: z.number().int().nonnegative().optional(),
   }),
   z.object({
     type: z.literal("metrics"),

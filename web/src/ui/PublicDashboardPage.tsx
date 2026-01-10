@@ -179,7 +179,11 @@ export function PublicDashboardPage() {
             const sp = speed[m.id] ?? { rxBps: 0, txBps: 0 };
             const left = daysLeft(m.expiresAt);
             return (
-              <div key={m.id} className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+              <Link
+                to={`/m/${m.id}`}
+                key={m.id}
+                className="block rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur hover:bg-white/15"
+              >
                 <div className="mb-2 flex items-center gap-2">
                   <div className="flex-1 font-extrabold">{m.name}</div>
                   <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-2 py-1 text-xs text-white/70">
@@ -254,7 +258,7 @@ export function PublicDashboardPage() {
                     </div>
                   </div>
                 </div>
-              </div>
+              </Link>
             );
           })}
 
@@ -284,7 +288,20 @@ export function PublicDashboardPage() {
                 <div className="flex flex-col gap-2 md:flex-row md:items-center">
                   <div className="flex items-center gap-2 md:w-[420px]">
                     <span className={`h-2 w-2 rounded-full ${m.online ? "bg-emerald-400" : "bg-white/25"}`} />
-                    <div className="flex-1 font-semibold">{m.name}</div>
+                    <Link
+                      className="flex-1 font-semibold hover:underline"
+                      to={`/m/${m.id}`}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {m.name}
+                    </Link>
+                    <Link
+                      className="rounded-xl border border-white/15 bg-white/10 px-2 py-1 text-xs hover:bg-white/15"
+                      to={`/m/${m.id}`}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      详情
+                    </Link>
                     <div className="rounded-xl border border-white/10 bg-white/5 px-2 py-1 text-xs text-white/60">
                       <svg
                         className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}

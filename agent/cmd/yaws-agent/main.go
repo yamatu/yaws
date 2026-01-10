@@ -22,6 +22,12 @@ type helloMsg struct {
 	MachineID int    `json:"machineId"`
 	Key       string `json:"key"`
 	Hostname  string `json:"hostname,omitempty"`
+	OSName    string `json:"osName,omitempty"`
+	OSVersion string `json:"osVersion,omitempty"`
+	Arch      string `json:"arch,omitempty"`
+	Kernel    string `json:"kernelVersion,omitempty"`
+	CPUModel  string `json:"cpuModel,omitempty"`
+	CPUCores  int    `json:"cpuCores,omitempty"`
 }
 
 type metricsMsg struct {
@@ -107,11 +113,12 @@ func main() {
 	defer cancel()
 
 	hostname, _ := os.Hostname()
+	sys := getSysInfo()
 
 	cpu := newCPUSampler()
 	backoff := 800 * time.Millisecond
 	for ctx.Err() == nil {
-		err := runOnce(ctx, wsURL, machineID, key, hostname, interval, diskPath, cpu)
+		err := runOnce(ctx, wsURL, machineID, key, hostname, sys, interval, diskPath, cpu)
 		if err == nil || ctx.Err() != nil {
 			break
 		}
@@ -131,6 +138,7 @@ func runOnce(
 	machineID int,
 	key string,
 	hostname string,
+	sys sysInfo,
 	interval time.Duration,
 	diskPath string,
 	cpu *cpuSampler,
@@ -150,7 +158,18 @@ func runOnce(
 	})
 	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
-	hello := helloMsg{Type: "hello", MachineID: machineID, Key: key, Hostname: hostname}
+	hello := helloMsg{
+		Type:      "hello",
+		MachineID: machineID,
+		Key:       key,
+		Hostname:  hostname,
+		OSName:    sys.OSName,
+		OSVersion: sys.OSVersion,
+		Arch:      sys.Arch,
+		Kernel:    sys.KernelVersion,
+		CPUModel:  sys.CPUModel,
+		CPUCores:  sys.CPUCores,
+	}
 	if err := conn.WriteJSON(hello); err != nil {
 		return err
 	}
