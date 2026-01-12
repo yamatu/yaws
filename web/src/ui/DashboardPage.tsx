@@ -142,6 +142,15 @@ export function DashboardPage() {
             );
           }
           if (ev.type === "metrics") {
+            if (ev.monthTraffic) {
+              setMachines((prev) =>
+                prev.map((m) =>
+                  m.id === ev.machineId
+                    ? { ...m, monthTraffic: { month: ev.monthTraffic!.month, rxBytes: ev.monthTraffic!.rxBytes, txBytes: ev.monthTraffic!.txBytes } }
+                    : m
+                )
+              );
+            }
             setLatest((prev) => {
               const prevOne = prev[ev.machineId];
               const at = ev.metric.at;
@@ -416,6 +425,9 @@ export function DashboardPage() {
                         流量：{lm?.netRxBytes != null ? `RX ${formatBytes(lm.netRxBytes)}` : "RX —"} ·{" "}
                         {lm?.netTxBytes != null ? `TX ${formatBytes(lm.netTxBytes)}` : "TX —"}
                       </span>
+                      <span className="rounded-full border border-teal-400/30 bg-teal-500/10 px-2 py-1 text-teal-200">
+                        本月：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
+                      </span>
                       <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-2 py-1 text-violet-200">
                         速度：{lm ? `RX ${formatBps(lm.rxBps ?? 0)} / TX ${formatBps(lm.txBps ?? 0)}` : "—"}
                       </span>
@@ -583,6 +595,9 @@ export function DashboardPage() {
                     <div className="text-cyan-200/90">
                       流量：{lm?.netRxBytes != null ? `RX ${formatBytes(lm.netRxBytes)}` : "RX —"} ·{" "}
                       {lm?.netTxBytes != null ? `TX ${formatBytes(lm.netTxBytes)}` : "TX —"}
+                    </div>
+                    <div className="text-teal-200/90">
+                      本月：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
                     </div>
                     <div className="text-emerald-200/90">
                       计费：{cycleLabel(m.billingCycle)} · {formatMoneyCents(m.purchaseAmountCents)}

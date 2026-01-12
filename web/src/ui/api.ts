@@ -103,6 +103,7 @@ export type Machine = {
   updatedAt: number;
   lastSeenAt: number | null;
   online: 0 | 1;
+  monthTraffic?: { month: string; rxBytes: number; txBytes: number };
 };
 
 export type MachineSummary = Machine & { latestMetric: Metric | null };
@@ -130,6 +131,7 @@ export type PublicMachine = {
   billingCycle: "month" | "quarter" | "half_year" | "year" | "two_year" | "three_year";
   autoRenew: 0 | 1;
   groupName?: string;
+  monthTraffic?: { month: string; rxBytes: number; txBytes: number };
   latestMetric: (Metric & { netRxBytes: number; netTxBytes: number; load1: number; load5: number; load15: number }) | null;
 };
 
@@ -150,6 +152,7 @@ export type PublicMachineDetail = {
     updatedAt: number;
     lastSeenAt: number | null;
     online: 0 | 1;
+    monthTraffic?: { month: string; rxBytes: number; txBytes: number };
   };
   metrics: Metric[];
 };

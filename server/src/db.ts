@@ -69,6 +69,30 @@ function migrate(db: Db) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_metrics_machine_at ON metrics(machine_id, at DESC);
+
+    CREATE TABLE IF NOT EXISTS traffic_monthly (
+      machine_id INTEGER NOT NULL,
+      month TEXT NOT NULL,
+      rx_bytes INTEGER NOT NULL DEFAULT 0,
+      tx_bytes INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY(machine_id, month),
+      FOREIGN KEY(machine_id) REFERENCES machines(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_traffic_monthly_month ON traffic_monthly(month);
+
+    CREATE TABLE IF NOT EXISTS traffic_monthly_state (
+      machine_id INTEGER PRIMARY KEY,
+      month TEXT NOT NULL,
+      last_at INTEGER NOT NULL DEFAULT 0,
+      last_rx_bytes INTEGER NOT NULL DEFAULT 0,
+      last_tx_bytes INTEGER NOT NULL DEFAULT 0,
+      usage_rx_bytes INTEGER NOT NULL DEFAULT 0,
+      usage_tx_bytes INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY(machine_id) REFERENCES machines(id) ON DELETE CASCADE
+    );
   `);
 
   ensureColumns(db, "machines", [

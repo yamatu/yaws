@@ -15,6 +15,7 @@ export type WsEvent =
         net?: { rxBytes: number; txBytes: number };
         load?: { l1: number; l5: number; l15: number };
       };
+      monthTraffic?: { month: string; rxBytes: number; txBytes: number; updatedAt?: number };
     }
   | { type: "error"; error: string };
 

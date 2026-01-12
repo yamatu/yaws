@@ -12,6 +12,9 @@ export function MachinePage() {
   const loc = useLocation() as any;
   const [machine, setMachine] = useState<Machine | null>(null);
   const [metrics, setMetrics] = useState<Metric[]>([]);
+  const [monthRows, setMonthRows] = useState<Array<{ month: string; rxBytes: number; txBytes: number; updatedAt: number }>>(
+    []
+  );
   const [setup, setSetup] = useState<{ wsUrl: string; agentKey: string | null; downloadConfigUrl: string } | null>(null);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");
@@ -51,6 +54,17 @@ export function MachinePage() {
         });
         if (!alive) return;
         setMetrics(ms.metrics);
+
+        try {
+          const tr = await apiFetch<{ rows: Array<{ month: string; rxBytes: number; txBytes: number; updatedAt: number }> }>(
+            `/api/machines/${machineId}/traffic-monthly?limit=12`,
+            { signal: ac.signal }
+          );
+          if (!alive) return;
+          setMonthRows(tr.rows);
+        } catch {
+          // ignore
+        }
         try {
           const s = await apiFetch<{
             machineId: number;
@@ -74,6 +88,31 @@ export function MachinePage() {
                 );
               }
               if (ev.type === "metrics" && ev.machineId === machineId) {
+                if (ev.monthTraffic) {
+                  setMachine((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          monthTraffic: { month: ev.monthTraffic!.month, rxBytes: ev.monthTraffic!.rxBytes, txBytes: ev.monthTraffic!.txBytes },
+                        }
+                      : prev
+                  );
+                  setMonthRows((prev) => {
+                    const i = prev.findIndex((r) => r.month === ev.monthTraffic!.month);
+                    const row = {
+                      month: ev.monthTraffic!.month,
+                      rxBytes: ev.monthTraffic!.rxBytes,
+                      txBytes: ev.monthTraffic!.txBytes,
+                      updatedAt: ev.monthTraffic!.updatedAt ?? Date.now(),
+                    };
+                    if (i >= 0) {
+                      const next = prev.slice();
+                      next[i] = row;
+                      return next;
+                    }
+                    return [row, ...prev].slice(0, 12);
+                  });
+                }
                 const m: Metric = {
                   at: ev.metric.at,
                   cpuUsage: ev.metric.cpu.usage,
@@ -196,6 +235,9 @@ export function MachinePage() {
             {cycleLabel(machine.billingCycle)} · {formatMoneyCents(machine.purchaseAmountCents)}
             {machine.autoRenew ? " · 自动续费" : ""}
           </span>
+          <span className="rounded-full border border-teal-400/30 bg-teal-500/10 px-2 py-1 text-teal-200">
+            本月流量：RX {formatBytes(machine.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(machine.monthTraffic?.txBytes ?? 0)}
+          </span>
         </div>
 
         {machine.notes ? <div className="mt-3 whitespace-pre-wrap text-sm text-white/70">{machine.notes}</div> : null}
@@ -211,6 +253,25 @@ export function MachinePage() {
             </div>
           ))}
         </div>
+
+        {monthRows.length ? (
+          <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">
+            <div className="mb-2 text-sm font-semibold">每月流量</div>
+            <div className="grid grid-cols-1 gap-2 text-sm md:grid-cols-2">
+              {monthRows.map((r) => (
+                <div
+                  key={r.month}
+                  className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                >
+                  <div className="text-white/60">{r.month}</div>
+                  <div className="ml-3 text-right text-white/90">
+                    RX {formatBytes(r.rxBytes)} · TX {formatBytes(r.txBytes)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">

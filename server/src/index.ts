@@ -31,7 +31,15 @@ app.use(
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+function monthKeyUtc(at: number) {
+  const d = new Date(at);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
 app.get("/api/public/summary", (_req, res) => {
+  const month = monthKeyUtc(Date.now());
   const rows = db
     .prepare(
       `SELECT
@@ -40,6 +48,9 @@ app.get("/api/public/summary", (_req, res) => {
          m.expires_at as expiresAt,
          m.billing_cycle as billingCycle,
          m.auto_renew as autoRenew,
+         tm.month as monthKey,
+         tm.rx_bytes as monthRxBytes,
+         tm.tx_bytes as monthTxBytes,
          x.at as metricAt,
          x.cpu_usage as cpuUsage,
          x.mem_used as memUsed, x.mem_total as memTotal,
@@ -47,12 +58,13 @@ app.get("/api/public/summary", (_req, res) => {
          x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
          x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
        FROM machines m
+       LEFT JOIN traffic_monthly tm ON tm.machine_id = m.id AND tm.month = ?
        LEFT JOIN metrics x ON x.id = (
          SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
        )
        ORDER BY m.sort_order ASC, m.id ASC`
     )
-    .all();
+    .all(month);
 
   res.json({
     machines: rows.map((r: any) => ({
@@ -64,6 +76,9 @@ app.get("/api/public/summary", (_req, res) => {
       expiresAt: r.expiresAt ?? null,
       billingCycle: r.billingCycle,
       autoRenew: r.autoRenew,
+      monthTraffic: r.monthKey
+        ? { month: r.monthKey, rxBytes: r.monthRxBytes ?? 0, txBytes: r.monthTxBytes ?? 0 }
+        : { month, rxBytes: 0, txBytes: 0 },
       latestMetric: r.metricAt
         ? {
             at: r.metricAt,
@@ -86,6 +101,7 @@ app.get("/api/public/summary", (_req, res) => {
 app.get("/api/public/machines/:id", (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
+  const month = monthKeyUtc(Date.now());
 
   const m = db
     .prepare(
@@ -93,6 +109,9 @@ app.get("/api/public/machines/:id", (req, res) => {
         id, name, notes,
         sort_order as sortOrder,
         group_name as groupName,
+        tm.month as monthKey,
+        tm.rx_bytes as monthRxBytes,
+        tm.tx_bytes as monthTxBytes,
         interval_sec as intervalSec,
         agent_ws_url as agentWsUrl,
         expires_at as expiresAt,
@@ -101,11 +120,13 @@ app.get("/api/public/machines/:id", (req, res) => {
         auto_renew as autoRenew,
         created_at as createdAt,
         updated_at as updatedAt,
-       last_seen_at as lastSeenAt,
-       online
-      FROM machines WHERE id = ?`
+        last_seen_at as lastSeenAt,
+        online
+      FROM machines
+      LEFT JOIN traffic_monthly tm ON tm.machine_id = machines.id AND tm.month = ?
+      WHERE machines.id = ?`
     )
-    .get(id) as any | undefined;
+    .get(month, id) as any | undefined;
   if (!m) return res.status(404).json({ error: "not_found" });
 
   const metrics = db
@@ -122,7 +143,15 @@ app.get("/api/public/machines/:id", (req, res) => {
     .all(id) as any[];
 
   res.json({
-    machine: { ...m, expiresAt: m.expiresAt ?? null, lastSeenAt: m.lastSeenAt ?? null },
+    machine: (() => {
+      const { monthKey, monthRxBytes, monthTxBytes, ...rest } = m;
+      return {
+        ...rest,
+        expiresAt: m.expiresAt ?? null,
+        lastSeenAt: m.lastSeenAt ?? null,
+        monthTraffic: monthKey ? { month: monthKey, rxBytes: monthRxBytes ?? 0, txBytes: monthTxBytes ?? 0 } : { month, rxBytes: 0, txBytes: 0 },
+      };
+    })(),
     metrics: metrics.reverse(),
   });
 });
@@ -320,6 +349,7 @@ app.put("/api/me/credentials", requireAuth, async (req, res) => {
 });
 
 app.get("/api/machines", requireAuth, (_req, res) => {
+  const month = monthKeyUtc(Date.now());
   const rows = db
     .prepare(
       `SELECT
@@ -333,6 +363,9 @@ app.get("/api/machines", requireAuth, (_req, res) => {
         kernel_version as kernelVersion,
         cpu_model as cpuModel,
         cpu_cores as cpuCores,
+        tm.month as monthKey,
+        tm.rx_bytes as monthRxBytes,
+        tm.tx_bytes as monthTxBytes,
         interval_sec as intervalSec,
         agent_ws_url as agentWsUrl,
         expires_at as expiresAt,
@@ -341,13 +374,24 @@ app.get("/api/machines", requireAuth, (_req, res) => {
         auto_renew as autoRenew,
         created_at as createdAt, updated_at as updatedAt,
         last_seen_at as lastSeenAt, online
-      FROM machines ORDER BY sort_order ASC, id ASC`
+      FROM machines
+      LEFT JOIN traffic_monthly tm ON tm.machine_id = machines.id AND tm.month = ?
+      ORDER BY sort_order ASC, id ASC`
     )
-    .all();
-  res.json({ machines: rows });
+    .all(month);
+  res.json({
+    machines: rows.map((m: any) => {
+      const { monthKey, monthRxBytes, monthTxBytes, ...rest } = m;
+      return {
+        ...rest,
+        monthTraffic: monthKey ? { month: monthKey, rxBytes: monthRxBytes ?? 0, txBytes: monthTxBytes ?? 0 } : { month, rxBytes: 0, txBytes: 0 },
+      };
+    }),
+  });
 });
 
 app.get("/api/machines/summary", requireAuth, (_req, res) => {
+  const month = monthKeyUtc(Date.now());
   const rows = db
     .prepare(
       `SELECT
@@ -363,6 +407,9 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
          m.kernel_version as kernelVersion,
          m.cpu_model as cpuModel,
          m.cpu_cores as cpuCores,
+         tm.month as monthKey,
+         tm.rx_bytes as monthRxBytes,
+         tm.tx_bytes as monthTxBytes,
          m.interval_sec as intervalSec,
          m.agent_ws_url as agentWsUrl,
          m.expires_at as expiresAt,
@@ -380,12 +427,13 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
          x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
          x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
        FROM machines m
+       LEFT JOIN traffic_monthly tm ON tm.machine_id = m.id AND tm.month = ?
        LEFT JOIN metrics x ON x.id = (
          SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
        )
        ORDER BY m.sort_order ASC, m.id ASC`
     )
-    .all();
+    .all(month);
 
   res.json({
     machines: rows.map((r: any) => ({
@@ -411,6 +459,9 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
       updatedAt: r.updatedAt,
       lastSeenAt: r.lastSeenAt ?? null,
       online: r.online,
+      monthTraffic: r.monthKey
+        ? { month: r.monthKey, rxBytes: r.monthRxBytes ?? 0, txBytes: r.monthTxBytes ?? 0 }
+        : { month, rxBytes: 0, txBytes: 0 },
       latestMetric: r.metricAt
         ? {
             at: r.metricAt,
@@ -428,6 +479,26 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
         : null,
     })),
   });
+});
+
+app.get("/api/machines/:id/traffic-monthly", requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
+  const limit = Math.max(1, Math.min(60, Number(req.query.limit ?? 12)));
+  const rows = db
+    .prepare(
+      `SELECT
+         month,
+         rx_bytes as rxBytes,
+         tx_bytes as txBytes,
+         updated_at as updatedAt
+       FROM traffic_monthly
+       WHERE machine_id = ?
+       ORDER BY month DESC
+       LIMIT ?`
+    )
+    .all(id, limit);
+  res.json({ rows });
 });
 
 app.post("/api/machines", requireAuth, async (req, res) => {

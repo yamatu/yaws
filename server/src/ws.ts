@@ -167,6 +167,8 @@ export function attachWebSockets(opts: {
             .prepare("UPDATE machines SET last_seen_at = ?, online = 1 WHERE id = ?")
             .run(at, machineId);
 
+          const monthTraffic = msg.net ? updateMonthlyTraffic(opts.db, machineId, at, netRx, netTx) : null;
+
           broadcastUi({
             type: "metrics",
             machineId,
@@ -178,6 +180,7 @@ export function attachWebSockets(opts: {
               net: msg.net,
               load: msg.load,
             },
+            ...(monthTraffic ? { monthTraffic } : {}),
           });
         }
       } catch {
@@ -205,6 +208,86 @@ export function attachWebSockets(opts: {
       client.ws.send(payload);
     }
   }
+}
+
+function monthKeyUtc(at: number) {
+  const d = new Date(at);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+function updateMonthlyTraffic(db: Db, machineId: number, at: number, netRx: number, netTx: number) {
+  const now = Date.now();
+  const month = monthKeyUtc(at);
+  const state = db
+    .prepare(
+      `SELECT
+         month,
+         last_at as lastAt,
+         last_rx_bytes as lastRx,
+         last_tx_bytes as lastTx,
+         usage_rx_bytes as usageRx,
+         usage_tx_bytes as usageTx
+       FROM traffic_monthly_state WHERE machine_id = ?`
+    )
+    .get(machineId) as
+    | { month: string; lastAt: number; lastRx: number; lastTx: number; usageRx: number; usageTx: number }
+    | undefined;
+
+  if (!state || state.month !== month) {
+    db.prepare(
+      `INSERT INTO traffic_monthly_state (machine_id, month, last_at, last_rx_bytes, last_tx_bytes, usage_rx_bytes, usage_tx_bytes, updated_at)
+       VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+       ON CONFLICT(machine_id) DO UPDATE SET
+         month = excluded.month,
+         last_at = excluded.last_at,
+         last_rx_bytes = excluded.last_rx_bytes,
+         last_tx_bytes = excluded.last_tx_bytes,
+         usage_rx_bytes = 0,
+         usage_tx_bytes = 0,
+         updated_at = excluded.updated_at`
+    ).run(machineId, month, at, netRx, netTx, now);
+
+    db.prepare(
+      `INSERT INTO traffic_monthly (machine_id, month, rx_bytes, tx_bytes, updated_at)
+       VALUES (?, ?, 0, 0, ?)
+       ON CONFLICT(machine_id, month) DO UPDATE SET updated_at = excluded.updated_at`
+    ).run(machineId, month, now);
+
+    return { month, rxBytes: 0, txBytes: 0, updatedAt: now };
+  }
+
+  if (at < state.lastAt) {
+    return { month, rxBytes: state.usageRx, txBytes: state.usageTx, updatedAt: state.lastAt };
+  }
+
+  let usageRx = state.usageRx;
+  let usageTx = state.usageTx;
+
+  if (netRx >= state.lastRx) usageRx += netRx - state.lastRx;
+  else usageRx += netRx;
+
+  if (netTx >= state.lastTx) usageTx += netTx - state.lastTx;
+  else usageTx += netTx;
+
+  db.prepare(
+    `UPDATE traffic_monthly_state
+     SET last_at = ?, last_rx_bytes = ?, last_tx_bytes = ?,
+         usage_rx_bytes = ?, usage_tx_bytes = ?, updated_at = ?
+     WHERE machine_id = ?`
+  ).run(at, netRx, netTx, usageRx, usageTx, now, machineId);
+
+  db.prepare(
+    `INSERT INTO traffic_monthly (machine_id, month, rx_bytes, tx_bytes, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(machine_id, month) DO UPDATE SET
+       rx_bytes = excluded.rx_bytes,
+       tx_bytes = excluded.tx_bytes,
+       updated_at = excluded.updated_at`
+  ).run(machineId, month, usageRx, usageTx, now);
+
+  return { month, rxBytes: usageRx, txBytes: usageTx, updatedAt: now };
 }
 
 const UiMessageSchema = z.discriminatedUnion("type", [
