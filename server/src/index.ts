@@ -30,6 +30,14 @@ app.use(
   })
 );
 
+let isRestoring = false;
+app.use((req, res, next) => {
+  if (!isRestoring) return next();
+  if (req.path === "/health") return next();
+  if (req.path === "/api/admin/restore") return next();
+  return res.status(503).json({ error: "restarting" });
+});
+
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 function monthKeyUtc(at: number) {
@@ -259,6 +267,12 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
 
   let size = 0;
   let aborted = false;
+  let shouldExitSoon = false;
+  const exitSoon = (code: number) => {
+    if (shouldExitSoon) return;
+    shouldExitSoon = true;
+    setTimeout(() => process.exit(code), 250).unref();
+  };
   const abort = (code: number, err: string) => {
     aborted = true;
     try {
@@ -278,6 +292,8 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
     } catch {
       // ignore
     }
+    // If we already closed SQLite during restore, exit to let Docker restart with a fresh connection.
+    if (isRestoring) exitSoon(1);
     return res.status(code).json({ error: err });
   };
 
@@ -343,6 +359,8 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
       const wal = `${dbPath}-wal`;
       const shm = `${dbPath}-shm`;
 
+      isRestoring = true;
+      exitSoon(0);
       try {
         db.close();
       } catch {
@@ -375,7 +393,7 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
       }
 
       res.json({ ok: true, restarting: true });
-      setTimeout(() => process.exit(0), 250).unref();
+      return;
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error("[restore] failed", e);
@@ -423,6 +441,8 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
         const wal = `${dbPath}-wal`;
         const shm = `${dbPath}-shm`;
 
+        isRestoring = true;
+        exitSoon(0);
         try {
           db.close();
         } catch {
@@ -455,7 +475,7 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
         }
 
         res.json({ ok: true, restarting: true });
-        setTimeout(() => process.exit(0), 250).unref();
+        return;
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error("[restore] failed", e);
