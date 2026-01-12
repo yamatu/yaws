@@ -4,6 +4,7 @@ import path from "node:path";
 import fs from "node:fs";
 import http from "node:http";
 import crypto from "node:crypto";
+import os from "node:os";
 import { loadEnv } from "./env.js";
 import { openDb } from "./db.js";
 import { authMiddleware } from "./http.js";
@@ -159,9 +160,138 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 const requireAuth = authMiddleware(env.JWT_SECRET);
+function requireAdmin(req: Request, res: express.Response, next: express.NextFunction) {
+  const user = (req as any).user as { id: number; username: string; role: string } | undefined;
+  if (!user) return res.status(401).json({ error: "missing_token" });
+  if (user.role !== "admin") return res.status(403).json({ error: "forbidden" });
+  return next();
+}
 
 app.get("/api/me", requireAuth, (req, res) => {
   return res.json({ user: (req as any).user });
+});
+
+app.get("/api/admin/backup", requireAuth, requireAdmin, async (_req, res) => {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const tmp = path.join(os.tmpdir(), `yaws-backup-${ts}.sqlite`);
+  try {
+    await db.backup(tmp);
+    res.setHeader("content-type", "application/octet-stream");
+    res.setHeader("content-disposition", `attachment; filename="yaws-backup-${ts}.sqlite"`);
+    fs.createReadStream(tmp)
+      .on("error", () => res.status(500).end("read_failed"))
+      .pipe(res)
+      .on("finish", () => {
+        try {
+          fs.unlinkSync(tmp);
+        } catch {
+          // ignore
+        }
+      });
+  } catch (e) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line no-console
+    console.error("[backup] failed", e);
+    res.status(500).json({ error: "backup_failed" });
+  }
+});
+
+app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
+  const ct = String(req.headers["content-type"] ?? "");
+  if (!ct.startsWith("application/octet-stream")) return res.status(415).json({ error: "bad_content_type" });
+
+  const maxBytes = 1024 * 1024 * 1024; // 1GB
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const tmp = path.join(os.tmpdir(), `yaws-restore-${ts}.sqlite`);
+  const out = fs.createWriteStream(tmp, { mode: 0o600 });
+
+  let size = 0;
+  let aborted = false;
+  const abort = (code: number, err: string) => {
+    aborted = true;
+    try {
+      req.destroy();
+    } catch {
+      // ignore
+    }
+    try {
+      out.destroy();
+    } catch {
+      // ignore
+    }
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // ignore
+    }
+    return res.status(code).json({ error: err });
+  };
+
+  req.on("data", (chunk: Buffer) => {
+    size += chunk.length;
+    if (size > maxBytes && !aborted) abort(413, "file_too_large");
+  });
+  req.on("error", () => {
+    if (!aborted) abort(400, "upload_failed");
+  });
+  out.on("error", () => {
+    if (!aborted) abort(500, "write_failed");
+  });
+
+  req.pipe(out);
+
+  out.on("finish", () => {
+    if (aborted) return;
+    try {
+      const fd = fs.openSync(tmp, "r");
+      const header = Buffer.alloc(16);
+      fs.readSync(fd, header, 0, 16, 0);
+      fs.closeSync(fd);
+      if (!header.toString("utf8").startsWith("SQLite format 3")) {
+        return abort(400, "not_sqlite");
+      }
+
+      const dbPath = env.DATABASE_PATH;
+      const bak = `${dbPath}.bak-${ts}`;
+
+      try {
+        db.close();
+      } catch {
+        // ignore
+      }
+
+      try {
+        if (fs.existsSync(dbPath)) fs.renameSync(dbPath, bak);
+        const wal = `${dbPath}-wal`;
+        const shm = `${dbPath}-shm`;
+        if (fs.existsSync(wal)) fs.renameSync(wal, `${bak}-wal`);
+        if (fs.existsSync(shm)) fs.renameSync(shm, `${bak}-shm`);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("[restore] backup current db failed", e);
+        return abort(500, "backup_current_failed");
+      }
+
+      try {
+        fs.renameSync(tmp, dbPath);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("[restore] replace db failed", e);
+        return abort(500, "replace_failed");
+      }
+
+      res.json({ ok: true, restarting: true });
+      setTimeout(() => process.exit(0), 250).unref();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[restore] failed", e);
+      return abort(500, "restore_failed");
+    }
+  });
 });
 
 app.put("/api/me/credentials", requireAuth, async (req, res) => {

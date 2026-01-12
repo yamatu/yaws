@@ -49,6 +49,37 @@ export async function apiFetchText(path: string, init?: RequestInit): Promise<st
   return await res.text();
 }
 
+export async function apiFetchBlob(
+  path: string,
+  init?: RequestInit
+): Promise<{ blob: Blob; filename?: string; contentType?: string }> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    },
+  });
+  if (!res.ok) {
+    let body: any = null;
+    try {
+      body = await res.json();
+    } catch {
+      // ignore
+    }
+    const err = new Error(body?.error ?? `http_${res.status}`);
+    (err as any).status = res.status;
+    throw err;
+  }
+  const cd = res.headers.get("content-disposition") ?? "";
+  const m = cd.match(/filename=\"?([^\";]+)\"?/i);
+  const filename = m?.[1];
+  const contentType = res.headers.get("content-type") ?? undefined;
+  const blob = await res.blob();
+  return { blob, filename, contentType };
+}
+
 export type Machine = {
   id: number;
   name: string;
