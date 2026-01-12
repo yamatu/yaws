@@ -1,134 +1,61 @@
 # YAWS (Yet Another Watchdog System)
 
-一个从零开始的轻量级“主控 + 被控探针”监控系统：
+轻量级的“主控 + 被控探针”监控系统（Node.js + React + SQLite + WebSocket + Go Agent），支持公开状态页与后台管理。
 
-- 前端：React（Vite）支持后台/公开页、卡片/列表、多分组
-- 后端：Node.js（Express）+ SQLite，提供 REST API + WebSocket
-- 探针：Golang（Linux 优先）通过 WebSocket 上报指标 + 系统信息
+## 主要特性
 
-## 功能概览
+**主控（Web）**
 
-- 登录后台：账号密码登录；支持在后台修改用户名/密码
-- 机器管理：新增/编辑/删除；支持自定义分组（例如地区/云厂商）
-- 排序与视图：
-  - 后台总览支持卡片/列表切换
-  - 列表模式支持拖拽排序并保存（自定义顺序）
-  - 支持按到期剩余天数升序排序（便于到期巡检）
-- 监控指标（实时/历史）：
-  - CPU/内存/磁盘（/）
-  - load(1/5/15)
-  - 网络流量（累计 RX/TX）与网速（按采样差值计算）
-- 服务器到期管理（站内展示）：到期时间、购买金额、计费周期（月/季/半年/年/两年/三年）、自动续费开关（仅展示）
-- 公开页面（无需登录）：
-  - `/`：公开状态页（支持分组与卡片/列表）
-  - `/m/:id`：公开详情页（指标 + 系统信息）
-- 探针部署：
-  - 下载配置文件运行（无需复制粘贴 agentKey）
-  - 生成“一键安装脚本”（root 直接执行，自动识别 Linux 架构并从 GitHub Releases 下载探针）
+- 账号密码登录；后台可修改用户名/密码
+- 机器管理：新增/编辑/删除；自定义分组（地区/云厂商/用途…）
+- 多视图：卡片/列表；列表支持点击展开详情
+- 排序：
+  - 自定义顺序（列表拖拽并保存）
+  - 到期剩余天数升序
+  - 仅离线机器（没有离线则显示为空）
+- 指标：CPU/内存/磁盘、load(1/5/15)、流量（累计 RX/TX）、网速（按差值计算）
+- 每月流量：自动按月统计 RX/TX（跨月自动归零重新统计）
+- 到期信息（站内展示）：到期时间、购买金额、计费周期（月/季/半年/年/两年/三年）、自动续费开关（仅展示）
+- 备份与恢复（后台）：
+  - 下载 SQLite 备份（支持 `.sqlite.gz` 压缩）
+  - 上传备份恢复（支持 `.sqlite` / `.sqlite.gz`），恢复后自动重启
+  - 恢复前会校验备份库结构与用户表，避免误恢复空库
+
+**公开页面（无需登录）**
+
+- `/`：公开状态页（分组 + 卡片/列表 + 详情展开）
+- `/m/:id`：公开详情页（指标、网速、本月流量等）
+- 公开页默认不展示主机名/系统版本/CPU 型号等敏感信息
+
+**探针（Agent）**
+
+- Golang，Linux 优先（静态编译，体积小）
+- WebSocket 连接主控：`/ws/agent`
+- 上报：
+  - 指标：CPU/内存/磁盘、load(1/5/15)、网络 RX/TX（累计）
+  - 系统信息：hostname、OS/Kernel、CPU 型号/核心数、架构（后台详情页可见）
+- 支持 `-version` 输出版本号（用于一键脚本判断是否最新）
 
 ## 目录结构
 
-- `server/`：Node.js 后端（API + WS + SQLite）
-- `web/`：React 前端
+- `server/`：Node.js 后端（REST API + WS + SQLite）
+- `web/`：React 前端（Vite）
 - `agent/`：Golang 探针
 
-## 端口与路由
+## 路由与端口
 
-- 后端 HTTP：默认 `3001`
+- HTTP：默认 `3001`
 - WebSocket：
   - UI：`/ws/ui?token=<jwt>`
   - Agent：`/ws/agent`
-- 前端（开发态）：默认 `5173`（Vite）
-- 生产态：后端会托管 `web/dist`，同域访问（推荐配 Nginx 做 TLS）
+- 生产环境：后端会托管 `web/dist` 静态资源，同域访问（推荐用 Nginx 做 TLS 反代）
 
-## 快速开始（开发）
+## 快速开始（Docker 推荐）
 
-1) 安装依赖
+1) 修改 `docker-compose.yml`（至少改这两项为 16+ 随机字符串）
 
-```bash
-npm install
-```
-
-2) 可选：配置后端环境变量
-
-复制 `server/.env.example` 为 `server/.env` 并修改 `JWT_SECRET`（至少 16 字符）。
-
-3) 启动后端与前端
-
-```bash
-npm run dev
-```
-
-4) 初始化管理员账号（首次）
-
-后端启动后调用：
-
-```bash
-curl -X POST http://localhost:3001/api/auth/bootstrap \
-  -H 'content-type: application/json' \
-  -d '{"username":"admin","password":"admin123"}'
-```
-
-5) 前端访问
-
-- `http://localhost:5173`
-
-## 使用指南（后台）
-
-- 后台入口：`/app`
-- 账号设置：`/app/settings`（修改用户名/密码，需要输入当前密码）
-- 新增机器：
-  - 名称、分组（可选）、上报间隔、探针连接地址（一般是 `wss://你的域名/ws/agent`）
-  - 到期日期、购买金额、计费周期（月/季/半年/年/两年/三年）、自动续费（仅展示）
-- 总览：
-  - 分组筛选：顶部分组按钮（全部/未分组/自定义分组）
-  - 视图：卡片/列表切换
-  - 排序：自定义 / 到期升序
-  - 列表模式：按住左侧拖拽图标可调整顺序并保存
-
-## 运行探针（Linux）
-
-推荐方式：在后台机器详情页下载 `yaws-agent-<id>.json`，然后在被控机上运行：
-
-```bash
-cd agent
-go build -ldflags="-s -w" -o bin/yaws-agent ./cmd/yaws-agent
-./bin/yaws-agent -config yaws-agent-<id>.json
-```
-
-探针会上报：
-
-- 系统信息：系统类型/版本、内核版本、架构、CPU 型号、核心数、hostname
-- 指标：CPU/内存/磁盘、load(1/5/15)、网络流量 RX/TX（累计）
-
-## 一键安装脚本（推荐）
-
-后台机器详情页点击“生成一键安装脚本”，复制到被控端 root 执行即可：
-
-- 自动识别 `linux/amd64` 或 `linux/arm64`
-- 从 `https://github.com/<AGENT_GITHUB_REPO>/releases/latest/download/` 下载对应探针二进制
-- 写入 `/etc/yaws-agent.json` 并安装 systemd 服务（若无 systemd 则 fallback 为后台运行）
-- 会自动检测已安装探针版本，若不是最新 Release 则自动更新（可用 `--check` 只检查，`--force` 强制重装）
-
-注意：
-
-- 需要你在 GitHub Releases 中存在 `yaws-agent-linux-amd64` / `yaws-agent-linux-arm64` 两个资源文件
-- 生产环境建议配 `wss://`，并确保被控端能访问主控域名
-
-## 生产部署（简版）
-
-```bash
-npm run build
-npm run start
-```
-
-后端会在 `server/` 内启动，并在可用时托管 `web/dist` 静态资源。
-
-## Docker 部署
-
-1) 修改 `docker-compose.yml` 里的 `JWT_SECRET` / `AGENT_KEY_SECRET`（至少 16 字符）
-
-可选：调整指标保留时间（默认 30 天），见 `server/.env.example` 的 `METRICS_RETENTION_DAYS`。
+- `JWT_SECRET`
+- `AGENT_KEY_SECRET`
 
 2) 启动
 
@@ -147,22 +74,28 @@ curl -X POST http://localhost:3001/api/auth/bootstrap \
 4) 访问
 
 - 公共状态页：`http://localhost:3001/`
-- 后台登录：`http://localhost:3001/login`（登录后进入 `/app`）
+- 后台登录：`http://localhost:3001/login`
 
-## 反向代理（Nginx，支持 WebSocket）
+数据默认挂载到宿主机 `./data/`（SQLite 文件），升级/重启不会丢数据。
 
-如果你要用域名 + HTTPS（wss），Nginx 需要对 `/ws/` 做 WebSocket Upgrade：
+## 反向代理（Nginx，HTTPS + WebSocket + 大文件上传）
+
+恢复备份时会上传大文件，`client_max_body_size` 必须配置在 **443 的 server 块**（HTTPS 生效的那段），否则会 413。
+
+示例（仅示意关键点）：
 
 ```nginx
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 
-upstream yaws_backend { server 127.0.0.1:3001; }
+upstream yaws_backend { server 127.0.0.1:3001; keepalive 32; }
 
 server {
   listen 443 ssl http2;
   server_name example.com;
   # ssl_certificate /path/fullchain.cer;
   # ssl_certificate_key /path/example.com.key;
+
+  client_max_body_size 2048m;
 
   location ^~ /ws/ {
     proxy_pass http://yaws_backend;
@@ -172,6 +105,7 @@ server {
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
   }
 
   location / {
@@ -182,28 +116,77 @@ server {
 }
 ```
 
-## GitHub + 一键安装（探针）
+## 探针运行（推荐两种方式）
 
-- 探针一键安装脚本会从 `AGENT_GITHUB_REPO` 的 GitHub Releases 下载对应架构二进制（`yaws-agent-linux-amd64` / `yaws-agent-linux-arm64`）
-- 本仓库已包含 GitHub Actions：推送 tag（例如 `v0.1.0`）会自动构建并把探针二进制上传到 release 资源中（见 `.github/workflows/release-agent.yml`）
+### 方式 A：下载配置文件运行
 
-发布探针（推荐）：
+后台机器详情页下载 `yaws-agent-<id>.json`，在被控机运行：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+./yaws-agent -config yaws-agent-<id>.json
 ```
+
+### 方式 B：一键安装脚本（推荐）
+
+后台机器详情页点击“生成一键安装脚本”，复制到被控端 root 执行即可：
+
+- 自动识别 `linux/amd64` 或 `linux/arm64`
+- 从 GitHub Releases 下载 `yaws-agent-linux-amd64` / `yaws-agent-linux-arm64`
+- 写入 `/etc/yaws-agent.json` 并安装 systemd 服务（无 systemd 则 fallback 后台运行）
+- 自动检测是否最新版本；不最新则自动更新（`--check` 只检查，`--force` 强制重装）
+
+## 备份与恢复
+
+后台：`/app/settings` → “备份与恢复”
+
+- 下载备份：建议勾选压缩（`.sqlite.gz`），体积更小，不容易触发反代/平台的上传限制
+- 恢复备份：上传 `.sqlite` 或 `.sqlite.gz`，服务会自动重启；恢复期间其它接口会返回 `503 restarting`
+
+如果你使用了 Cloudflare 之类的代理，请注意其上传大小限制（常见 100MB），优先使用 `.sqlite.gz` 或临时切灰云。
+
+## 数据与磁盘占用
+
+- 指标数据会持续写入 SQLite（`metrics` 表），默认保留 `30` 天并自动清理（见 `METRICS_RETENTION_DAYS`）
+- 每月流量统计写入 `traffic_monthly`（按月汇总，体积很小）
+
+## GitHub Releases（探针发布）
+
+本仓库包含 GitHub Actions：推送 `v*` tag 会自动构建并上传探针二进制到 Release（见 `.github/workflows/release-agent.yml`）。
+
+```bash
+git tag v0.1.2
+git push origin v0.1.2
+```
+
+## 开发（本地）
+
+```bash
+npm install
+npm run dev
+```
+
+默认：
+
+- Web 开发端口：`http://localhost:5173`
+- API/WS：`http://localhost:3001`
 
 ## 环境变量（后端）
 
 见 `server/.env.example`，常用项：
 
 - `PORT`：HTTP 端口（默认 `3001`）
-- `DATABASE_PATH`：SQLite 路径（默认 `./data/yaws.sqlite`）
+- `DATABASE_PATH`：SQLite 路径（Docker 推荐用 `../data/yaws.sqlite` 或容器内绝对路径 `/app/data/yaws.sqlite`）
 - `JWT_SECRET`：JWT 密钥（至少 16 字符）
-- `AGENT_KEY_SECRET`：用于加密保存 agentKey（可选，建议设置，至少 16 字符）
-- `CORS_ORIGIN`：开发时跨域来源；生产推荐同域（Nginx 反代后可不需要）
+- `AGENT_KEY_SECRET`：用于加密保存 agentKey（可选但强烈建议，至少 16 字符）
+- `CORS_ORIGIN`：开发时跨域来源；生产同域可不需要
 - `METRICS_RETENTION_DAYS`：指标保留天数（默认 30）
 - `METRICS_PRUNE_INTERVAL_MIN`：清理频率（默认 10 分钟）
+- `ADMIN_RESTORE_MAX_MB`：后台“恢复备份”上传上限（MB，默认 2048）
 - `AGENT_GITHUB_REPO`：GitHub 仓库（例如 `yamatu/yaws`）
 - `AGENT_RELEASE_BASE_URL`：Release 下载前缀（可选，默认 `releases/latest/download`）
+
+## 排错速查
+
+- `413 Content Too Large`：检查 Nginx 的 `client_max_body_size` 是否配置在 **443 server**；或平台/代理限制（优先用 `.sqlite.gz`）。
+- `cannot execute binary file: Exec format error`：探针架构不匹配（amd64/arm64），用一键脚本会自动选择正确架构。
+- 恢复后页面空：容器未重启/仍读旧库时，重启容器即可；日志会打印 `[db] ... users=... machines=... metrics=...` 便于确认。
