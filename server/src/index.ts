@@ -105,26 +105,26 @@ app.get("/api/public/machines/:id", (req, res) => {
 
   const m = db
     .prepare(
-      `SELECT
-        id, name, notes,
-        sort_order as sortOrder,
-        group_name as groupName,
-        tm.month as monthKey,
-        tm.rx_bytes as monthRxBytes,
-        tm.tx_bytes as monthTxBytes,
-        interval_sec as intervalSec,
-        agent_ws_url as agentWsUrl,
-        expires_at as expiresAt,
-        purchase_amount_cents as purchaseAmountCents,
-        billing_cycle as billingCycle,
-        auto_renew as autoRenew,
-        created_at as createdAt,
-        updated_at as updatedAt,
-        last_seen_at as lastSeenAt,
-        online
-      FROM machines
-      LEFT JOIN traffic_monthly tm ON tm.machine_id = machines.id AND tm.month = ?
-      WHERE machines.id = ?`
+	      `SELECT
+	        id, name, notes,
+	        sort_order as sortOrder,
+	        group_name as groupName,
+	        tm.month as monthKey,
+	        tm.rx_bytes as monthRxBytes,
+	        tm.tx_bytes as monthTxBytes,
+	        interval_sec as intervalSec,
+	        agent_ws_url as agentWsUrl,
+	        expires_at as expiresAt,
+	        purchase_amount_cents as purchaseAmountCents,
+	        billing_cycle as billingCycle,
+	        auto_renew as autoRenew,
+	        machines.created_at as createdAt,
+	        machines.updated_at as updatedAt,
+	        last_seen_at as lastSeenAt,
+	        online
+	      FROM machines
+	      LEFT JOIN traffic_monthly tm ON tm.machine_id = machines.id AND tm.month = ?
+	      WHERE machines.id = ?`
     )
     .get(month, id) as any | undefined;
   if (!m) return res.status(404).json({ error: "not_found" });
@@ -352,31 +352,32 @@ app.get("/api/machines", requireAuth, (_req, res) => {
   const month = monthKeyUtc(Date.now());
   const rows = db
     .prepare(
-      `SELECT
-        id, name, notes,
-        sort_order as sortOrder,
-        group_name as groupName,
-        hostname,
-        os_name as osName,
-        os_version as osVersion,
-        arch,
-        kernel_version as kernelVersion,
-        cpu_model as cpuModel,
-        cpu_cores as cpuCores,
-        tm.month as monthKey,
-        tm.rx_bytes as monthRxBytes,
-        tm.tx_bytes as monthTxBytes,
-        interval_sec as intervalSec,
-        agent_ws_url as agentWsUrl,
-        expires_at as expiresAt,
-        purchase_amount_cents as purchaseAmountCents,
-        billing_cycle as billingCycle,
-        auto_renew as autoRenew,
-        created_at as createdAt, updated_at as updatedAt,
-        last_seen_at as lastSeenAt, online
-      FROM machines
-      LEFT JOIN traffic_monthly tm ON tm.machine_id = machines.id AND tm.month = ?
-      ORDER BY sort_order ASC, id ASC`
+	      `SELECT
+	        id, name, notes,
+	        sort_order as sortOrder,
+	        group_name as groupName,
+	        hostname,
+	        os_name as osName,
+	        os_version as osVersion,
+	        arch,
+	        kernel_version as kernelVersion,
+	        cpu_model as cpuModel,
+	        cpu_cores as cpuCores,
+	        tm.month as monthKey,
+	        tm.rx_bytes as monthRxBytes,
+	        tm.tx_bytes as monthTxBytes,
+	        interval_sec as intervalSec,
+	        agent_ws_url as agentWsUrl,
+	        expires_at as expiresAt,
+	        purchase_amount_cents as purchaseAmountCents,
+	        billing_cycle as billingCycle,
+	        auto_renew as autoRenew,
+	        machines.created_at as createdAt,
+	        machines.updated_at as updatedAt,
+	        last_seen_at as lastSeenAt, online
+	      FROM machines
+	      LEFT JOIN traffic_monthly tm ON tm.machine_id = machines.id AND tm.month = ?
+	      ORDER BY sort_order ASC, id ASC`
     )
     .all(month);
   res.json({
