@@ -19,7 +19,7 @@ type LiveMetric = {
 };
 
 type ViewMode = "cards" | "list";
-type SortMode = "custom" | "expiry";
+type SortMode = "custom" | "expiry" | "offline";
 type GroupKey = string; // "__all__" | "__ungrouped__" | groupName
 
 export function DashboardPage() {
@@ -33,7 +33,7 @@ export function DashboardPage() {
   });
   const [sortMode, setSortMode] = useState<SortMode>(() => {
     const v = localStorage.getItem("yaws_sort_mode");
-    return v === "expiry" || v === "custom" ? (v as SortMode) : "custom";
+    return v === "expiry" || v === "custom" || v === "offline" ? (v as SortMode) : "custom";
   });
   const [orderSaving, setOrderSaving] = useState(false);
   const [orderError, setOrderError] = useState<string | null>(null);
@@ -201,9 +201,21 @@ export function DashboardPage() {
     if (groupKey === "__ungrouped__") return machines.filter((m) => !(m.groupName ?? "").trim());
     return machines.filter((m) => (m.groupName ?? "").trim() === groupKey);
   }, [machines, groupKey]);
+
+  const offlineCount = useMemo(() => rows.filter((m) => !m.online).length, [rows]);
+
+  const rowsMode = useMemo(() => {
+    if (sortMode !== "offline") return rows;
+    return rows.filter((m) => !m.online);
+  }, [rows, sortMode]);
+
   const rowsSorted = useMemo(() => {
-    if (sortMode !== "expiry") return rows;
-    const next = rows.slice();
+    if (sortMode === "custom") return rowsMode;
+    const next = rowsMode.slice();
+    if (sortMode === "offline") {
+      next.sort((a, b) => (a.lastSeenAt ?? 0) - (b.lastSeenAt ?? 0));
+      return next;
+    }
     next.sort((a, b) => {
       const da = daysLeft(a.expiresAt);
       const db = daysLeft(b.expiresAt);
@@ -215,7 +227,7 @@ export function DashboardPage() {
       return da! - db!;
     });
     return next;
-  }, [rows, sortMode]);
+  }, [rowsMode, sortMode]);
 
   async function persistOrder(next: MachineSummary[]) {
     setOrderSaving(true);
@@ -259,6 +271,7 @@ export function DashboardPage() {
           >
             <option value="custom">自定义</option>
             <option value="expiry">到期剩余天数（升序）</option>
+            <option value="offline">{offlineCount ? `仅离线（${offlineCount}）` : "仅离线"}</option>
           </select>
         </div>
         <div className="flex items-center gap-2">
@@ -327,6 +340,12 @@ export function DashboardPage() {
           </button>
         ))}
       </div>
+
+      {sortMode === "offline" && rowsSorted.length === 0 ? (
+        <div className="rounded-2xl border border-white/15 bg-white/10 p-4 text-sm text-white/70 backdrop-blur">
+          当前没有离线机器
+        </div>
+      ) : null}
 
       {viewMode === "cards" ? (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -440,7 +459,7 @@ export function DashboardPage() {
             提示：
             {sortMode === "custom"
               ? `按住左侧拖拽图标调整顺序${orderSaving ? "（保存中...）" : ""}`
-              : "当前为到期排序（不支持拖拽）"}
+              : "当前为筛选/到期排序（不支持拖拽）"}
           </div>
           {rowsSorted.map((m) => {
             const lm = latest[m.id];
