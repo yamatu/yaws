@@ -340,6 +340,8 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
 
       const dbPath = env.DATABASE_PATH;
       const bak = `${dbPath}.bak-${ts}`;
+      const wal = `${dbPath}-wal`;
+      const shm = `${dbPath}-shm`;
 
       try {
         db.close();
@@ -349,8 +351,6 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
 
       try {
         if (fs.existsSync(dbPath)) fs.renameSync(dbPath, bak);
-        const wal = `${dbPath}-wal`;
-        const shm = `${dbPath}-shm`;
         if (fs.existsSync(wal)) fs.renameSync(wal, `${bak}-wal`);
         if (fs.existsSync(shm)) fs.renameSync(shm, `${bak}-shm`);
       } catch (e) {
@@ -360,11 +360,18 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
       }
 
       try {
-        fs.renameSync(tmpDb, dbPath);
+        replaceFile(tmpDb, dbPath);
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error("[restore] replace db failed", e);
+        tryRollback(dbPath, bak);
         return abort(500, "replace_failed");
+      } finally {
+        try {
+          if (fs.existsSync(tmpUpload)) fs.unlinkSync(tmpUpload);
+        } catch {
+          // ignore
+        }
       }
 
       res.json({ ok: true, restarting: true });
@@ -375,10 +382,46 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
       return abort(500, "restore_failed");
     }
 
+    function replaceFile(src: string, dst: string) {
+      const dir = path.dirname(dst);
+      if (dir && dir !== "." && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      try {
+        fs.renameSync(src, dst);
+        return;
+      } catch (e: any) {
+        if (e?.code !== "EXDEV") throw e;
+      }
+      fs.copyFileSync(src, dst);
+      try {
+        fs.chmodSync(dst, 0o600);
+      } catch {
+        // ignore
+      }
+      fs.unlinkSync(src);
+    }
+
+    function tryRollback(dbPath: string, bak: string) {
+      try {
+        if (!fs.existsSync(dbPath) && fs.existsSync(bak)) fs.renameSync(bak, dbPath);
+      } catch {
+        // ignore
+      }
+      try {
+        const wal = `${dbPath}-wal`;
+        const shm = `${dbPath}-shm`;
+        if (!fs.existsSync(wal) && fs.existsSync(`${bak}-wal`)) fs.renameSync(`${bak}-wal`, wal);
+        if (!fs.existsSync(shm) && fs.existsSync(`${bak}-shm`)) fs.renameSync(`${bak}-shm`, shm);
+      } catch {
+        // ignore
+      }
+    }
+
     function doRestore(tmpDb: string) {
       try {
         const dbPath = env.DATABASE_PATH;
         const bak = `${dbPath}.bak-${ts}`;
+        const wal = `${dbPath}-wal`;
+        const shm = `${dbPath}-shm`;
 
         try {
           db.close();
@@ -388,8 +431,6 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
 
         try {
           if (fs.existsSync(dbPath)) fs.renameSync(dbPath, bak);
-          const wal = `${dbPath}-wal`;
-          const shm = `${dbPath}-shm`;
           if (fs.existsSync(wal)) fs.renameSync(wal, `${bak}-wal`);
           if (fs.existsSync(shm)) fs.renameSync(shm, `${bak}-shm`);
         } catch (e) {
@@ -399,10 +440,11 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
         }
 
         try {
-          fs.renameSync(tmpDb, dbPath);
+          replaceFile(tmpDb, dbPath);
         } catch (e) {
           // eslint-disable-next-line no-console
           console.error("[restore] replace db failed", e);
+          tryRollback(dbPath, bak);
           return abort(500, "replace_failed");
         } finally {
           try {
