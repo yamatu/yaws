@@ -233,7 +233,7 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
   const ct = String(req.headers["content-type"] ?? "");
   if (!ct.startsWith("application/octet-stream")) return res.status(415).json({ error: "bad_content_type" });
 
-  const maxBytes = 1024 * 1024 * 1024; // 1GB
+  const maxBytes = env.ADMIN_RESTORE_MAX_MB * 1024 * 1024;
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const tmp = path.join(os.tmpdir(), `yaws-restore-${ts}.sqlite`);
   const out = fs.createWriteStream(tmp, { mode: 0o600 });

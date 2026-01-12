@@ -12,6 +12,8 @@ export function SettingsPage() {
   const [backupLoading, setBackupLoading] = useState(false);
   const [restoreFile, setRestoreFile] = useState<File | null>(null);
   const [restoreLoading, setRestoreLoading] = useState(false);
+  const [restoreProgress, setRestoreProgress] = useState<number>(0);
+  const [restoreUploaded, setRestoreUploaded] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
 
@@ -155,6 +157,23 @@ export function SettingsPage() {
               accept=".sqlite,application/x-sqlite3,application/octet-stream"
               onChange={(e) => setRestoreFile(e.target.files?.[0] ?? null)}
             />
+            {restoreLoading ? (
+              <div className="mb-3">
+                <div className="mb-1 flex items-center justify-between text-xs text-white/60">
+                  <div>上传进度</div>
+                  <div>
+                    {Math.min(100, Math.max(0, Math.round(restoreProgress)))}% ·{" "}
+                    {restoreUploaded > 0 ? `${(restoreUploaded / 1024 / 1024).toFixed(1)} MB` : "—"}
+                  </div>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full border border-white/10 bg-black/30">
+                  <div
+                    className="h-full bg-sky-400/70 transition-all"
+                    style={{ width: `${Math.min(100, Math.max(0, restoreProgress))}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
             <button
               className="rounded-xl border border-rose-400/40 bg-rose-500/15 px-3 py-2 text-sm font-semibold hover:bg-rose-500/20 disabled:opacity-60"
               disabled={!restoreFile || restoreLoading}
@@ -162,29 +181,57 @@ export function SettingsPage() {
                 if (!restoreFile) return;
                 if (!confirm("确认恢复备份？恢复会覆盖当前数据，并导致服务重启。")) return;
                 setRestoreLoading(true);
+                setRestoreProgress(0);
+                setRestoreUploaded(0);
                 setError(null);
                 setOk(null);
+
                 try {
                   const token = getToken();
-                  const resp = await fetch("/api/admin/restore", {
-                    method: "POST",
-                    headers: {
-                      ...(token ? { authorization: `Bearer ${token}` } : {}),
-                      "content-type": "application/octet-stream",
-                    },
-                    body: restoreFile,
+                  if (!token) throw new Error("missing_token");
+
+                  const res = await new Promise<{ status: number; bodyText: string }>((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.open("POST", "/api/admin/restore", true);
+                    xhr.setRequestHeader("authorization", `Bearer ${token}`);
+                    xhr.setRequestHeader("content-type", "application/octet-stream");
+                    xhr.upload.onprogress = (ev) => {
+                      const total = ev.total || restoreFile.size || 0;
+                      const loaded = ev.loaded || 0;
+                      setRestoreUploaded(loaded);
+                      if (total > 0) setRestoreProgress((loaded / total) * 100);
+                    };
+                    xhr.onerror = () => reject(new Error("network_error"));
+                    xhr.onabort = () => reject(new Error("aborted"));
+                    xhr.onload = () => resolve({ status: xhr.status, bodyText: xhr.responseText || "" });
+                    xhr.send(restoreFile);
                   });
-                  let body: any = null;
-                  try {
-                    body = await resp.json();
-                  } catch {
-                    // ignore
+
+                  if (res.status >= 200 && res.status < 300) {
+                    setRestoreProgress(100);
+                    setOk("恢复成功，服务重启中...");
+                    setTimeout(() => window.location.reload(), 2500);
+                    return;
                   }
-                  if (!resp.ok) throw new Error(body?.error ?? `http_${resp.status}`);
-                  setOk("恢复成功，服务重启中...");
-                  setTimeout(() => window.location.reload(), 2500);
+
+                  let errCode = `http_${res.status}`;
+                  try {
+                    const j = JSON.parse(res.bodyText || "{}");
+                    if (j?.error) errCode = String(j.error);
+                  } catch {
+                    // ignore (nginx 413 may return HTML)
+                  }
+
+                  if (res.status === 413 || errCode === "file_too_large") {
+                    throw new Error("file_too_large");
+                  }
+                  throw new Error(errCode);
                 } catch (e: any) {
-                  setError(`恢复失败：${e?.message ?? "unknown"}`);
+                  setError(
+                    e?.message === "file_too_large"
+                      ? "恢复失败：文件太大（可能是 Nginx client_max_body_size 或后端 ADMIN_RESTORE_MAX_MB 限制）"
+                      : `恢复失败：${e?.message ?? "unknown"}`
+                  );
                 } finally {
                   setRestoreLoading(false);
                 }

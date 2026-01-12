@@ -13,6 +13,7 @@ services:
       CORS_ORIGIN: "http://localhost:3001"
       METRICS_RETENTION_DAYS: "30"
       METRICS_PRUNE_INTERVAL_MIN: "10"
+      ADMIN_RESTORE_MAX_MB: "2048"
       AGENT_GITHUB_REPO: "yamatu/yaws"
       # Optional override:
       # AGENT_RELEASE_BASE_URL: "https://github.com/OWNER/REPO/releases/latest/download"
