@@ -5,6 +5,7 @@ import fs from "node:fs";
 import http from "node:http";
 import crypto from "node:crypto";
 import os from "node:os";
+import zlib from "node:zlib";
 import { loadEnv } from "./env.js";
 import { openDb } from "./db.js";
 import { authMiddleware } from "./http.js";
@@ -200,26 +201,44 @@ app.get("/api/me", requireAuth, (req, res) => {
   return res.json({ user: (req as any).user });
 });
 
-app.get("/api/admin/backup", requireAuth, requireAdmin, async (_req, res) => {
+app.get("/api/admin/backup", requireAuth, requireAdmin, async (req, res) => {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const tmp = path.join(os.tmpdir(), `yaws-backup-${ts}.sqlite`);
+  const tmpDb = path.join(os.tmpdir(), `yaws-backup-${ts}.sqlite`);
+  const gzipOut = String((req.query as any)?.gzip ?? "") === "1";
+  const tmpOut = gzipOut ? `${tmpDb}.gz` : tmpDb;
   try {
-    await db.backup(tmp);
-    res.setHeader("content-type", "application/octet-stream");
-    res.setHeader("content-disposition", `attachment; filename="yaws-backup-${ts}.sqlite"`);
-    fs.createReadStream(tmp)
+    await db.backup(tmpDb);
+    if (gzipOut) {
+      await new Promise<void>((resolve, reject) => {
+        const gz = zlib.createGzip({ level: 6 });
+        const out = fs.createWriteStream(tmpOut, { mode: 0o600 });
+        fs.createReadStream(tmpDb).pipe(gz).pipe(out);
+        out.on("finish", () => resolve());
+        out.on("error", reject);
+        gz.on("error", reject);
+      });
+    }
+
+    res.setHeader("content-type", gzipOut ? "application/gzip" : "application/octet-stream");
+    res.setHeader(
+      "content-disposition",
+      `attachment; filename="yaws-backup-${ts}.sqlite${gzipOut ? ".gz" : ""}"`
+    );
+    fs.createReadStream(tmpOut)
       .on("error", () => res.status(500).end("read_failed"))
       .pipe(res)
       .on("finish", () => {
         try {
-          fs.unlinkSync(tmp);
+          if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
+          if (fs.existsSync(tmpDb)) fs.unlinkSync(tmpDb);
         } catch {
           // ignore
         }
       });
   } catch (e) {
     try {
-      fs.unlinkSync(tmp);
+      if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
+      if (fs.existsSync(tmpDb)) fs.unlinkSync(tmpDb);
     } catch {
       // ignore
     }
@@ -235,8 +254,8 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
 
   const maxBytes = env.ADMIN_RESTORE_MAX_MB * 1024 * 1024;
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const tmp = path.join(os.tmpdir(), `yaws-restore-${ts}.sqlite`);
-  const out = fs.createWriteStream(tmp, { mode: 0o600 });
+  const tmpUpload = path.join(os.tmpdir(), `yaws-restore-${ts}.upload`);
+  const out = fs.createWriteStream(tmpUpload, { mode: 0o600 });
 
   let size = 0;
   let aborted = false;
@@ -253,7 +272,9 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
       // ignore
     }
     try {
-      fs.unlinkSync(tmp);
+      if (fs.existsSync(tmpUpload)) fs.unlinkSync(tmpUpload);
+      const tmpDb = `${tmpUpload}.sqlite`;
+      if (fs.existsSync(tmpDb)) fs.unlinkSync(tmpDb);
     } catch {
       // ignore
     }
@@ -276,13 +297,46 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
   out.on("finish", () => {
     if (aborted) return;
     try {
-      const fd = fs.openSync(tmp, "r");
+      const head = Buffer.alloc(2);
+      const fd0 = fs.openSync(tmpUpload, "r");
+      fs.readSync(fd0, head, 0, 2, 0);
+      fs.closeSync(fd0);
+      const isGzip = head[0] === 0x1f && head[1] === 0x8b;
+
+      const tmpDb = isGzip ? `${tmpUpload}.sqlite` : tmpUpload;
+      if (isGzip) {
+        // Decompress to sqlite file.
+        const gunzip = zlib.createGunzip();
+        const outDb = fs.createWriteStream(tmpDb, { mode: 0o600 });
+        fs.createReadStream(tmpUpload).pipe(gunzip).pipe(outDb);
+        const done = () => {
+          try {
+            const fd = fs.openSync(tmpDb, "r");
+            const header = Buffer.alloc(16);
+            fs.readSync(fd, header, 0, 16, 0);
+            fs.closeSync(fd);
+            if (!header.toString("utf8").startsWith("SQLite format 3")) {
+              return abort(400, "not_sqlite");
+            }
+            doRestore(tmpDb);
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.error("[restore] validate failed", e);
+            return abort(400, "not_sqlite");
+          }
+        };
+        outDb.on("finish", done);
+        outDb.on("error", () => abort(500, "write_failed"));
+        gunzip.on("error", () => abort(400, "bad_gzip"));
+        return;
+      }
+
+      // Validate raw sqlite upload.
+      const fd = fs.openSync(tmpDb, "r");
       const header = Buffer.alloc(16);
       fs.readSync(fd, header, 0, 16, 0);
       fs.closeSync(fd);
-      if (!header.toString("utf8").startsWith("SQLite format 3")) {
-        return abort(400, "not_sqlite");
-      }
+      if (!header.toString("utf8").startsWith("SQLite format 3")) return abort(400, "not_sqlite");
 
       const dbPath = env.DATABASE_PATH;
       const bak = `${dbPath}.bak-${ts}`;
@@ -306,7 +360,7 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
       }
 
       try {
-        fs.renameSync(tmp, dbPath);
+        fs.renameSync(tmpDb, dbPath);
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error("[restore] replace db failed", e);
@@ -319,6 +373,52 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
       // eslint-disable-next-line no-console
       console.error("[restore] failed", e);
       return abort(500, "restore_failed");
+    }
+
+    function doRestore(tmpDb: string) {
+      try {
+        const dbPath = env.DATABASE_PATH;
+        const bak = `${dbPath}.bak-${ts}`;
+
+        try {
+          db.close();
+        } catch {
+          // ignore
+        }
+
+        try {
+          if (fs.existsSync(dbPath)) fs.renameSync(dbPath, bak);
+          const wal = `${dbPath}-wal`;
+          const shm = `${dbPath}-shm`;
+          if (fs.existsSync(wal)) fs.renameSync(wal, `${bak}-wal`);
+          if (fs.existsSync(shm)) fs.renameSync(shm, `${bak}-shm`);
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.error("[restore] backup current db failed", e);
+          return abort(500, "backup_current_failed");
+        }
+
+        try {
+          fs.renameSync(tmpDb, dbPath);
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.error("[restore] replace db failed", e);
+          return abort(500, "replace_failed");
+        } finally {
+          try {
+            if (fs.existsSync(tmpUpload)) fs.unlinkSync(tmpUpload);
+          } catch {
+            // ignore
+          }
+        }
+
+        res.json({ ok: true, restarting: true });
+        setTimeout(() => process.exit(0), 250).unref();
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("[restore] failed", e);
+        return abort(500, "restore_failed");
+      }
     }
   });
 });

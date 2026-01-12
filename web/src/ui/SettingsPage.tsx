@@ -10,10 +10,12 @@ export function SettingsPage() {
   const [newPassword, setNewPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [backupLoading, setBackupLoading] = useState(false);
+  const [backupGzip, setBackupGzip] = useState(true);
   const [restoreFile, setRestoreFile] = useState<File | null>(null);
   const [restoreLoading, setRestoreLoading] = useState(false);
   const [restoreProgress, setRestoreProgress] = useState<number>(0);
   const [restoreUploaded, setRestoreUploaded] = useState<number>(0);
+  const [restoreAttempted, setRestoreAttempted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
 
@@ -118,7 +120,15 @@ export function SettingsPage() {
         <div className="grid gap-3 md:grid-cols-2">
           <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
             <div className="mb-2 font-semibold">下载备份</div>
-            <div className="mb-3 text-xs text-white/60">点击后会下载 `yaws-backup-*.sqlite`。</div>
+            <div className="mb-3 text-xs text-white/60">点击后会下载 `yaws-backup-*.sqlite`（建议用压缩版更小）。</div>
+            <label className="mb-3 flex select-none items-center gap-2 text-xs text-white/70">
+              <input
+                type="checkbox"
+                checked={backupGzip}
+                onChange={(e) => setBackupGzip(e.target.checked)}
+              />
+              下载压缩备份（.sqlite.gz）
+            </label>
             <button
               className="rounded-xl border border-sky-400/40 bg-sky-400/15 px-3 py-2 text-sm font-semibold hover:bg-sky-400/20 disabled:opacity-60"
               disabled={backupLoading}
@@ -127,7 +137,7 @@ export function SettingsPage() {
                 setError(null);
                 setOk(null);
                 try {
-                  const { blob, filename } = await apiFetchBlob("/api/admin/backup");
+                  const { blob, filename } = await apiFetchBlob(`/api/admin/backup${backupGzip ? "?gzip=1" : ""}`);
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement("a");
                   a.href = url;
@@ -150,14 +160,26 @@ export function SettingsPage() {
 
           <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
             <div className="mb-2 font-semibold">恢复备份</div>
-            <div className="mb-3 text-xs text-white/60">上传 `.sqlite` 备份文件恢复数据。</div>
+            <div className="mb-3 text-xs text-white/60">
+              上传 `.sqlite` 或 `.sqlite.gz` 备份文件恢复数据（大文件建议先用压缩版）。
+            </div>
             <input
               className="mb-3 w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm outline-none focus:border-white/30"
               type="file"
-              accept=".sqlite,application/x-sqlite3,application/octet-stream"
-              onChange={(e) => setRestoreFile(e.target.files?.[0] ?? null)}
+              accept=".sqlite,.gz,.sqlite.gz,application/x-sqlite3,application/gzip,application/octet-stream"
+              onChange={(e) => {
+                setRestoreFile(e.target.files?.[0] ?? null);
+                setRestoreProgress(0);
+                setRestoreUploaded(0);
+                setRestoreAttempted(false);
+              }}
             />
-            {restoreLoading ? (
+            {restoreFile ? (
+              <div className="mb-3 text-xs text-white/60">
+                已选择：{restoreFile.name}（{(restoreFile.size / 1024 / 1024).toFixed(1)} MB）
+              </div>
+            ) : null}
+            {restoreLoading || restoreAttempted ? (
               <div className="mb-3">
                 <div className="mb-1 flex items-center justify-between text-xs text-white/60">
                   <div>上传进度</div>
@@ -183,6 +205,7 @@ export function SettingsPage() {
                 setRestoreLoading(true);
                 setRestoreProgress(0);
                 setRestoreUploaded(0);
+                setRestoreAttempted(true);
                 setError(null);
                 setOk(null);
 
@@ -229,7 +252,7 @@ export function SettingsPage() {
                 } catch (e: any) {
                   setError(
                     e?.message === "file_too_large"
-                      ? "恢复失败：文件太大（可能是 Nginx client_max_body_size 或后端 ADMIN_RESTORE_MAX_MB 限制）"
+                      ? "恢复失败：文件太大（可能是 Nginx client_max_body_size / 后端 ADMIN_RESTORE_MAX_MB / Cloudflare 100MB 限制；建议用 .sqlite.gz）"
                       : `恢复失败：${e?.message ?? "unknown"}`
                   );
                 } finally {
