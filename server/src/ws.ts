@@ -167,7 +167,7 @@ export function attachWebSockets(opts: {
             .prepare("UPDATE machines SET last_seen_at = ?, online = 1 WHERE id = ?")
             .run(at, machineId);
 
-          const monthTraffic = msg.net ? updateMonthlyTraffic(opts.db, machineId, at, netRx, netTx) : null;
+          const monthTraffic = msg.net ? updateBillingMonthTraffic(opts.db, machineId, at, netRx, netTx) : null;
 
           broadcastUi({
             type: "metrics",
@@ -208,6 +208,154 @@ export function attachWebSockets(opts: {
       client.ws.send(payload);
     }
   }
+}
+
+function daysInMonthUtc(year: number, month0: number) {
+  return new Date(Date.UTC(year, month0 + 1, 0)).getUTCDate();
+}
+
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function billingMonthBoundsUtc(atMs: number, anchorDay: number) {
+  const at = new Date(atMs);
+  let year = at.getUTCFullYear();
+  let month0 = at.getUTCMonth();
+  const a = Math.min(31, Math.max(1, anchorDay || 1));
+
+  const mkStart = (y: number, m0: number) => {
+    const d = Math.min(a, daysInMonthUtc(y, m0));
+    return Date.UTC(y, m0, d, 0, 0, 0, 0);
+  };
+  let startAt = mkStart(year, month0);
+  if (atMs < startAt) {
+    month0 -= 1;
+    if (month0 < 0) {
+      month0 = 11;
+      year -= 1;
+    }
+    startAt = mkStart(year, month0);
+  }
+
+  let endYear = year;
+  let endMonth0 = month0 + 1;
+  if (endMonth0 > 11) {
+    endMonth0 = 0;
+    endYear += 1;
+  }
+  const endAt = mkStart(endYear, endMonth0);
+  const s = new Date(startAt);
+  const periodKey = `${s.getUTCFullYear()}-${pad2(s.getUTCMonth() + 1)}-${pad2(s.getUTCDate())}`;
+  return { periodKey, startAt, endAt, anchorDay: a };
+}
+
+function updateBillingMonthTraffic(db: Db, machineId: number, at: number, netRx: number, netTx: number) {
+  const now = Date.now();
+  const state = db
+    .prepare(
+      `SELECT
+         anchor_day as anchorDay,
+         period_key as periodKey,
+         start_at as startAt,
+         end_at as endAt,
+         last_at as lastAt,
+         last_rx_bytes as lastRx,
+         last_tx_bytes as lastTx,
+         usage_rx_bytes as usageRx,
+         usage_tx_bytes as usageTx
+       FROM traffic_cycles_state WHERE machine_id = ?`
+    )
+    .get(machineId) as
+    | {
+        anchorDay: number;
+        periodKey: string;
+        startAt: number;
+        endAt: number;
+        lastAt: number;
+        lastRx: number;
+        lastTx: number;
+        usageRx: number;
+        usageTx: number;
+      }
+    | undefined;
+
+  let anchorDay = state?.anchorDay ?? 0;
+  if (!anchorDay) {
+    const row = db
+      .prepare("SELECT billing_anchor_day as anchorDay FROM machines WHERE id = ?")
+      .get(machineId) as { anchorDay: number } | undefined;
+    anchorDay = row?.anchorDay ?? 1;
+    if (!anchorDay) anchorDay = 1;
+  }
+
+  const bounds = billingMonthBoundsUtc(at, anchorDay);
+
+  if (!state || state.periodKey !== bounds.periodKey) {
+    db.prepare(
+      `INSERT INTO traffic_cycles_state (
+         machine_id, anchor_day, period_key, start_at, end_at,
+         last_at, last_rx_bytes, last_tx_bytes, usage_rx_bytes, usage_tx_bytes, updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
+       ON CONFLICT(machine_id) DO UPDATE SET
+         anchor_day = excluded.anchor_day,
+         period_key = excluded.period_key,
+         start_at = excluded.start_at,
+         end_at = excluded.end_at,
+         last_at = excluded.last_at,
+         last_rx_bytes = excluded.last_rx_bytes,
+         last_tx_bytes = excluded.last_tx_bytes,
+         usage_rx_bytes = 0,
+         usage_tx_bytes = 0,
+         updated_at = excluded.updated_at`
+    ).run(machineId, bounds.anchorDay, bounds.periodKey, bounds.startAt, bounds.endAt, at, netRx, netTx, now);
+
+    db.prepare(
+      `INSERT INTO traffic_cycles (machine_id, period_key, start_at, end_at, rx_bytes, tx_bytes, updated_at)
+       VALUES (?, ?, ?, ?, 0, 0, ?)
+       ON CONFLICT(machine_id, period_key) DO UPDATE SET
+         start_at = excluded.start_at,
+         end_at = excluded.end_at,
+         updated_at = excluded.updated_at`
+    ).run(machineId, bounds.periodKey, bounds.startAt, bounds.endAt, now);
+
+    return { month: bounds.periodKey, startAt: bounds.startAt, endAt: bounds.endAt, rxBytes: 0, txBytes: 0, updatedAt: now };
+  }
+
+  if (at < state.lastAt) {
+    return { month: state.periodKey, startAt: state.startAt, endAt: state.endAt, rxBytes: state.usageRx, txBytes: state.usageTx, updatedAt: state.lastAt };
+  }
+
+  let usageRx = state.usageRx;
+  let usageTx = state.usageTx;
+
+  if (netRx >= state.lastRx) usageRx += netRx - state.lastRx;
+  else usageRx += netRx;
+
+  if (netTx >= state.lastTx) usageTx += netTx - state.lastTx;
+  else usageTx += netTx;
+
+  db.prepare(
+    `UPDATE traffic_cycles_state
+     SET period_key = ?, start_at = ?, end_at = ?,
+         last_at = ?, last_rx_bytes = ?, last_tx_bytes = ?,
+         usage_rx_bytes = ?, usage_tx_bytes = ?, updated_at = ?
+     WHERE machine_id = ?`
+  ).run(bounds.periodKey, bounds.startAt, bounds.endAt, at, netRx, netTx, usageRx, usageTx, now, machineId);
+
+  db.prepare(
+    `INSERT INTO traffic_cycles (machine_id, period_key, start_at, end_at, rx_bytes, tx_bytes, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(machine_id, period_key) DO UPDATE SET
+       start_at = excluded.start_at,
+       end_at = excluded.end_at,
+       rx_bytes = excluded.rx_bytes,
+       tx_bytes = excluded.tx_bytes,
+       updated_at = excluded.updated_at`
+  ).run(machineId, bounds.periodKey, bounds.startAt, bounds.endAt, usageRx, usageTx, now);
+
+  return { month: bounds.periodKey, startAt: bounds.startAt, endAt: bounds.endAt, rxBytes: usageRx, txBytes: usageTx, updatedAt: now };
 }
 
 function monthKeyUtc(at: number) {

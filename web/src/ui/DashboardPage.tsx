@@ -426,7 +426,7 @@ export function DashboardPage() {
                         {lm?.netTxBytes != null ? `TX ${formatBytes(lm.netTxBytes)}` : "TX —"}
                       </span>
                       <span className="rounded-full border border-teal-400/30 bg-teal-500/10 px-2 py-1 text-teal-200">
-                        本月：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
+                        账期：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
                       </span>
                       <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-2 py-1 text-violet-200">
                         速度：{lm ? `RX ${formatBps(lm.rxBps ?? 0)} / TX ${formatBps(lm.txBps ?? 0)}` : "—"}
@@ -597,7 +597,7 @@ export function DashboardPage() {
                       {lm?.netTxBytes != null ? `TX ${formatBytes(lm.netTxBytes)}` : "TX —"}
                     </div>
                     <div className="text-teal-200/90">
-                      本月：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
+                      账期：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
                     </div>
                     <div className="text-emerald-200/90">
                       计费：{cycleLabel(m.billingCycle)} · {formatMoneyCents(m.purchaseAmountCents)}

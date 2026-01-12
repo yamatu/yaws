@@ -108,7 +108,7 @@ export function PublicMachinePage() {
                 )}
               </span>
               <span className="rounded-full border border-teal-400/30 bg-teal-500/10 px-2 py-1 text-xs text-teal-200">
-                本月：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
+                账期：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
               </span>
             </div>
           </div>

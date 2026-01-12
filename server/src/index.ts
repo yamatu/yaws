@@ -75,8 +75,48 @@ function monthKeyUtc(at: number) {
   return `${y}-${m}`;
 }
 
+function daysInMonthUtc(year: number, month0: number) {
+  return new Date(Date.UTC(year, month0 + 1, 0)).getUTCDate();
+}
+
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function billingMonthBoundsUtc(atMs: number, anchorDay: number) {
+  const at = new Date(atMs);
+  let year = at.getUTCFullYear();
+  let month0 = at.getUTCMonth();
+  const a = Math.min(31, Math.max(1, anchorDay || 1));
+
+  const mkStart = (y: number, m0: number) => {
+    const d = Math.min(a, daysInMonthUtc(y, m0));
+    return Date.UTC(y, m0, d, 0, 0, 0, 0);
+  };
+  let startAt = mkStart(year, month0);
+  if (atMs < startAt) {
+    month0 -= 1;
+    if (month0 < 0) {
+      month0 = 11;
+      year -= 1;
+    }
+    startAt = mkStart(year, month0);
+  }
+
+  let endYear = year;
+  let endMonth0 = month0 + 1;
+  if (endMonth0 > 11) {
+    endMonth0 = 0;
+    endYear += 1;
+  }
+  const endAt = mkStart(endYear, endMonth0);
+  const s = new Date(startAt);
+  const periodKey = `${s.getUTCFullYear()}-${pad2(s.getUTCMonth() + 1)}-${pad2(s.getUTCDate())}`;
+  return { periodKey, startAt, endAt, anchorDay: a };
+}
+
 app.get("/api/public/summary", (_req, res) => {
-  const month = monthKeyUtc(Date.now());
+  const now = Date.now();
   const rows = db
     .prepare(
       `SELECT
@@ -84,10 +124,13 @@ app.get("/api/public/summary", (_req, res) => {
          m.group_name as groupName,
          m.expires_at as expiresAt,
          m.billing_cycle as billingCycle,
+         m.billing_anchor_day as anchorDay,
          m.auto_renew as autoRenew,
-         tm.month as monthKey,
-         tm.rx_bytes as monthRxBytes,
-         tm.tx_bytes as monthTxBytes,
+         tc.period_key as periodKey,
+         tc.start_at as periodStartAt,
+         tc.end_at as periodEndAt,
+         tc.rx_bytes as periodRxBytes,
+         tc.tx_bytes as periodTxBytes,
          x.at as metricAt,
          x.cpu_usage as cpuUsage,
          x.mem_used as memUsed, x.mem_total as memTotal,
@@ -95,13 +138,13 @@ app.get("/api/public/summary", (_req, res) => {
          x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
          x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
        FROM machines m
-       LEFT JOIN traffic_monthly tm ON tm.machine_id = m.id AND tm.month = ?
+       LEFT JOIN traffic_cycles tc ON tc.machine_id = m.id AND tc.start_at <= ? AND tc.end_at > ?
        LEFT JOIN metrics x ON x.id = (
          SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
        )
        ORDER BY m.sort_order ASC, m.id ASC`
     )
-    .all(month);
+    .all(now, now);
 
   res.json({
     machines: rows.map((r: any) => ({
@@ -113,9 +156,19 @@ app.get("/api/public/summary", (_req, res) => {
       expiresAt: r.expiresAt ?? null,
       billingCycle: r.billingCycle,
       autoRenew: r.autoRenew,
-      monthTraffic: r.monthKey
-        ? { month: r.monthKey, rxBytes: r.monthRxBytes ?? 0, txBytes: r.monthTxBytes ?? 0 }
-        : { month, rxBytes: 0, txBytes: 0 },
+      monthTraffic: (() => {
+        if (r.periodKey) {
+          return {
+            month: r.periodKey,
+            startAt: r.periodStartAt,
+            endAt: r.periodEndAt,
+            rxBytes: r.periodRxBytes ?? 0,
+            txBytes: r.periodTxBytes ?? 0,
+          };
+        }
+        const b = billingMonthBoundsUtc(now, r.anchorDay ?? 1);
+        return { month: b.periodKey, startAt: b.startAt, endAt: b.endAt, rxBytes: 0, txBytes: 0 };
+      })(),
       latestMetric: r.metricAt
         ? {
             at: r.metricAt,
@@ -138,32 +191,35 @@ app.get("/api/public/summary", (_req, res) => {
 app.get("/api/public/machines/:id", (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
-  const month = monthKeyUtc(Date.now());
+  const now = Date.now();
 
   const m = db
     .prepare(
-	      `SELECT
-	        id, name, notes,
-	        sort_order as sortOrder,
-	        group_name as groupName,
-	        tm.month as monthKey,
-	        tm.rx_bytes as monthRxBytes,
-	        tm.tx_bytes as monthTxBytes,
-	        interval_sec as intervalSec,
-	        agent_ws_url as agentWsUrl,
-	        expires_at as expiresAt,
-	        purchase_amount_cents as purchaseAmountCents,
-	        billing_cycle as billingCycle,
-	        auto_renew as autoRenew,
-	        machines.created_at as createdAt,
-	        machines.updated_at as updatedAt,
-	        last_seen_at as lastSeenAt,
-	        online
-	      FROM machines
-	      LEFT JOIN traffic_monthly tm ON tm.machine_id = machines.id AND tm.month = ?
-	      WHERE machines.id = ?`
+      `SELECT
+        id, name, notes,
+        sort_order as sortOrder,
+        group_name as groupName,
+        billing_anchor_day as anchorDay,
+        tc.period_key as periodKey,
+        tc.start_at as periodStartAt,
+        tc.end_at as periodEndAt,
+        tc.rx_bytes as periodRxBytes,
+        tc.tx_bytes as periodTxBytes,
+        interval_sec as intervalSec,
+        agent_ws_url as agentWsUrl,
+        expires_at as expiresAt,
+        purchase_amount_cents as purchaseAmountCents,
+        billing_cycle as billingCycle,
+        auto_renew as autoRenew,
+        machines.created_at as createdAt,
+        machines.updated_at as updatedAt,
+        last_seen_at as lastSeenAt,
+        online
+      FROM machines
+      LEFT JOIN traffic_cycles tc ON tc.machine_id = machines.id AND tc.start_at <= ? AND tc.end_at > ?
+      WHERE machines.id = ?`
     )
-    .get(month, id) as any | undefined;
+    .get(now, now, id) as any | undefined;
   if (!m) return res.status(404).json({ error: "not_found" });
 
   const metrics = db
@@ -181,12 +237,15 @@ app.get("/api/public/machines/:id", (req, res) => {
 
   res.json({
     machine: (() => {
-      const { monthKey, monthRxBytes, monthTxBytes, ...rest } = m;
+      const { anchorDay, periodKey, periodStartAt, periodEndAt, periodRxBytes, periodTxBytes, ...rest } = m;
+      const b = billingMonthBoundsUtc(now, anchorDay ?? 1);
       return {
         ...rest,
         expiresAt: m.expiresAt ?? null,
         lastSeenAt: m.lastSeenAt ?? null,
-        monthTraffic: monthKey ? { month: monthKey, rxBytes: monthRxBytes ?? 0, txBytes: monthTxBytes ?? 0 } : { month, rxBytes: 0, txBytes: 0 },
+        monthTraffic: periodKey
+          ? { month: periodKey, startAt: periodStartAt, endAt: periodEndAt, rxBytes: periodRxBytes ?? 0, txBytes: periodTxBytes ?? 0 }
+          : { month: b.periodKey, startAt: b.startAt, endAt: b.endAt, rxBytes: 0, txBytes: 0 },
       };
     })(),
     metrics: metrics.reverse(),
@@ -552,50 +611,56 @@ app.put("/api/me/credentials", requireAuth, async (req, res) => {
 });
 
 app.get("/api/machines", requireAuth, (_req, res) => {
-  const month = monthKeyUtc(Date.now());
+  const now = Date.now();
   const rows = db
     .prepare(
-	      `SELECT
-	        id, name, notes,
-	        sort_order as sortOrder,
-	        group_name as groupName,
-	        hostname,
-	        os_name as osName,
-	        os_version as osVersion,
-	        arch,
-	        kernel_version as kernelVersion,
-	        cpu_model as cpuModel,
-	        cpu_cores as cpuCores,
-	        tm.month as monthKey,
-	        tm.rx_bytes as monthRxBytes,
-	        tm.tx_bytes as monthTxBytes,
-	        interval_sec as intervalSec,
-	        agent_ws_url as agentWsUrl,
-	        expires_at as expiresAt,
-	        purchase_amount_cents as purchaseAmountCents,
-	        billing_cycle as billingCycle,
-	        auto_renew as autoRenew,
-	        machines.created_at as createdAt,
-	        machines.updated_at as updatedAt,
-	        last_seen_at as lastSeenAt, online
-	      FROM machines
-	      LEFT JOIN traffic_monthly tm ON tm.machine_id = machines.id AND tm.month = ?
-	      ORDER BY sort_order ASC, id ASC`
+      `SELECT
+        id, name, notes,
+        sort_order as sortOrder,
+        group_name as groupName,
+        hostname,
+        os_name as osName,
+        os_version as osVersion,
+        arch,
+        kernel_version as kernelVersion,
+        cpu_model as cpuModel,
+        cpu_cores as cpuCores,
+        billing_anchor_day as anchorDay,
+        tc.period_key as periodKey,
+        tc.start_at as periodStartAt,
+        tc.end_at as periodEndAt,
+        tc.rx_bytes as periodRxBytes,
+        tc.tx_bytes as periodTxBytes,
+        interval_sec as intervalSec,
+        agent_ws_url as agentWsUrl,
+        expires_at as expiresAt,
+        purchase_amount_cents as purchaseAmountCents,
+        billing_cycle as billingCycle,
+        auto_renew as autoRenew,
+        machines.created_at as createdAt,
+        machines.updated_at as updatedAt,
+        last_seen_at as lastSeenAt, online
+      FROM machines
+      LEFT JOIN traffic_cycles tc ON tc.machine_id = machines.id AND tc.start_at <= ? AND tc.end_at > ?
+      ORDER BY sort_order ASC, id ASC`
     )
-    .all(month);
+    .all(now, now);
   res.json({
     machines: rows.map((m: any) => {
-      const { monthKey, monthRxBytes, monthTxBytes, ...rest } = m;
+      const { anchorDay, periodKey, periodStartAt, periodEndAt, periodRxBytes, periodTxBytes, ...rest } = m;
+      const b = billingMonthBoundsUtc(now, anchorDay ?? 1);
       return {
         ...rest,
-        monthTraffic: monthKey ? { month: monthKey, rxBytes: monthRxBytes ?? 0, txBytes: monthTxBytes ?? 0 } : { month, rxBytes: 0, txBytes: 0 },
+        monthTraffic: periodKey
+          ? { month: periodKey, startAt: periodStartAt, endAt: periodEndAt, rxBytes: periodRxBytes ?? 0, txBytes: periodTxBytes ?? 0 }
+          : { month: b.periodKey, startAt: b.startAt, endAt: b.endAt, rxBytes: 0, txBytes: 0 },
       };
     }),
   });
 });
 
 app.get("/api/machines/summary", requireAuth, (_req, res) => {
-  const month = monthKeyUtc(Date.now());
+  const now = Date.now();
   const rows = db
     .prepare(
       `SELECT
@@ -611,9 +676,12 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
          m.kernel_version as kernelVersion,
          m.cpu_model as cpuModel,
          m.cpu_cores as cpuCores,
-         tm.month as monthKey,
-         tm.rx_bytes as monthRxBytes,
-         tm.tx_bytes as monthTxBytes,
+         m.billing_anchor_day as anchorDay,
+         tc.period_key as periodKey,
+         tc.start_at as periodStartAt,
+         tc.end_at as periodEndAt,
+         tc.rx_bytes as periodRxBytes,
+         tc.tx_bytes as periodTxBytes,
          m.interval_sec as intervalSec,
          m.agent_ws_url as agentWsUrl,
          m.expires_at as expiresAt,
@@ -631,13 +699,13 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
          x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
          x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
        FROM machines m
-       LEFT JOIN traffic_monthly tm ON tm.machine_id = m.id AND tm.month = ?
+       LEFT JOIN traffic_cycles tc ON tc.machine_id = m.id AND tc.start_at <= ? AND tc.end_at > ?
        LEFT JOIN metrics x ON x.id = (
          SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
        )
        ORDER BY m.sort_order ASC, m.id ASC`
     )
-    .all(month);
+    .all(now, now);
 
   res.json({
     machines: rows.map((r: any) => ({
@@ -663,9 +731,19 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
       updatedAt: r.updatedAt,
       lastSeenAt: r.lastSeenAt ?? null,
       online: r.online,
-      monthTraffic: r.monthKey
-        ? { month: r.monthKey, rxBytes: r.monthRxBytes ?? 0, txBytes: r.monthTxBytes ?? 0 }
-        : { month, rxBytes: 0, txBytes: 0 },
+      monthTraffic: (() => {
+        if (r.periodKey) {
+          return {
+            month: r.periodKey,
+            startAt: r.periodStartAt,
+            endAt: r.periodEndAt,
+            rxBytes: r.periodRxBytes ?? 0,
+            txBytes: r.periodTxBytes ?? 0,
+          };
+        }
+        const b = billingMonthBoundsUtc(now, r.anchorDay ?? 1);
+        return { month: b.periodKey, startAt: b.startAt, endAt: b.endAt, rxBytes: 0, txBytes: 0 };
+      })(),
       latestMetric: r.metricAt
         ? {
             at: r.metricAt,
@@ -692,13 +770,15 @@ app.get("/api/machines/:id/traffic-monthly", requireAuth, (req, res) => {
   const rows = db
     .prepare(
       `SELECT
-         month,
+         period_key as month,
+         start_at as startAt,
+         end_at as endAt,
          rx_bytes as rxBytes,
          tx_bytes as txBytes,
          updated_at as updatedAt
-       FROM traffic_monthly
+       FROM traffic_cycles
        WHERE machine_id = ?
-       ORDER BY month DESC
+       ORDER BY start_at DESC
        LIMIT ?`
     )
     .all(id, limit);
@@ -709,6 +789,7 @@ app.post("/api/machines", requireAuth, async (req, res) => {
   const body = MachineCreateSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });
   const now = Date.now();
+  const billingAnchorDay = body.data.expiresAt ? new Date(body.data.expiresAt).getUTCDate() : new Date(now).getUTCDate();
   const agentKey = body.data.agentKey ?? randomAgentKey();
   const agentKeyHash = await bcrypt.hash(agentKey, 12);
   const agentKeyEnc = encryptText(agentKey, agentKeySecret);
@@ -721,9 +802,10 @@ app.post("/api/machines", requireAuth, async (req, res) => {
          group_name,
          agent_key_hash, agent_key_enc, agent_ws_url,
          expires_at, purchase_amount_cents, billing_cycle, auto_renew,
+         billing_anchor_day,
          created_at, updated_at, online
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
     )
     .run(
       body.data.name,
@@ -738,6 +820,7 @@ app.post("/api/machines", requireAuth, async (req, res) => {
       Math.max(0, Math.round((body.data.purchaseAmount ?? 0) * 100)),
       body.data.billingCycle ?? "month",
       body.data.autoRenew ? 1 : 0,
+      billingAnchorDay,
       now,
       now
     );
@@ -771,6 +854,7 @@ app.put("/api/machines/:id", requireAuth, async (req, res) => {
 
   const now = Date.now();
   const hasExpiresAt = Object.prototype.hasOwnProperty.call(req.body ?? {}, "expiresAt");
+  const anchorDay = hasExpiresAt && body.data.expiresAt ? new Date(body.data.expiresAt).getUTCDate() : null;
   const keyHash = body.data.agentKey ? await bcrypt.hash(body.data.agentKey, 12) : null;
   const keyEnc = body.data.agentKey ? encryptText(body.data.agentKey, agentKeySecret) : null;
   db.prepare(
@@ -783,6 +867,7 @@ app.put("/api/machines/:id", requireAuth, async (req, res) => {
          agent_key_enc = COALESCE(?, agent_key_enc),
          agent_ws_url = COALESCE(?, agent_ws_url),
          expires_at = CASE WHEN ? THEN ? ELSE expires_at END,
+         billing_anchor_day = CASE WHEN billing_anchor_day = 0 AND ? THEN COALESCE(?, billing_anchor_day) ELSE billing_anchor_day END,
          purchase_amount_cents = COALESCE(?, purchase_amount_cents),
          billing_cycle = COALESCE(?, billing_cycle),
          auto_renew = COALESCE(?, auto_renew),
@@ -798,6 +883,8 @@ app.put("/api/machines/:id", requireAuth, async (req, res) => {
     body.data.agentWsUrl ?? null,
     hasExpiresAt ? 1 : 0,
     body.data.expiresAt ?? null,
+    hasExpiresAt ? 1 : 0,
+    anchorDay,
     body.data.purchaseAmount != null ? Math.max(0, Math.round(body.data.purchaseAmount * 100)) : null,
     body.data.billingCycle ?? null,
     body.data.autoRenew != null ? (body.data.autoRenew ? 1 : 0) : null,

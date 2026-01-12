@@ -236,7 +236,7 @@ export function MachinePage() {
             {machine.autoRenew ? " · 自动续费" : ""}
           </span>
           <span className="rounded-full border border-teal-400/30 bg-teal-500/10 px-2 py-1 text-teal-200">
-            本月流量：RX {formatBytes(machine.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(machine.monthTraffic?.txBytes ?? 0)}
+            账期流量：RX {formatBytes(machine.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(machine.monthTraffic?.txBytes ?? 0)}
           </span>
         </div>
 
@@ -256,7 +256,7 @@ export function MachinePage() {
 
         {monthRows.length ? (
           <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">
-            <div className="mb-2 text-sm font-semibold">每月流量</div>
+            <div className="mb-2 text-sm font-semibold">账期流量（按到期日重置）</div>
             <div className="grid grid-cols-1 gap-2 text-sm md:grid-cols-2">
               {monthRows.map((r) => (
                 <div

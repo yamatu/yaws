@@ -44,6 +44,7 @@ function migrate(db: Db) {
       expires_at INTEGER,
       purchase_amount_cents INTEGER NOT NULL DEFAULT 0,
       billing_cycle TEXT NOT NULL DEFAULT 'month',
+      billing_anchor_day INTEGER NOT NULL DEFAULT 0,
       auto_renew INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -93,6 +94,35 @@ function migrate(db: Db) {
       updated_at INTEGER NOT NULL,
       FOREIGN KEY(machine_id) REFERENCES machines(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS traffic_cycles (
+      machine_id INTEGER NOT NULL,
+      period_key TEXT NOT NULL,
+      start_at INTEGER NOT NULL,
+      end_at INTEGER NOT NULL,
+      rx_bytes INTEGER NOT NULL DEFAULT 0,
+      tx_bytes INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY(machine_id, period_key),
+      FOREIGN KEY(machine_id) REFERENCES machines(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_traffic_cycles_machine_time ON traffic_cycles(machine_id, start_at, end_at);
+
+    CREATE TABLE IF NOT EXISTS traffic_cycles_state (
+      machine_id INTEGER PRIMARY KEY,
+      anchor_day INTEGER NOT NULL DEFAULT 1,
+      period_key TEXT NOT NULL,
+      start_at INTEGER NOT NULL,
+      end_at INTEGER NOT NULL,
+      last_at INTEGER NOT NULL DEFAULT 0,
+      last_rx_bytes INTEGER NOT NULL DEFAULT 0,
+      last_tx_bytes INTEGER NOT NULL DEFAULT 0,
+      usage_rx_bytes INTEGER NOT NULL DEFAULT 0,
+      usage_tx_bytes INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY(machine_id) REFERENCES machines(id) ON DELETE CASCADE
+    );
   `);
 
   ensureColumns(db, "machines", [
@@ -113,6 +143,7 @@ function migrate(db: Db) {
       sql: "ALTER TABLE machines ADD COLUMN purchase_amount_cents INTEGER NOT NULL DEFAULT 0",
     },
     { name: "billing_cycle", sql: "ALTER TABLE machines ADD COLUMN billing_cycle TEXT NOT NULL DEFAULT 'month'" },
+    { name: "billing_anchor_day", sql: "ALTER TABLE machines ADD COLUMN billing_anchor_day INTEGER NOT NULL DEFAULT 0" },
     { name: "auto_renew", sql: "ALTER TABLE machines ADD COLUMN auto_renew INTEGER NOT NULL DEFAULT 0" },
   ]);
 
@@ -127,6 +158,23 @@ function migrate(db: Db) {
   // Best-effort backfill for existing rows
   try {
     db.exec("UPDATE machines SET sort_order = id WHERE sort_order = 0");
+  } catch {
+    // ignore
+  }
+
+  // Best-effort backfill billing anchor day:
+  // - prefer expires_at day-of-month (UTC)
+  // - fallback to created_at day-of-month (UTC)
+  try {
+    db.exec(`
+      UPDATE machines
+      SET billing_anchor_day = CASE
+        WHEN billing_anchor_day != 0 THEN billing_anchor_day
+        WHEN expires_at IS NOT NULL THEN CAST(strftime('%d', expires_at / 1000, 'unixepoch') AS INTEGER)
+        ELSE CAST(strftime('%d', created_at / 1000, 'unixepoch') AS INTEGER)
+      END
+      WHERE billing_anchor_day = 0
+    `);
   } catch {
     // ignore
   }
