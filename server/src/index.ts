@@ -6,6 +6,7 @@ import http from "node:http";
 import crypto from "node:crypto";
 import os from "node:os";
 import zlib from "node:zlib";
+import Database from "better-sqlite3";
 import { loadEnv } from "./env.js";
 import { openDb } from "./db.js";
 import { authMiddleware } from "./http.js";
@@ -39,6 +40,33 @@ app.use((req, res, next) => {
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+function validateBackupDb(filePath: string) {
+  const tmp = new Database(filePath, { readonly: true, fileMustExist: true });
+  try {
+    const tables = new Set(
+      tmp
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+        .all()
+        .map((r: any) => String(r.name))
+    );
+    const required = ["users", "machines", "metrics"];
+    for (const t of required) {
+      if (!tables.has(t)) throw new Error("schema_missing");
+    }
+    const users = (tmp.prepare("SELECT COUNT(*) as c FROM users").get() as any)?.c ?? 0;
+    const machines = (tmp.prepare("SELECT COUNT(*) as c FROM machines").get() as any)?.c ?? 0;
+    const metrics = (tmp.prepare("SELECT COUNT(*) as c FROM metrics").get() as any)?.c ?? 0;
+    if (users < 1) throw new Error("no_users");
+    return { users, machines, metrics };
+  } finally {
+    try {
+      tmp.close();
+    } catch {
+      // ignore
+    }
+  }
+}
 
 function monthKeyUtc(at: number) {
   const d = new Date(at);
@@ -334,6 +362,13 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
             if (!header.toString("utf8").startsWith("SQLite format 3")) {
               return abort(400, "not_sqlite");
             }
+            try {
+              validateBackupDb(tmpDb);
+            } catch (e: any) {
+              const code =
+                e?.message === "schema_missing" ? "schema_missing" : e?.message === "no_users" ? "no_users" : "bad_db";
+              return abort(400, code);
+            }
             doRestore(tmpDb);
           } catch (e) {
             // eslint-disable-next-line no-console
@@ -353,6 +388,12 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
       fs.readSync(fd, header, 0, 16, 0);
       fs.closeSync(fd);
       if (!header.toString("utf8").startsWith("SQLite format 3")) return abort(400, "not_sqlite");
+      try {
+        validateBackupDb(tmpDb);
+      } catch (e: any) {
+        const code = e?.message === "schema_missing" ? "schema_missing" : e?.message === "no_users" ? "no_users" : "bad_db";
+        return abort(400, code);
+      }
 
       const dbPath = env.DATABASE_PATH;
       const bak = `${dbPath}.bak-${ts}`;
@@ -899,6 +940,17 @@ server.listen(env.PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`yaws server listening on http://localhost:${env.PORT}`);
 });
+
+try {
+  const users = (db.prepare("SELECT COUNT(*) as c FROM users").get() as any)?.c ?? 0;
+  const machines = (db.prepare("SELECT COUNT(*) as c FROM machines").get() as any)?.c ?? 0;
+  const metrics = (db.prepare("SELECT COUNT(*) as c FROM metrics").get() as any)?.c ?? 0;
+  // eslint-disable-next-line no-console
+  console.log(`[db] path=${env.DATABASE_PATH} users=${users} machines=${machines} metrics=${metrics}`);
+} catch (e) {
+  // eslint-disable-next-line no-console
+  console.error("[db] self-check failed", e);
+}
 
 startMetricsPruner();
 
