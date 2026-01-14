@@ -9,6 +9,8 @@ const EnvSchema = z.object({
   METRICS_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
   METRICS_PRUNE_INTERVAL_MIN: z.coerce.number().int().min(1).max(1440).default(10),
   ADMIN_RESTORE_MAX_MB: z.coerce.number().int().min(1).max(102400).default(2048),
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  TELEGRAM_CHAT_ID: z.string().optional(),
   AGENT_GITHUB_REPO: z.string().default("yamatu/yaws"),
   AGENT_RELEASE_BASE_URL: z.string().optional(),
 });

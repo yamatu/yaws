@@ -16,6 +16,7 @@
 - 指标：CPU/内存/磁盘、load(1/5/15)、流量（累计 RX/TX）、网速（按差值计算）
 - 每月流量：自动按月统计 RX/TX（跨月自动归零重新统计）
 - 到期信息（站内展示）：到期时间、购买金额、计费周期（月/季/半年/年/两年/三年）、自动续费开关（仅展示）
+- Telegram 通知：离线/恢复在线/到期提醒（后台可配置；或使用环境变量）
 - 备份与恢复（后台）：
   - 下载 SQLite 备份（支持 `.sqlite.gz` 压缩）
   - 上传备份恢复（支持 `.sqlite` / `.sqlite.gz`），恢复后自动重启
@@ -182,8 +183,22 @@ npm run dev
 - `METRICS_RETENTION_DAYS`：指标保留天数（默认 30）
 - `METRICS_PRUNE_INTERVAL_MIN`：清理频率（默认 10 分钟）
 - `ADMIN_RESTORE_MAX_MB`：后台“恢复备份”上传上限（MB，默认 2048）
+- `TELEGRAM_BOT_TOKEN`：Telegram Bot Token（可选，也可在后台设置里配置）
+- `TELEGRAM_CHAT_ID`：接收消息的 chat_id（可选，也可在后台设置里配置）
 - `AGENT_GITHUB_REPO`：GitHub 仓库（例如 `yamatu/yaws`）
 - `AGENT_RELEASE_BASE_URL`：Release 下载前缀（可选，默认 `releases/latest/download`）
+
+## Telegram 通知配置
+
+后台：`/app/settings` → “Telegram 通知”
+
+1) 创建 Bot：在 Telegram 搜索 `@BotFather` → `/newbot` 获取 `Bot Token`
+2) 获取 `chat_id`：
+   - 私聊：给 bot 发一条消息，然后访问 `https://api.telegram.org/bot<token>/getUpdates`，在返回里找到 `chat.id`
+   - 群聊：把 bot 拉进群并发消息，同样用 `getUpdates` 获取（群聊 chat_id 通常是负数）
+3) 配置并点击“发送测试”
+
+离线判定默认 5 分钟：如果机器 `last_seen_at` 超过该时间未更新，则认为离线并通知。
 
 ## 排错速查
 

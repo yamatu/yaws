@@ -296,6 +296,23 @@ app.get("/api/me", requireAuth, (req, res) => {
   return res.json({ user: (req as any).user });
 });
 
+function getSetting(key: string) {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+function setSetting(key: string, value: string) {
+  db.prepare(
+    `INSERT INTO settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).run(key, value, Date.now());
+}
+
+function delSetting(key: string) {
+  db.prepare("DELETE FROM settings WHERE key = ?").run(key);
+}
+
 app.get("/api/admin/backup", requireAuth, requireAdmin, async (req, res) => {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const tmpDb = path.join(os.tmpdir(), `yaws-backup-${ts}.sqlite`);
@@ -583,6 +600,87 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
       }
     }
   });
+});
+
+const TelegramSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  botToken: z.string().optional(),
+  chatId: z.string().optional(),
+  offlineAfterMin: z.number().int().min(1).max(1440).optional(),
+  expiryWarnDays: z.number().int().min(0).max(3650).optional(),
+  notifyOffline: z.boolean().optional(),
+  notifyOnline: z.boolean().optional(),
+  notifyExpiry: z.boolean().optional(),
+});
+
+app.get("/api/admin/telegram/settings", requireAuth, requireAdmin, (req, res) => {
+  const tokenEnc = getSetting("telegram_token_enc");
+  const token = tokenEnc ? decryptText(tokenEnc, agentKeySecret) : env.TELEGRAM_BOT_TOKEN ?? "";
+  const chatId = getSetting("telegram_chat_id") ?? env.TELEGRAM_CHAT_ID ?? "";
+  const enabledRaw = getSetting("telegram_enabled");
+  const enabled = enabledRaw != null ? enabledRaw === "1" : !!(token && chatId);
+  const offlineAfterMin = Number(getSetting("telegram_offline_after_min") ?? "5");
+  const expiryWarnDays = Number(getSetting("telegram_expiry_warn_days") ?? "10");
+  const notifyOffline = (getSetting("telegram_notify_offline") ?? "1") === "1";
+  const notifyOnline = (getSetting("telegram_notify_online") ?? "1") === "1";
+  const notifyExpiry = (getSetting("telegram_notify_expiry") ?? "1") === "1";
+
+  const masked = token ? `${token.slice(0, 4)}...${token.slice(-4)}` : "";
+  res.json({
+    enabled,
+    botTokenMasked: masked,
+    chatId,
+    offlineAfterMin: Number.isFinite(offlineAfterMin) ? offlineAfterMin : 5,
+    expiryWarnDays: Number.isFinite(expiryWarnDays) ? expiryWarnDays : 10,
+    notifyOffline,
+    notifyOnline,
+    notifyExpiry,
+    configured: !!(token && chatId),
+  });
+});
+
+app.put("/api/admin/telegram/settings", requireAuth, requireAdmin, (req, res) => {
+  const body = TelegramSettingsSchema.safeParse(req.body);
+  if (!body.success) return res.status(400).json({ error: "bad_request" });
+
+  if (body.data.enabled != null) setSetting("telegram_enabled", body.data.enabled ? "1" : "0");
+  if (body.data.offlineAfterMin != null) setSetting("telegram_offline_after_min", String(body.data.offlineAfterMin));
+  if (body.data.expiryWarnDays != null) setSetting("telegram_expiry_warn_days", String(body.data.expiryWarnDays));
+  if (body.data.notifyOffline != null) setSetting("telegram_notify_offline", body.data.notifyOffline ? "1" : "0");
+  if (body.data.notifyOnline != null) setSetting("telegram_notify_online", body.data.notifyOnline ? "1" : "0");
+  if (body.data.notifyExpiry != null) setSetting("telegram_notify_expiry", body.data.notifyExpiry ? "1" : "0");
+
+  if (body.data.chatId != null) {
+    const v = body.data.chatId.trim();
+    if (!v) delSetting("telegram_chat_id");
+    else setSetting("telegram_chat_id", v);
+  }
+
+  if (body.data.botToken != null) {
+    const v = body.data.botToken.trim();
+    if (!v) delSetting("telegram_token_enc");
+    else setSetting("telegram_token_enc", encryptText(v, agentKeySecret));
+  }
+
+  res.json({ ok: true });
+});
+
+app.post("/api/admin/telegram/test", requireAuth, requireAdmin, async (req, res) => {
+  const body = z
+    .object({ message: z.string().min(1).max(2000).optional() })
+    .safeParse(req.body ?? {});
+  if (!body.success) return res.status(400).json({ error: "bad_request" });
+  try {
+    const cfg = loadTelegramConfig();
+    if (!cfg.token || !cfg.chatId) return res.status(409).json({ error: "telegram_not_configured" });
+    const msg = body.data.message ?? `YAWS 测试通知：${new Date().toLocaleString()}`;
+    await sendTelegram(cfg, msg);
+    res.json({ ok: true });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[telegram] test failed", e);
+    res.status(500).json({ error: "send_failed" });
+  }
 });
 
 app.put("/api/me/credentials", requireAuth, async (req, res) => {
@@ -1040,6 +1138,7 @@ try {
 }
 
 startMetricsPruner();
+startTelegramNotifier();
 
 const BootstrapSchema = z.object({ username: z.string().min(1), password: z.string().min(6) });
 const LoginSchema = z.object({ username: z.string().min(1), password: z.string().min(1) });
@@ -1137,6 +1236,336 @@ function startMetricsPruner() {
 
   prune();
   setInterval(prune, intervalMs).unref();
+}
+
+type TelegramConfig = {
+  enabled: boolean;
+  token: string;
+  chatId: string;
+  offlineAfterMin: number;
+  expiryWarnDays: number;
+  notifyOffline: boolean;
+  notifyOnline: boolean;
+  notifyExpiry: boolean;
+};
+
+function loadTelegramConfig(): TelegramConfig {
+  const tokenEnc = getSetting("telegram_token_enc");
+  const token = tokenEnc ? decryptText(tokenEnc, agentKeySecret) : env.TELEGRAM_BOT_TOKEN ?? "";
+  const chatId = (getSetting("telegram_chat_id") ?? env.TELEGRAM_CHAT_ID ?? "").trim();
+  const enabledRaw = getSetting("telegram_enabled");
+  const enabled = enabledRaw != null ? enabledRaw === "1" : !!(token && chatId);
+
+  const offlineAfterMin = Number(getSetting("telegram_offline_after_min") ?? "5");
+  const expiryWarnDays = Number(getSetting("telegram_expiry_warn_days") ?? "10");
+  const notifyOffline = (getSetting("telegram_notify_offline") ?? "1") === "1";
+  const notifyOnline = (getSetting("telegram_notify_online") ?? "1") === "1";
+  const notifyExpiry = (getSetting("telegram_notify_expiry") ?? "1") === "1";
+
+  return {
+    enabled: enabled && !!(token && chatId),
+    token,
+    chatId,
+    offlineAfterMin: Number.isFinite(offlineAfterMin) ? Math.max(1, offlineAfterMin) : 5,
+    expiryWarnDays: Number.isFinite(expiryWarnDays) ? Math.max(0, expiryWarnDays) : 10,
+    notifyOffline,
+    notifyOnline,
+    notifyExpiry,
+  };
+}
+
+async function sendTelegram(cfg: TelegramConfig, text: string) {
+  const url = `https://api.telegram.org/bot${cfg.token}/sendMessage`;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 12_000).unref();
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        chat_id: cfg.chatId,
+        text,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`telegram_http_${res.status}`);
+    const j: any = await res.json().catch(() => null);
+    if (!j || j.ok !== true) throw new Error("telegram_bad_response");
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function fmtDateTime(ms: number | null) {
+  if (!ms) return "—";
+  try {
+    return new Date(ms).toLocaleString();
+  } catch {
+    return String(ms);
+  }
+}
+
+function daysLeftUtc(expiresAt: number, now: number) {
+  return Math.floor((expiresAt - now) / (24 * 3600 * 1000));
+}
+
+function ymdUtc(ms: number) {
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+
+function startTelegramNotifier() {
+  const intervalMs = 60_000;
+  const tick = async () => {
+    if (isRestoring) return;
+    let cfg: TelegramConfig;
+    try {
+      cfg = loadTelegramConfig();
+    } catch {
+      return;
+    }
+    if (!cfg.enabled) return;
+
+    const now = Date.now();
+    const offlineAfterMs = cfg.offlineAfterMin * 60_000;
+    const cooldownMs = 5 * 60_000;
+    const today = ymdUtc(now);
+    const machines = db
+      .prepare(
+        `SELECT
+           id, name, online, last_seen_at as lastSeenAt,
+           expires_at as expiresAt,
+           purchase_amount_cents as purchaseAmountCents,
+           billing_cycle as billingCycle,
+           auto_renew as autoRenew
+         FROM machines
+         ORDER BY sort_order ASC, id ASC`
+      )
+      .all() as Array<{
+      id: number;
+      name: string;
+      online: 0 | 1;
+      lastSeenAt: number | null;
+      expiresAt: number | null;
+      purchaseAmountCents: number;
+      billingCycle: string;
+      autoRenew: 0 | 1;
+    }>;
+
+    const getNotif = db.prepare(
+      `SELECT
+         machine_id as machineId,
+         last_online as lastOnline,
+         offline_notified_at as offlineNotifiedAt,
+         online_notified_at as onlineNotifiedAt,
+         expiry_warn_date as expiryWarnDate,
+         expired_notified_at as expiredNotifiedAt
+       FROM machine_notifications WHERE machine_id = ?`
+    );
+    const upsertNotif = db.prepare(
+      `INSERT INTO machine_notifications (
+         machine_id, last_online, offline_notified_at, online_notified_at, expiry_warn_date, expired_notified_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(machine_id) DO UPDATE SET
+         last_online = excluded.last_online,
+         offline_notified_at = excluded.offline_notified_at,
+         online_notified_at = excluded.online_notified_at,
+         expiry_warn_date = excluded.expiry_warn_date,
+         expired_notified_at = excluded.expired_notified_at,
+         updated_at = excluded.updated_at`
+    );
+
+    const offlineEvents: Array<{ id: number; name: string; lastSeenAt: number | null }> = [];
+    const onlineEvents: Array<{ id: number; name: string; lastSeenAt: number | null }> = [];
+    const expiryWarnEvents: Array<{
+      id: number;
+      name: string;
+      left: number;
+      expiresAt: number;
+      billingCycle: string;
+      autoRenew: 0 | 1;
+    }> = [];
+    const expiredEvents: Array<{ id: number; name: string; expiresAt: number }> = [];
+
+    const pendingNotifUpdates = new Map<
+      number,
+      {
+        lastOnline: 0 | 1;
+        offlineNotifiedAt: number;
+        onlineNotifiedAt: number;
+        expiryWarnDate: string;
+        expiredNotifiedAt: number;
+      }
+    >();
+
+    const saveNow = (
+      machineId: number,
+      lastOnline: 0 | 1,
+      offlineNotifiedAt: number,
+      onlineNotifiedAt: number,
+      expiryWarnDate: string,
+      expiredNotifiedAt: number
+    ) => {
+      upsertNotif.run(machineId, lastOnline, offlineNotifiedAt, onlineNotifiedAt, expiryWarnDate, expiredNotifiedAt, now);
+    };
+
+    for (const m of machines) {
+      const derivedOnline = m.lastSeenAt != null && now - m.lastSeenAt <= offlineAfterMs;
+      const row = getNotif.get(m.id) as
+        | {
+            machineId: number;
+            lastOnline: number;
+            offlineNotifiedAt: number;
+            onlineNotifiedAt: number;
+            expiryWarnDate: string;
+            expiredNotifiedAt: number;
+          }
+        | undefined;
+
+      if (!row) {
+        saveNow(m.id, derivedOnline ? 1 : 0, 0, 0, "", 0);
+        continue;
+      }
+
+      const current = {
+        lastOnline: (row.lastOnline ? 1 : 0) as 0 | 1,
+        offlineNotifiedAt: row.offlineNotifiedAt ?? 0,
+        onlineNotifiedAt: row.onlineNotifiedAt ?? 0,
+        expiryWarnDate: row.expiryWarnDate ?? "",
+        expiredNotifiedAt: row.expiredNotifiedAt ?? 0,
+      };
+
+      if (derivedOnline && current.lastOnline === 0) {
+        if (!cfg.notifyOnline) {
+          saveNow(m.id, 1, current.offlineNotifiedAt, current.onlineNotifiedAt, current.expiryWarnDate, current.expiredNotifiedAt);
+          current.lastOnline = 1;
+        } else if (now - current.onlineNotifiedAt > cooldownMs) {
+          onlineEvents.push({ id: m.id, name: m.name, lastSeenAt: m.lastSeenAt });
+          pendingNotifUpdates.set(m.id, {
+            ...current,
+            lastOnline: 1,
+            onlineNotifiedAt: now,
+          });
+        } else {
+          saveNow(m.id, 1, current.offlineNotifiedAt, current.onlineNotifiedAt, current.expiryWarnDate, current.expiredNotifiedAt);
+          current.lastOnline = 1;
+        }
+      } else if (!derivedOnline && current.lastOnline === 1) {
+        if (!cfg.notifyOffline) {
+          saveNow(m.id, 0, current.offlineNotifiedAt, current.onlineNotifiedAt, current.expiryWarnDate, current.expiredNotifiedAt);
+          current.lastOnline = 0;
+        } else if (now - current.offlineNotifiedAt > cooldownMs) {
+          offlineEvents.push({ id: m.id, name: m.name, lastSeenAt: m.lastSeenAt });
+          pendingNotifUpdates.set(m.id, {
+            ...current,
+            lastOnline: 0,
+            offlineNotifiedAt: now,
+          });
+        } else {
+          saveNow(m.id, 0, current.offlineNotifiedAt, current.onlineNotifiedAt, current.expiryWarnDate, current.expiredNotifiedAt);
+          current.lastOnline = 0;
+        }
+      }
+
+      if (cfg.notifyExpiry && m.expiresAt != null) {
+        const left = daysLeftUtc(m.expiresAt, now);
+        if (left < 0) {
+          if (current.expiredNotifiedAt === 0) {
+            expiredEvents.push({ id: m.id, name: m.name, expiresAt: m.expiresAt });
+            pendingNotifUpdates.set(m.id, {
+              ...(pendingNotifUpdates.get(m.id) ?? current),
+              expiredNotifiedAt: now,
+            });
+          }
+        } else if (cfg.expiryWarnDays > 0 && left <= cfg.expiryWarnDays) {
+          if (current.expiryWarnDate !== today) {
+            expiryWarnEvents.push({
+              id: m.id,
+              name: m.name,
+              left,
+              expiresAt: m.expiresAt,
+              billingCycle: m.billingCycle,
+              autoRenew: m.autoRenew,
+            });
+            pendingNotifUpdates.set(m.id, {
+              ...(pendingNotifUpdates.get(m.id) ?? current),
+              expiryWarnDate: today,
+            });
+          }
+        }
+      }
+    }
+
+    const sendChunked = async (title: string, lines: string[]) => {
+      if (lines.length === 0) return;
+      const maxLen = 3500;
+      let chunk = `<b>${escapeHtml(title)}</b>\n`;
+      for (const line of lines) {
+        if (chunk.length + line.length + 1 > maxLen) {
+          await sendTelegram(cfg, chunk);
+          chunk = `<b>${escapeHtml(title)}</b>\n${line}`;
+          continue;
+        }
+        chunk += line;
+      }
+      if (chunk.trim()) await sendTelegram(cfg, chunk);
+    };
+
+    const offlineLines = offlineEvents.map(
+      (e) =>
+        `⚠️ <b>${escapeHtml(e.name)}</b> (ID ${e.id}) 离线 · last seen ${escapeHtml(fmtDateTime(e.lastSeenAt))}\n`
+    );
+    const onlineLines = onlineEvents.map(
+      (e) =>
+        `✅ <b>${escapeHtml(e.name)}</b> (ID ${e.id}) 在线 · last seen ${escapeHtml(fmtDateTime(e.lastSeenAt))}\n`
+    );
+    const expiryWarnLines = expiryWarnEvents.map(
+      (e) =>
+        `⏳ <b>${escapeHtml(e.name)}</b> (ID ${e.id}) 剩余 <b>${e.left}</b> 天 · 到期 ${escapeHtml(
+          new Date(e.expiresAt).toLocaleDateString()
+        )} · ${escapeHtml(String(e.billingCycle))}${e.autoRenew ? " · 自动续费" : ""}\n`
+    );
+    const expiredLines = expiredEvents.map(
+      (e) =>
+        `🟥 <b>${escapeHtml(e.name)}</b> (ID ${e.id}) 已到期 · 到期 ${escapeHtml(new Date(e.expiresAt).toLocaleDateString())}\n`
+    );
+
+    try {
+      await sendChunked("机器离线", offlineLines);
+      await sendChunked("机器恢复在线", onlineLines);
+      await sendChunked("即将到期提醒", expiryWarnLines);
+      await sendChunked("到期提醒", expiredLines);
+    } catch {
+      return;
+    }
+
+    for (const [machineId, u] of pendingNotifUpdates) {
+      saveNow(machineId, u.lastOnline, u.offlineNotifiedAt, u.onlineNotifiedAt, u.expiryWarnDate, u.expiredNotifiedAt);
+    }
+  };
+
+  const safeTick = () => {
+    tick().catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error("[telegram] notifier tick failed", e);
+    });
+  };
+  safeTick();
+  setInterval(safeTick, intervalMs).unref();
+}
+
+function escapeHtml(s: string) {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function renderInstallScript(opts: {

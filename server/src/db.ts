@@ -24,6 +24,12 @@ function migrate(db: Db) {
       created_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS machines (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -120,6 +126,17 @@ function migrate(db: Db) {
       last_tx_bytes INTEGER NOT NULL DEFAULT 0,
       usage_rx_bytes INTEGER NOT NULL DEFAULT 0,
       usage_tx_bytes INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY(machine_id) REFERENCES machines(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS machine_notifications (
+      machine_id INTEGER PRIMARY KEY,
+      last_online INTEGER NOT NULL DEFAULT 0,
+      offline_notified_at INTEGER NOT NULL DEFAULT 0,
+      online_notified_at INTEGER NOT NULL DEFAULT 0,
+      expiry_warn_date TEXT NOT NULL DEFAULT '',
+      expired_notified_at INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL,
       FOREIGN KEY(machine_id) REFERENCES machines(id) ON DELETE CASCADE
     );
