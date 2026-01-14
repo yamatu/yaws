@@ -200,8 +200,16 @@ npm run dev
 
 离线判定默认 5 分钟：如果机器 `last_seen_at` 超过该时间未更新，则认为离线并通知。
 
+### 常见问题（Telegram）
+
+- `telegram_unauthorized`：Bot Token 错误（401），检查 token 是否粘贴完整、是否使用了正确的 bot。
+- `telegram_cant_initiate` / `telegram_forbidden`：私聊场景下，Bot 不能主动给你发消息。请先在 Telegram 打开 Bot 并发送一次 `/start`。
+- `telegram_not_in_chat`：群/频道场景下，Bot 不在该群/频道或无权限。把 Bot 拉进群/频道并授予发言权限，再测试。
+- `telegram_blocked`：你屏蔽了 Bot，解除屏蔽并重新发送 `/start`。
+
 ## 排错速查
 
 - `413 Content Too Large`：检查 Nginx 的 `client_max_body_size` 是否配置在 **443 server**；或平台/代理限制（优先用 `.sqlite.gz`）。
 - `cannot execute binary file: Exec format error`：探针架构不匹配（amd64/arm64），用一键脚本会自动选择正确架构。
 - 恢复后页面空：容器未重启/仍读旧库时，重启容器即可；日志会打印 `[db] ... users=... machines=... metrics=...` 便于确认。
+- Telegram 测试 `403`：通常是没 `/start`、chat_id 不对、或 bot 不在群里（后台会显示更具体的错误提示）。
