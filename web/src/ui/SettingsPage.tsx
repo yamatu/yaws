@@ -15,6 +15,17 @@ type TelegramSettings = {
   configured: boolean;
 };
 
+function telegramErrorToText(code: string) {
+  if (code === "telegram_not_configured") return "请先配置 Bot Token + Chat ID（或用环境变量 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID）";
+  if (code === "telegram_unauthorized") return "Bot Token 不正确（401），请检查 token 是否粘贴完整。";
+  if (code === "telegram_blocked") return "Bot 被你屏蔽了（403），请在 Telegram 里解除屏蔽并重新给 Bot 发消息。";
+  if (code === "telegram_cant_initiate") return "Bot 不能主动给你发消息（403），请先在 Telegram 里打开 Bot 并发送 /start。";
+  if (code === "telegram_not_in_chat") return "Bot 不在该群/频道（403），请把 Bot 拉进群/频道并授予发言权限。";
+  if (code === "telegram_forbidden") return "Telegram 返回 403（无权限），请检查 chat_id 是否正确、Bot 是否在群里、是否已 /start。";
+  if (code === "telegram_bad_request") return "Telegram 返回 400（请求参数不合法），请检查 chat_id 与消息内容。";
+  return `发送失败：${code}`;
+}
+
 export function SettingsPage() {
   const nav = useNavigate();
   const [username, setUsername] = useState("");
@@ -470,7 +481,7 @@ export function SettingsPage() {
                 await apiFetch<{ ok: true }>("/api/admin/telegram/test", { method: "POST", body: JSON.stringify({}) });
                 setTgOk("已发送测试消息");
               } catch (e: any) {
-                setTgError(e?.message === "telegram_not_configured" ? "请先配置 Bot Token + Chat ID" : `发送失败：${e?.message ?? "unknown"}`);
+                setTgError(telegramErrorToText(String(e?.message ?? "unknown")));
               } finally {
                 setTgTesting(false);
               }

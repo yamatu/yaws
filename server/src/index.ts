@@ -679,7 +679,7 @@ app.post("/api/admin/telegram/test", requireAuth, requireAdmin, async (req, res)
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("[telegram] test failed", e);
-    res.status(500).json({ error: "send_failed" });
+    res.status(500).json({ error: e instanceof Error ? e.message : "send_failed" });
   }
 });
 
@@ -1290,8 +1290,19 @@ async function sendTelegram(cfg: TelegramConfig, text: string) {
       }),
       signal: ctrl.signal,
     });
-    if (!res.ok) throw new Error(`telegram_http_${res.status}`);
     const j: any = await res.json().catch(() => null);
+    if (!res.ok) {
+      const desc = String(j?.description ?? "").toLowerCase();
+      if (res.status === 401) throw new Error("telegram_unauthorized");
+      if (res.status === 403) {
+        if (desc.includes("blocked")) throw new Error("telegram_blocked");
+        if (desc.includes("can't initiate") || desc.includes("cant initiate")) throw new Error("telegram_cant_initiate");
+        if (desc.includes("not a member")) throw new Error("telegram_not_in_chat");
+        throw new Error("telegram_forbidden");
+      }
+      if (res.status === 400) throw new Error("telegram_bad_request");
+      throw new Error(`telegram_http_${res.status}`);
+    }
     if (!j || j.ok !== true) throw new Error("telegram_bad_response");
   } finally {
     clearTimeout(t);
