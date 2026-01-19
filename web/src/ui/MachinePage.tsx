@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { apiFetch, apiFetchText, type Machine, type Metric } from "./api";
+import { apiFetch, apiFetchText, type Machine, type Metric, type UptimeSummary } from "./api";
 import { connectUiWs } from "./ws";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, formatMoneyCents, pct } from "./format";
 import { getToken } from "./auth";
@@ -16,6 +16,8 @@ export function MachinePage() {
     []
   );
   const [setup, setSetup] = useState<{ wsUrl: string; agentKey: string | null; downloadConfigUrl: string } | null>(null);
+  const [uptime, setUptime] = useState<UptimeSummary | null>(null);
+  const [uptimeHours, setUptimeHours] = useState(24);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");
   const [editGroupName, setEditGroupName] = useState("");
@@ -54,6 +56,16 @@ export function MachinePage() {
         });
         if (!alive) return;
         setMetrics(ms.metrics);
+
+        try {
+          const up = await apiFetch<UptimeSummary>(`/api/machines/${machineId}/uptime?hours=${uptimeHours}&bucketMin=5`, {
+            signal: ac.signal,
+          });
+          if (!alive) return;
+          setUptime(up);
+        } catch {
+          // ignore
+        }
 
         try {
           const tr = await apiFetch<{ rows: Array<{ month: string; rxBytes: number; txBytes: number; updatedAt: number }> }>(
@@ -146,7 +158,7 @@ export function MachinePage() {
       ac.abort();
       wsRef.current?.close();
     };
-  }, [machineId]);
+  }, [machineId, uptimeHours]);
 
   const last = metrics.length ? metrics[metrics.length - 1] : null;
   const prev = metrics.length >= 2 ? metrics[metrics.length - 2] : null;
@@ -253,6 +265,58 @@ export function MachinePage() {
             </div>
           ))}
         </div>
+
+        {uptime ? (
+          <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">
+            <div className="mb-2 flex items-center gap-2">
+              <div className="flex-1 text-sm font-semibold">在线率（SLA）</div>
+              <select
+                className="yaws-select text-xs"
+                value={uptimeHours}
+                onChange={(e) => setUptimeHours(Number(e.target.value))}
+              >
+                <option value={6}>近 6 小时</option>
+                <option value={12}>近 12 小时</option>
+                <option value={24}>近 24 小时</option>
+                <option value={72}>近 3 天</option>
+                <option value={168}>近 7 天</option>
+              </select>
+              <div className="text-xs text-white/60">{Math.round(uptime.upPct * 10000) / 100}%</div>
+            </div>
+
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-white/60">
+              <span className="inline-flex items-center gap-1">
+                <span className="h-2 w-3 rounded-sm bg-emerald-400" />
+                在线
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="h-2 w-3 rounded-sm bg-amber-400" />
+                可能掉线
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="h-2 w-3 rounded-sm bg-rose-500" />
+                离线
+              </span>
+              <span className="ml-auto text-white/50">每格 {uptime.bucketMin} 分钟</span>
+            </div>
+
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(10px,1fr))] gap-1">
+              {uptime.buckets.map((b) => (
+                <div
+                  key={b.at}
+                  title={`${new Date(b.at).toLocaleString()} · ${b.state === "up" ? "在线" : b.state === "warn" ? "可能掉线" : "离线"}`}
+                  className={`h-3 rounded-sm border border-white/10 ${
+                    b.state === "up" ? "bg-emerald-400" : b.state === "warn" ? "bg-amber-400" : "bg-rose-500"
+                  }`}
+                />
+              ))}
+            </div>
+
+            <div className="mt-2 text-xs text-white/50">
+              统计口径：按探针上报间隔推断；当某段时间内没有新 metrics，则视为离线（阈值 {uptime.offlineAfterMin} 分钟）。
+            </div>
+          </div>
+        ) : null}
 
         {monthRows.length ? (
           <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">

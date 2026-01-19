@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { apiFetch, type PublicMachineDetail } from "./api";
+import { apiFetch, type PublicMachineDetail, type UptimeSummary } from "./api";
 import { daysLeft, fmtTime, formatBps, formatBytes, pct } from "./format";
 
 export function PublicMachinePage() {
@@ -11,6 +11,8 @@ export function PublicMachinePage() {
   const lastRef = useRef<{ at: number; rx: number; tx: number } | null>(null);
   const [rxBps, setRxBps] = useState(0);
   const [txBps, setTxBps] = useState(0);
+  const [uptime, setUptime] = useState<UptimeSummary | null>(null);
+  const [uptimeHours, setUptimeHours] = useState(24);
 
   useEffect(() => {
     if (!Number.isInteger(machineId) || machineId <= 0) return;
@@ -22,6 +24,16 @@ export function PublicMachinePage() {
         if (!alive) return;
         setData(res);
         setError(null);
+
+        try {
+          const up = await apiFetch<UptimeSummary>(`/api/public/machines/${machineId}/uptime?hours=${uptimeHours}&bucketMin=5`, {
+            signal: ac.signal,
+          });
+          if (!alive) return;
+          setUptime(up);
+        } catch {
+          // ignore
+        }
         const last = res.metrics.length ? res.metrics[res.metrics.length - 1] : null;
         if (last) {
           const prev = lastRef.current;
@@ -45,7 +57,7 @@ export function PublicMachinePage() {
       ac.abort();
       window.clearInterval(t);
     };
-  }, [machineId]);
+  }, [machineId, uptimeHours]);
 
   const m = data?.machine ?? null;
   const metrics = data?.metrics ?? [];
@@ -111,6 +123,58 @@ export function PublicMachinePage() {
                 账期：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
               </span>
             </div>
+
+            {uptime ? (
+              <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">
+                <div className="mb-2 flex items-center gap-2">
+                  <div className="flex-1 text-sm font-semibold">在线率（SLA）</div>
+                  <select
+                    className="yaws-select text-xs"
+                    value={uptimeHours}
+                    onChange={(e) => setUptimeHours(Number(e.target.value))}
+                  >
+                    <option value={6}>近 6 小时</option>
+                    <option value={12}>近 12 小时</option>
+                    <option value={24}>近 24 小时</option>
+                    <option value={72}>近 3 天</option>
+                    <option value={168}>近 7 天</option>
+                  </select>
+                  <div className="text-xs text-white/60">{Math.round(uptime.upPct * 10000) / 100}%</div>
+                </div>
+
+                <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-white/60">
+                  <span className="inline-flex items-center gap-1">
+                    <span className="h-2 w-3 rounded-sm bg-emerald-400" />
+                    在线
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="h-2 w-3 rounded-sm bg-amber-400" />
+                    可能掉线
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="h-2 w-3 rounded-sm bg-rose-500" />
+                    离线
+                  </span>
+                  <span className="ml-auto text-white/50">每格 {uptime.bucketMin} 分钟</span>
+                </div>
+
+                <div className="grid grid-cols-[repeat(auto-fit,minmax(10px,1fr))] gap-1">
+                  {uptime.buckets.map((b) => (
+                    <div
+                      key={b.at}
+                      title={`${new Date(b.at).toLocaleString()} · ${b.state === "up" ? "在线" : b.state === "warn" ? "可能掉线" : "离线"}`}
+                      className={`h-3 rounded-sm border border-white/10 ${
+                        b.state === "up" ? "bg-emerald-400" : b.state === "warn" ? "bg-amber-400" : "bg-rose-500"
+                      }`}
+                    />
+                  ))}
+                </div>
+
+                <div className="mt-2 text-xs text-white/50">
+                  统计口径：按探针上报间隔推断；当某段时间内没有新 metrics，则视为离线（阈值 {uptime.offlineAfterMin} 分钟）。
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">

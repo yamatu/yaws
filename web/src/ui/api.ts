@@ -135,6 +135,20 @@ export type PublicMachine = {
   latestMetric: (Metric & { netRxBytes: number; netTxBytes: number; load1: number; load5: number; load15: number }) | null;
 };
 
+export type UptimeBucketState = "up" | "warn" | "down";
+
+export type UptimeSummary = {
+  machineId: number;
+  startAt: number;
+  endAt: number;
+  bucketMin: number;
+  hours: number;
+  offlineAfterMin: number;
+  upPct: number;
+  counts: { up: number; warn: number; down: number; total: number };
+  buckets: Array<{ at: number; state: UptimeBucketState }>;
+};
+
 export type PublicMachineDetail = {
   machine: {
     id: number;

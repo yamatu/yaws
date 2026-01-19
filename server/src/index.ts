@@ -115,6 +115,75 @@ function billingMonthBoundsUtc(atMs: number, anchorDay: number) {
   return { periodKey, startAt, endAt, anchorDay: a };
 }
 
+type UptimeBucketState = "up" | "warn" | "down";
+
+function computeUptimeBuckets(db: Database.Database, opts: { machineId: number; hours: number; bucketMin: number; offlineAfterMin: number }) {
+  const hours = Math.max(1, Math.min(24 * 30, Math.floor(opts.hours || 24)));
+  const bucketMin = Math.max(1, Math.min(60, Math.floor(opts.bucketMin || 5)));
+  const offlineAfterMin = Math.max(1, Math.min(24 * 60, Math.floor(opts.offlineAfterMin || 5)));
+
+  const endAt = Date.now();
+  const bucketMs = bucketMin * 60_000;
+  const startAt = endAt - hours * 60 * 60_000;
+  const bucketsCount = Math.floor((endAt - startAt) / bucketMs);
+
+  const prev = db
+    .prepare("SELECT at FROM metrics WHERE machine_id = ? AND at < ? ORDER BY at DESC LIMIT 1")
+    .get(opts.machineId, startAt) as any | undefined;
+
+  const rows = db
+    .prepare("SELECT at FROM metrics WHERE machine_id = ? AND at >= ? AND at <= ? ORDER BY at ASC")
+    .all(opts.machineId, startAt, endAt) as any[];
+
+  const times: number[] = [];
+  if (prev?.at) times.push(Number(prev.at));
+  for (const r of rows) times.push(Number(r.at));
+
+  let idx = 0;
+  let lastAt: number | null = null;
+  const offlineAfterMs = offlineAfterMin * 60_000;
+
+  let upCount = 0;
+  let warnCount = 0;
+  let downCount = 0;
+
+  const buckets: Array<{ at: number; state: UptimeBucketState }> = [];
+  for (let i = 0; i < bucketsCount; i++) {
+    const bucketEnd = startAt + (i + 1) * bucketMs;
+    while (idx < times.length && times[idx] <= bucketEnd) {
+      lastAt = times[idx];
+      idx++;
+    }
+
+    let state: UptimeBucketState = "down";
+    if (lastAt != null) {
+      const delta = bucketEnd - lastAt;
+      if (delta <= offlineAfterMs) state = "up";
+      else if (delta <= offlineAfterMs * 3) state = "warn";
+      else state = "down";
+    }
+
+    if (state === "up") upCount++;
+    else if (state === "warn") warnCount++;
+    else downCount++;
+
+    buckets.push({ at: bucketEnd, state });
+  }
+
+  const total = Math.max(1, buckets.length);
+  return {
+    machineId: opts.machineId,
+    startAt,
+    endAt,
+    bucketMin,
+    hours,
+    offlineAfterMin,
+    upPct: upCount / total,
+    counts: { up: upCount, warn: warnCount, down: downCount, total },
+    buckets,
+  };
+}
+
 app.get("/api/public/summary", (_req, res) => {
   const now = Date.now();
   const rows = db
@@ -250,6 +319,27 @@ app.get("/api/public/machines/:id", (req, res) => {
     })(),
     metrics: metrics.reverse(),
   });
+});
+
+app.get("/api/public/machines/:id/uptime", (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
+
+  const row = db.prepare("SELECT id FROM machines WHERE id = ?").get(id) as { id: number } | undefined;
+  if (!row) return res.status(404).json({ error: "not_found" });
+
+  const hours = Number((req.query as any).hours ?? 24);
+  const bucketMin = Number((req.query as any).bucketMin ?? 5);
+  const offlineAfterMin = Number(getSetting("telegram_offline_after_min") ?? "5");
+
+  const payload = computeUptimeBuckets(db, {
+    machineId: id,
+    hours,
+    bucketMin,
+    offlineAfterMin: Number.isFinite(offlineAfterMin) ? offlineAfterMin : 5,
+  });
+
+  res.json(payload);
 });
 
 app.post("/api/auth/bootstrap", async (req, res) => {
@@ -1048,6 +1138,27 @@ app.post("/api/machines/:id/renew", requireAuth, (req, res) => {
   const next = addCycle(base, body.data.cycle, body.data.count);
   db.prepare("UPDATE machines SET expires_at = ?, updated_at = ? WHERE id = ?").run(next, Date.now(), id);
   res.json({ ok: true, expiresAt: next });
+});
+
+app.get("/api/machines/:id/uptime", requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
+
+  const row = db.prepare("SELECT id FROM machines WHERE id = ?").get(id) as { id: number } | undefined;
+  if (!row) return res.status(404).json({ error: "not_found" });
+
+  const hours = Number((req.query as any).hours ?? 24);
+  const bucketMin = Number((req.query as any).bucketMin ?? 5);
+  const offlineAfterMin = Number(getSetting("telegram_offline_after_min") ?? "5");
+
+  const payload = computeUptimeBuckets(db, {
+    machineId: id,
+    hours,
+    bucketMin,
+    offlineAfterMin: Number.isFinite(offlineAfterMin) ? offlineAfterMin : 5,
+  });
+
+  res.json(payload);
 });
 
 app.get("/api/machines/:id/setup", requireAuth, (req, res) => {
