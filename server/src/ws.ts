@@ -74,8 +74,25 @@ export function attachWebSockets(opts: {
 
   function handleSsh(ws: WebSocket, _req: IncomingMessage, url: URL) {
     const token = url.searchParams.get("token") ?? "";
+    const safeSend = (msg: unknown) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.send(JSON.stringify(msg));
+      } catch {
+        // ignore
+      }
+    };
+
+    let user: ReturnType<typeof verifyToken>;
     try {
-      verifyToken(token, opts.jwtSecret);
+      user = verifyToken(token, opts.jwtSecret);
+      const row = opts.db
+        .prepare("SELECT id, role FROM users WHERE id = ?")
+        .get(user.id) as { id: number; role: string } | undefined;
+      if (!row || row.role !== "admin") {
+        ws.close(1008, "forbidden");
+        return;
+      }
     } catch {
       ws.close(1008, "invalid token");
       return;
@@ -104,169 +121,159 @@ export function attachWebSockets(opts: {
     ws.on("close", cleanup);
 
     ws.on("message", (data) => {
-      let msg: any;
       try {
-        msg = SshMessageSchema.parse(JSON.parse(data.toString("utf8")));
-      } catch {
-        ws.send(JSON.stringify({ type: "error", error: "bad_message" }));
-        return;
-      }
+        const msg: any = SshMessageSchema.parse(JSON.parse(data.toString("utf8")));
 
-      if (msg.type === "connect") {
-        if (connected) return;
-        const row = opts.db
-          .prepare(
-            `SELECT
-               id,
-               ssh_host as sshHost,
-               ssh_port as sshPort,
-               ssh_user as sshUser,
-               ssh_auth_type as sshAuthType,
-               ssh_password_enc as sshPasswordEnc,
-               ssh_key_enc as sshKeyEnc
-             FROM machines
-             WHERE id = ?`
-          )
-          .get(msg.machineId) as
-          | {
-              id: number;
-              sshHost: string;
-              sshPort: number;
-              sshUser: string;
-              sshAuthType: string;
-              sshPasswordEnc: string;
-              sshKeyEnc: string;
-            }
-          | undefined;
-        if (!row) {
-          ws.send(JSON.stringify({ type: "error", error: "not_found" }));
-          return;
-        }
+        if (msg.type === "connect") {
+          if (connected) return;
+          const row = opts.db
+            .prepare(
+              `SELECT
+                 id,
+                 ssh_host as sshHost,
+                 ssh_port as sshPort,
+                 ssh_user as sshUser,
+                 ssh_auth_type as sshAuthType,
+                 ssh_password_enc as sshPasswordEnc,
+                 ssh_key_enc as sshKeyEnc
+               FROM machines
+               WHERE id = ?`
+            )
+            .get(msg.machineId) as
+            | {
+                id: number;
+                sshHost: string;
+                sshPort: number;
+                sshUser: string;
+                sshAuthType: string;
+                sshPasswordEnc: string;
+                sshKeyEnc: string;
+              }
+            | undefined;
+          if (!row) {
+            safeSend({ type: "error", error: "not_found" });
+            return;
+          }
 
         const host = (row.sshHost ?? "").trim();
         const port = Number(row.sshPort ?? 22);
         const username = (row.sshUser ?? "").trim();
         const authType = (row.sshAuthType ?? "password").trim();
-        if (!host || !username || !Number.isFinite(port) || port <= 0 || port > 65535) {
-          ws.send(JSON.stringify({ type: "error", error: "ssh_not_configured" }));
-          return;
-        }
+          if (!host || !username || !Number.isFinite(port) || port <= 0 || port > 65535) {
+            safeSend({ type: "error", error: "ssh_not_configured" });
+            return;
+          }
 
         const cols = Number(msg.cols ?? 120);
         const rows = Number(msg.rows ?? 30);
 
-        ssh = new SshClient();
-        connected = true;
+          ssh = new SshClient();
+          connected = true;
 
-        ssh.on("ready", () => {
+          ssh.on("ready", () => {
+            safeSend({ type: "ready" });
+            ssh!.shell(
+              {
+                term: "xterm-256color",
+                cols: Math.max(20, Math.min(500, cols)),
+                rows: Math.max(5, Math.min(200, rows)),
+              },
+              (err: any, s: any) => {
+                if (err) {
+                  safeSend({ type: "error", error: "shell_failed" });
+                  try {
+                    ws.close(1011, "shell_failed");
+                  } catch {
+                    // ignore
+                  }
+                  cleanup();
+                  return;
+                }
+                stream = s;
+                stream.on("data", (chunk: Buffer) => {
+                  safeSend({ type: "output", dataB64: chunk.toString("base64") });
+                });
+                stream.on("close", () => {
+                  safeSend({ type: "exit" });
+                  try {
+                    ws.close(1000, "exit");
+                  } catch {
+                    // ignore
+                  }
+                  cleanup();
+                });
+              }
+            );
+          });
+
+          ssh.on("error", (e: any) => {
+            safeSend({ type: "error", error: e?.level ? `ssh_${e.level}` : "ssh_error" });
+            try {
+              ws.close(1011, "ssh_error");
+            } catch {
+              // ignore
+            }
+            cleanup();
+          });
+
           try {
-            ws.send(JSON.stringify({ type: "ready" }));
-          } catch {
-            // ignore
-          }
-          ssh!.shell(
-            {
-              term: "xterm-256color",
-              cols: Math.max(20, Math.min(500, cols)),
-              rows: Math.max(5, Math.min(200, rows)),
-            },
-            (err: any, s: any) => {
-              if (err) {
-                ws.send(JSON.stringify({ type: "error", error: "shell_failed" }));
-                ws.close(1011, "shell_failed");
+            const common: any = {
+              host,
+              port,
+              username,
+              readyTimeout: 15_000,
+              keepaliveInterval: 10_000,
+              keepaliveCountMax: 3,
+              hostVerifier: () => true,
+            };
+            if (authType === "key") {
+              if (!row.sshKeyEnc) {
+                safeSend({ type: "error", error: "ssh_key_missing" });
                 cleanup();
                 return;
               }
-              stream = s;
-              stream.on("data", (chunk: Buffer) => {
-                try {
-                  ws.send(JSON.stringify({ type: "output", dataB64: chunk.toString("base64") }));
-                } catch {
-                  // ignore
-                }
-              });
-              stream.on("close", () => {
-                try {
-                  ws.send(JSON.stringify({ type: "exit" }));
-                } catch {
-                  // ignore
-                }
-                ws.close(1000, "exit");
+              const key = decryptText(row.sshKeyEnc, opts.agentKeySecret);
+              ssh.connect({ ...common, privateKey: key });
+            } else {
+              if (!row.sshPasswordEnc) {
+                safeSend({ type: "error", error: "ssh_password_missing" });
                 cleanup();
-              });
+                return;
+              }
+              const password = decryptText(row.sshPasswordEnc, opts.agentKeySecret);
+              ssh.connect({ ...common, password });
             }
-          );
-        });
+          } catch {
+            safeSend({ type: "error", error: "ssh_connect_failed" });
+            cleanup();
+          }
+          return;
+        }
 
-        ssh.on("error", (e: any) => {
+        if (msg.type === "input") {
+          if (!stream) return;
           try {
-            ws.send(JSON.stringify({ type: "error", error: e?.level ? `ssh_${e.level}` : "ssh_error" }));
+            const buf = Buffer.from(msg.dataB64, "base64");
+            stream.write(buf);
           } catch {
             // ignore
           }
+          return;
+        }
+
+        if (msg.type === "resize") {
+          if (!stream?.setWindow) return;
+          const cols = Math.max(20, Math.min(500, Number(msg.cols)));
+          const rows = Math.max(5, Math.min(200, Number(msg.rows)));
           try {
-            ws.close(1011, "ssh_error");
+            stream.setWindow(rows, cols, 0, 0);
           } catch {
             // ignore
           }
-          cleanup();
-        });
-
-        try {
-          const common: any = {
-            host,
-            port,
-            username,
-            readyTimeout: 15_000,
-            keepaliveInterval: 10_000,
-            keepaliveCountMax: 3,
-            hostVerifier: () => true,
-          };
-          if (authType === "key") {
-            if (!row.sshKeyEnc) {
-              ws.send(JSON.stringify({ type: "error", error: "ssh_key_missing" }));
-              cleanup();
-              return;
-            }
-            const key = decryptText(row.sshKeyEnc, opts.agentKeySecret);
-            ssh.connect({ ...common, privateKey: key });
-          } else {
-            if (!row.sshPasswordEnc) {
-              ws.send(JSON.stringify({ type: "error", error: "ssh_password_missing" }));
-              cleanup();
-              return;
-            }
-            const password = decryptText(row.sshPasswordEnc, opts.agentKeySecret);
-            ssh.connect({ ...common, password });
-          }
-        } catch {
-          ws.send(JSON.stringify({ type: "error", error: "ssh_connect_failed" }));
-          cleanup();
+          return;
         }
-        return;
-      }
-
-      if (msg.type === "input") {
-        if (!stream) return;
-        try {
-          const buf = Buffer.from(msg.dataB64, "base64");
-          stream.write(buf);
-        } catch {
-          // ignore
-        }
-        return;
-      }
-
-      if (msg.type === "resize") {
-        if (!stream?.setWindow) return;
-        const cols = Math.max(20, Math.min(500, Number(msg.cols)));
-        const rows = Math.max(5, Math.min(200, Number(msg.rows)));
-        try {
-          stream.setWindow(rows, cols, 0, 0);
-        } catch {
-          // ignore
-        }
-        return;
+      } catch {
+        safeSend({ type: "error", error: "bad_message" });
       }
     });
   }

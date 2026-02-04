@@ -24,6 +24,12 @@ const agentReleaseBaseUrl =
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+
+function asyncRoute(fn: (req: Request, res: express.Response, next: express.NextFunction) => Promise<any>) {
+  return (req: Request, res: express.Response, next: express.NextFunction) => {
+    fn(req, res, next).catch(next);
+  };
+}
 app.use(
   cors({
     origin: env.CORS_ORIGIN,
@@ -352,7 +358,7 @@ app.get("/api/public/machines/:id/uptime", (req, res) => {
   res.json(payload);
 });
 
-app.post("/api/auth/bootstrap", async (req, res) => {
+app.post("/api/auth/bootstrap", asyncRoute(async (req, res) => {
   const body = BootstrapSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });
 
@@ -366,9 +372,9 @@ app.post("/api/auth/bootstrap", async (req, res) => {
     .run(body.data.username, passwordHash, now);
 
   return res.json({ ok: true, userId: Number(info.lastInsertRowid) });
-});
+}));
 
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", asyncRoute(async (req, res) => {
   const body = LoginSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });
 
@@ -382,7 +388,7 @@ app.post("/api/auth/login", async (req, res) => {
 
   const token = signToken({ id: row.id, username: row.username, role: row.role }, env.JWT_SECRET);
   return res.json({ token });
-});
+}));
 
 const requireAuth = authMiddleware(env.JWT_SECRET);
 function requireAdmin(req: Request, res: express.Response, next: express.NextFunction) {
@@ -413,7 +419,7 @@ function delSetting(key: string) {
   db.prepare("DELETE FROM settings WHERE key = ?").run(key);
 }
 
-app.get("/api/admin/backup", requireAuth, requireAdmin, async (req, res) => {
+app.get("/api/admin/backup", requireAuth, requireAdmin, asyncRoute(async (req, res) => {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const tmpDb = path.join(os.tmpdir(), `yaws-backup-${ts}.sqlite`);
   const gzipOut = String((req.query as any)?.gzip ?? "") === "1";
@@ -458,9 +464,9 @@ app.get("/api/admin/backup", requireAuth, requireAdmin, async (req, res) => {
     console.error("[backup] failed", e);
     res.status(500).json({ error: "backup_failed" });
   }
-});
+}));
 
-app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
+app.post("/api/admin/restore", requireAuth, requireAdmin, asyncRoute(async (req, res) => {
   const ct = String(req.headers["content-type"] ?? "");
   if (!ct.startsWith("application/octet-stream")) return res.status(415).json({ error: "bad_content_type" });
 
@@ -700,7 +706,7 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, async (req, res) => {
       }
     }
   });
-});
+}));
 
 const TelegramSettingsSchema = z.object({
   enabled: z.boolean().optional(),
@@ -765,7 +771,7 @@ app.put("/api/admin/telegram/settings", requireAuth, requireAdmin, (req, res) =>
   res.json({ ok: true });
 });
 
-app.post("/api/admin/telegram/test", requireAuth, requireAdmin, async (req, res) => {
+app.post("/api/admin/telegram/test", requireAuth, requireAdmin, asyncRoute(async (req, res) => {
   const body = z
     .object({ message: z.string().min(1).max(2000).optional() })
     .safeParse(req.body ?? {});
@@ -781,9 +787,9 @@ app.post("/api/admin/telegram/test", requireAuth, requireAdmin, async (req, res)
     console.error("[telegram] test failed", e);
     res.status(500).json({ error: e instanceof Error ? e.message : "send_failed" });
   }
-});
+}));
 
-app.put("/api/me/credentials", requireAuth, async (req, res) => {
+app.put("/api/me/credentials", requireAuth, asyncRoute(async (req, res) => {
   const body = MeCredentialsSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });
 
@@ -806,7 +812,7 @@ app.put("/api/me/credentials", requireAuth, async (req, res) => {
 
   const token = signToken({ id: row.id, username: newUsername, role: row.role }, env.JWT_SECRET);
   return res.json({ ok: true, token, user: { id: row.id, username: newUsername, role: row.role } });
-});
+}));
 
 app.get("/api/machines", requireAuth, (_req, res) => {
   const now = Date.now();
@@ -1002,7 +1008,7 @@ app.get("/api/machines/:id/traffic-monthly", requireAuth, (req, res) => {
   res.json({ rows });
 });
 
-app.post("/api/machines", requireAuth, async (req, res) => {
+app.post("/api/machines", requireAuth, asyncRoute(async (req, res) => {
   const body = MachineCreateSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });
   const now = Date.now();
@@ -1057,7 +1063,7 @@ app.post("/api/machines", requireAuth, async (req, res) => {
       now
     );
   res.json({ ok: true, id: Number(info.lastInsertRowid), agentKey });
-});
+}));
 
 app.put("/api/machines/order", requireAuth, (req, res) => {
   const body = MachinesOrderSchema.safeParse(req.body);
@@ -1075,7 +1081,7 @@ app.put("/api/machines/order", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.put("/api/machines/:id", requireAuth, async (req, res) => {
+app.put("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
   const body = MachineUpdateSchema.safeParse(req.body);
@@ -1144,7 +1150,7 @@ app.put("/api/machines/:id", requireAuth, async (req, res) => {
     id
   );
   res.json({ ok: true });
-});
+}));
 
 app.delete("/api/machines/:id", requireAuth, (req, res) => {
   const id = Number(req.params.id);
@@ -1171,7 +1177,7 @@ app.get("/api/machines/:id/agent-config", requireAuth, (req, res) => {
   res.end(JSON.stringify({ url: wsUrl, id, key, disk: "/" }, null, 2));
 });
 
-app.post("/api/machines/:id/reset-key", requireAuth, async (req, res) => {
+app.post("/api/machines/:id/reset-key", requireAuth, asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
   const machine = db.prepare("SELECT id FROM machines WHERE id = ?").get(id) as { id: number } | undefined;
@@ -1186,7 +1192,7 @@ app.post("/api/machines/:id/reset-key", requireAuth, async (req, res) => {
     id
   );
   res.json({ ok: true, agentKey });
-});
+}));
 
 app.post("/api/machines/:id/renew", requireAuth, (req, res) => {
   const id = Number(req.params.id);
@@ -1286,6 +1292,13 @@ app.get("/api/machines/:id/metrics", requireAuth, (req, res) => {
     )
     .all(id, limit);
   res.json({ metrics: rows.reverse() });
+});
+
+app.use((err: any, _req: Request, res: express.Response, _next: express.NextFunction) => {
+  // eslint-disable-next-line no-console
+  console.error("[http] unhandled", err);
+  if (res.headersSent) return;
+  res.status(500).json({ error: "internal_error" });
 });
 
 const webDist = path.resolve(process.cwd(), "../web/dist");
