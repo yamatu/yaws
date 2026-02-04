@@ -69,6 +69,8 @@ function migrate(db: Db) {
       disk_total INTEGER NOT NULL,
       net_rx_bytes INTEGER NOT NULL DEFAULT 0,
       net_tx_bytes INTEGER NOT NULL DEFAULT 0,
+      tcp_conn INTEGER NOT NULL DEFAULT 0,
+      udp_conn INTEGER NOT NULL DEFAULT 0,
       load_1 REAL NOT NULL DEFAULT 0,
       load_5 REAL NOT NULL DEFAULT 0,
       load_15 REAL NOT NULL DEFAULT 0,
@@ -167,6 +169,8 @@ function migrate(db: Db) {
   ensureColumns(db, "metrics", [
     { name: "net_rx_bytes", sql: "ALTER TABLE metrics ADD COLUMN net_rx_bytes INTEGER NOT NULL DEFAULT 0" },
     { name: "net_tx_bytes", sql: "ALTER TABLE metrics ADD COLUMN net_tx_bytes INTEGER NOT NULL DEFAULT 0" },
+    { name: "tcp_conn", sql: "ALTER TABLE metrics ADD COLUMN tcp_conn INTEGER NOT NULL DEFAULT 0" },
+    { name: "udp_conn", sql: "ALTER TABLE metrics ADD COLUMN udp_conn INTEGER NOT NULL DEFAULT 0" },
     { name: "load_1", sql: "ALTER TABLE metrics ADD COLUMN load_1 REAL NOT NULL DEFAULT 0" },
     { name: "load_5", sql: "ALTER TABLE metrics ADD COLUMN load_5 REAL NOT NULL DEFAULT 0" },
     { name: "load_15", sql: "ALTER TABLE metrics ADD COLUMN load_15 REAL NOT NULL DEFAULT 0" },

@@ -137,6 +137,8 @@ export function attachWebSockets(opts: {
           const at = msg.at ?? Date.now();
           const netRx = msg.net?.rxBytes ?? 0;
           const netTx = msg.net?.txBytes ?? 0;
+          const tcpConn = msg.conn?.tcp ?? 0;
+          const udpConn = msg.conn?.udp ?? 0;
           const l1 = msg.load?.l1 ?? 0;
           const l5 = msg.load?.l5 ?? 0;
           const l15 = msg.load?.l15 ?? 0;
@@ -145,9 +147,11 @@ export function attachWebSockets(opts: {
               `INSERT INTO metrics (
                  machine_id, at,
                  cpu_usage, mem_used, mem_total, disk_used, disk_total,
-                 net_rx_bytes, net_tx_bytes, load_1, load_5, load_15
-               )
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                 net_rx_bytes, net_tx_bytes,
+                 tcp_conn, udp_conn,
+                 load_1, load_5, load_15
+                )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
             )
             .run(
               machineId,
@@ -159,6 +163,8 @@ export function attachWebSockets(opts: {
               msg.disk.total,
               netRx,
               netTx,
+              tcpConn,
+              udpConn,
               l1,
               l5,
               l15
@@ -178,6 +184,7 @@ export function attachWebSockets(opts: {
               mem: msg.mem,
               disk: msg.disk,
               net: msg.net,
+              conn: msg.conn,
               load: msg.load,
             },
             ...(monthTraffic ? { monthTraffic } : {}),
@@ -464,6 +471,7 @@ const AgentMessageSchema = z.discriminatedUnion("type", [
     net: z
       .object({ rxBytes: z.number().int().nonnegative(), txBytes: z.number().int().nonnegative() })
       .optional(),
+    conn: z.object({ tcp: z.number().int().nonnegative(), udp: z.number().int().nonnegative() }).optional(),
     load: z.object({ l1: z.number().nonnegative(), l5: z.number().nonnegative(), l15: z.number().nonnegative() }).optional(),
   }),
 ]);

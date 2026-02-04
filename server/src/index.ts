@@ -203,10 +203,11 @@ app.get("/api/public/summary", (_req, res) => {
          x.at as metricAt,
          x.cpu_usage as cpuUsage,
          x.mem_used as memUsed, x.mem_total as memTotal,
-         x.disk_used as diskUsed, x.disk_total as diskTotal,
-         x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
-         x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
-       FROM machines m
+          x.disk_used as diskUsed, x.disk_total as diskTotal,
+          x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
+          x.tcp_conn as tcpConn, x.udp_conn as udpConn,
+          x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
+        FROM machines m
        LEFT JOIN traffic_cycles tc ON tc.machine_id = m.id AND tc.start_at <= ? AND tc.end_at > ?
        LEFT JOIN metrics x ON x.id = (
          SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
@@ -238,21 +239,23 @@ app.get("/api/public/summary", (_req, res) => {
         const b = billingMonthBoundsUtc(now, r.anchorDay ?? 1);
         return { month: b.periodKey, startAt: b.startAt, endAt: b.endAt, rxBytes: 0, txBytes: 0 };
       })(),
-      latestMetric: r.metricAt
-        ? {
-            at: r.metricAt,
-            cpuUsage: r.cpuUsage,
-            memUsed: r.memUsed,
-            memTotal: r.memTotal,
-            diskUsed: r.diskUsed,
-            diskTotal: r.diskTotal,
-            netRxBytes: r.netRxBytes,
-            netTxBytes: r.netTxBytes,
-            load1: r.load1,
-            load5: r.load5,
-            load15: r.load15,
-          }
-        : null,
+        latestMetric: r.metricAt
+          ? {
+              at: r.metricAt,
+              cpuUsage: r.cpuUsage,
+              memUsed: r.memUsed,
+              memTotal: r.memTotal,
+              diskUsed: r.diskUsed,
+              diskTotal: r.diskTotal,
+              netRxBytes: r.netRxBytes,
+              netTxBytes: r.netTxBytes,
+              tcpConn: r.tcpConn ?? 0,
+              udpConn: r.udpConn ?? 0,
+              load1: r.load1,
+              load5: r.load5,
+              load15: r.load15,
+            }
+          : null,
     })),
   });
 });
@@ -299,6 +302,7 @@ app.get("/api/public/machines/:id", (req, res) => {
          mem_used as memUsed, mem_total as memTotal,
          disk_used as diskUsed, disk_total as diskTotal,
          net_rx_bytes as netRxBytes, net_tx_bytes as netTxBytes,
+         tcp_conn as tcpConn, udp_conn as udpConn,
          load_1 as load1, load_5 as load5, load_15 as load15
        FROM metrics WHERE machine_id = ? ORDER BY at DESC LIMIT 300`
     )
@@ -883,10 +887,11 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
          x.at as metricAt,
          x.cpu_usage as cpuUsage,
          x.mem_used as memUsed, x.mem_total as memTotal,
-         x.disk_used as diskUsed, x.disk_total as diskTotal,
-         x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
-         x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
-       FROM machines m
+          x.disk_used as diskUsed, x.disk_total as diskTotal,
+          x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
+          x.tcp_conn as tcpConn, x.udp_conn as udpConn,
+          x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
+        FROM machines m
        LEFT JOIN traffic_cycles tc ON tc.machine_id = m.id AND tc.start_at <= ? AND tc.end_at > ?
        LEFT JOIN metrics x ON x.id = (
          SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
@@ -942,6 +947,8 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
             diskTotal: r.diskTotal,
             netRxBytes: r.netRxBytes,
             netTxBytes: r.netTxBytes,
+            tcpConn: r.tcpConn ?? 0,
+            udpConn: r.udpConn ?? 0,
             load1: r.load1,
             load5: r.load5,
             load15: r.load15,
@@ -1216,6 +1223,7 @@ app.get("/api/machines/:id/metrics", requireAuth, (req, res) => {
          mem_used as memUsed, mem_total as memTotal,
          disk_used as diskUsed, disk_total as diskTotal,
          net_rx_bytes as netRxBytes, net_tx_bytes as netTxBytes,
+         tcp_conn as tcpConn, udp_conn as udpConn,
          load_1 as load1, load_5 as load5, load_15 as load15
        FROM metrics WHERE machine_id = ? ORDER BY at DESC LIMIT ?`
     )

@@ -134,6 +134,8 @@ export function MachinePage() {
                   diskTotal: ev.metric.disk.total,
                   netRxBytes: ev.metric.net?.rxBytes ?? 0,
                   netTxBytes: ev.metric.net?.txBytes ?? 0,
+                  tcpConn: ev.metric.conn?.tcp ?? 0,
+                  udpConn: ev.metric.conn?.udp ?? 0,
                   load1: ev.metric.load?.l1 ?? 0,
                   load5: ev.metric.load?.l5 ?? 0,
                   load15: ev.metric.load?.l15 ?? 0,
@@ -392,6 +394,15 @@ export function MachinePage() {
             <span className="text-violet-200/90">速度：RX {formatBps(rxBps)} · TX {formatBps(txBps)}</span>
           </div>
           <div className="mt-2 text-xs text-white/50">来自 `/proc/net/dev` 汇总（排除 lo）。</div>
+        </div>
+
+        <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+          <div className="mb-1 text-xs text-white/60">连接数</div>
+          <div className="text-sm text-white/80">
+            <span className="text-sky-200/90">TCP: {last ? String(last.tcpConn ?? 0) : "—"}</span> ·{" "}
+            <span className="text-amber-200/90">UDP: {last ? String(last.udpConn ?? 0) : "—"}</span>
+          </div>
+          <div className="mt-2 text-xs text-white/50">来自 `/proc/net/tcp*` + `/proc/net/udp*` 的条目数量。</div>
         </div>
       </div>
 

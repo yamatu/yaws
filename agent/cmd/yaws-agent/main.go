@@ -48,6 +48,10 @@ type metricsMsg struct {
 		RxBytes int64 `json:"rxBytes"`
 		TxBytes int64 `json:"txBytes"`
 	} `json:"net,omitempty"`
+	Conn *struct {
+		TCP int64 `json:"tcp"`
+		UDP int64 `json:"udp"`
+	} `json:"conn,omitempty"`
 	Load struct {
 		L1  float64 `json:"l1"`
 		L5  float64 `json:"l5"`
@@ -267,6 +271,14 @@ func collectMetrics(diskPath string, cpu *cpuSampler) (metricsMsg, error) {
 	l1, l5, l15, err := readLoad()
 	if err != nil {
 		l1, l5, l15 = 0, 0, 0
+	}
+
+	tcpConn, udpConn, err := readConnCounts()
+	if err == nil {
+		m.Conn = &struct {
+			TCP int64 `json:"tcp"`
+			UDP int64 `json:"udp"`
+		}{TCP: tcpConn, UDP: udpConn}
 	}
 
 	m.CPU.Usage = clamp01(cpuUsage)

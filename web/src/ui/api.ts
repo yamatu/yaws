@@ -117,6 +117,8 @@ export type Metric = {
   diskTotal: number;
   netRxBytes: number;
   netTxBytes: number;
+  tcpConn?: number;
+  udpConn?: number;
   load1: number;
   load5: number;
   load15: number;

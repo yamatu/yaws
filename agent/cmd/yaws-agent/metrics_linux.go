@@ -203,3 +203,51 @@ func readNet() (rxBytes, txBytes int64, err error) {
 	}
 	return rxBytes, txBytes, nil
 }
+
+func readConnCounts() (tcp int64, udp int64, err error) {
+	tcp4, err := countProcNetConns("/proc/net/tcp")
+	if err != nil {
+		return 0, 0, err
+	}
+	tcp6, err := countProcNetConns("/proc/net/tcp6")
+	if err != nil {
+		return 0, 0, err
+	}
+	udp4, err := countProcNetConns("/proc/net/udp")
+	if err != nil {
+		return 0, 0, err
+	}
+	udp6, err := countProcNetConns("/proc/net/udp6")
+	if err != nil {
+		return 0, 0, err
+	}
+	return tcp4 + tcp6, udp4 + udp6, nil
+}
+
+func countProcNetConns(filePath string) (int64, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	// header
+	if !sc.Scan() {
+		return 0, nil
+	}
+	var n int64
+	for sc.Scan() {
+		if strings.TrimSpace(sc.Text()) == "" {
+			continue
+		}
+		n++
+	}
+	if err := sc.Err(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}

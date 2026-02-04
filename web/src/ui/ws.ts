@@ -13,6 +13,7 @@ export type WsEvent =
         mem: { used: number; total: number };
         disk: { used: number; total: number };
         net?: { rxBytes: number; txBytes: number };
+        conn?: { tcp: number; udp: number };
         load?: { l1: number; l5: number; l15: number };
       };
       monthTraffic?: { month: string; startAt?: number; endAt?: number; rxBytes: number; txBytes: number; updatedAt?: number };

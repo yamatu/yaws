@@ -27,3 +27,7 @@ func readNet() (rxBytes, txBytes int64, err error) {
 func readLoad() (l1, l5, l15 float64, err error) {
 	return 0, 0, 0, fmt.Errorf("unsupported OS")
 }
+
+func readConnCounts() (tcp int64, udp int64, err error) {
+	return 0, 0, fmt.Errorf("unsupported OS")
+}
