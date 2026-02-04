@@ -34,6 +34,34 @@ export function attachWebSockets(opts: {
       socket.destroy();
       return;
     }
+
+    // Hard reject before WebSocket upgrade for security.
+    // This ensures unauthenticated clients can't even establish a WS connection.
+    if (url.pathname === "/ws/ui" || url.pathname === "/ws/ssh") {
+      const token = url.searchParams.get("token") ?? "";
+      if (!token) {
+        socket.destroy();
+        return;
+      }
+      try {
+        const user = verifyToken(token, opts.jwtSecret);
+        const row = opts.db
+          .prepare("SELECT id, role FROM users WHERE id = ?")
+          .get(user.id) as { id: number; role: string } | undefined;
+        if (!row) {
+          socket.destroy();
+          return;
+        }
+        if (url.pathname === "/ws/ssh" && row.role !== "admin") {
+          socket.destroy();
+          return;
+        }
+      } catch {
+        socket.destroy();
+        return;
+      }
+    }
+
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
   });
 
