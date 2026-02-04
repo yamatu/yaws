@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { apiFetch, type MachineSummary } from "./api";
 import { connectUiWs } from "./ws";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, formatMoneyCents, pct } from "./format";
@@ -23,6 +23,7 @@ type SortMode = "custom" | "expiry" | "offline";
 type GroupKey = string; // "__all__" | "__ungrouped__" | groupName
 
 export function DashboardPage() {
+  const nav = useNavigate();
   const [machines, setMachines] = useState<MachineSummary[]>([]);
   const [latest, setLatest] = useState<Record<number, LiveMetric>>({});
   const [wsOk, setWsOk] = useState(false);
@@ -364,6 +365,7 @@ export function DashboardPage() {
             const memP = lm ? pct(lm.memUsed, lm.memTotal) : null;
             const diskP = lm ? pct(lm.diskUsed, lm.diskTotal) : null;
             const left = daysLeft(m.expiresAt);
+            const sshOk = !!(m.sshHost && m.sshUser && (m.sshAuthType === "key" ? m.sshHasKey : m.sshHasPassword));
             return (
               <Link
                 className="block rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur hover:bg-white/15"
@@ -372,6 +374,35 @@ export function DashboardPage() {
               >
                 <div className="mb-2 flex items-center gap-2">
                   <div className="flex-1 font-extrabold">{m.name}</div>
+                  <button
+                    className={`rounded-xl border px-2 py-1 text-xs ${
+                      sshOk ? "border-white/15 bg-white/10 text-white/80 hover:bg-white/15" : "border-white/10 bg-white/5 text-white/40"
+                    }`}
+                    title={sshOk ? "WebSSH" : "未配置 SSH"}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (!sshOk) return;
+                      nav(`machines/${m.id}/ssh`);
+                    }}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-4 w-4">
+                      <path
+                        d="M4 6h16v12H4V6Z"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M7 10l3 2-3 2"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path d="M12 14h5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    </svg>
+                  </button>
                   <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-2 py-1 text-xs text-white/70">
                     <span className={`h-2 w-2 rounded-full ${m.online ? "bg-emerald-400" : "bg-white/25"}`} />
                     {m.online ? "在线" : "离线"}
@@ -481,6 +512,7 @@ export function DashboardPage() {
             const left = daysLeft(m.expiresAt);
             const isExpanded = !!expanded[m.id];
             const expiryClass = left != null && left <= 10 ? "text-rose-300" : "text-white/70";
+            const sshOk = !!(m.sshHost && m.sshUser && (m.sshAuthType === "key" ? m.sshHasKey : m.sshHasPassword));
             return (
               <div
                 key={m.id}
@@ -553,6 +585,34 @@ export function DashboardPage() {
                     >
                       详情
                     </Link>
+                    <button
+                      className={`rounded-xl border px-2 py-1 text-xs ${
+                        sshOk ? "border-white/15 bg-white/10 text-white/80 hover:bg-white/15" : "border-white/10 bg-white/5 text-white/40"
+                      }`}
+                      title={sshOk ? "WebSSH" : "未配置 SSH"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!sshOk) return;
+                        nav(`machines/${m.id}/ssh`);
+                      }}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-4 w-4">
+                        <path
+                          d="M4 6h16v12H4V6Z"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinejoin="round"
+                        />
+                        <path
+                          d="M7 10l3 2-3 2"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <path d="M12 14h5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                      </svg>
+                    </button>
                     <div className="rounded-xl border border-white/10 bg-white/5 px-2 py-1 text-xs text-white/60">
                       <svg
                         className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}

@@ -4,6 +4,8 @@ import { z } from "zod";
 import type { Db } from "./db.js";
 import { verifyToken } from "./auth.js";
 import bcrypt from "bcryptjs";
+import { Client as SshClient } from "ssh2";
+import { decryptText } from "./crypto.js";
 
 type UiClient = {
   ws: WebSocket;
@@ -20,6 +22,7 @@ export function attachWebSockets(opts: {
   server: import("node:http").Server;
   db: Db;
   jwtSecret: string;
+  agentKeySecret: string;
 }) {
   const wss = new WebSocketServer({ noServer: true });
   const uiClients = new Set<UiClient>();
@@ -27,7 +30,7 @@ export function attachWebSockets(opts: {
 
   opts.server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
-    if (url.pathname !== "/ws/ui" && url.pathname !== "/ws/agent") {
+    if (url.pathname !== "/ws/ui" && url.pathname !== "/ws/agent" && url.pathname !== "/ws/ssh") {
       socket.destroy();
       return;
     }
@@ -37,8 +40,208 @@ export function attachWebSockets(opts: {
   wss.on("connection", (ws, req: IncomingMessage) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
     if (url.pathname === "/ws/ui") handleUi(ws, req, url);
-    else handleAgent(ws, req, url);
+    else if (url.pathname === "/ws/agent") handleAgent(ws, req, url);
+    else handleSsh(ws, req, url);
   });
+
+  function handleSsh(ws: WebSocket, _req: IncomingMessage, url: URL) {
+    const token = url.searchParams.get("token") ?? "";
+    try {
+      verifyToken(token, opts.jwtSecret);
+    } catch {
+      ws.close(1008, "invalid token");
+      return;
+    }
+
+    let ssh: SshClient | null = null;
+    let stream: any = null;
+    let connected = false;
+
+    const cleanup = () => {
+      try {
+        stream?.end?.();
+      } catch {
+        // ignore
+      }
+      try {
+        ssh?.end();
+      } catch {
+        // ignore
+      }
+      stream = null;
+      ssh = null;
+      connected = false;
+    };
+
+    ws.on("close", cleanup);
+
+    ws.on("message", (data) => {
+      let msg: any;
+      try {
+        msg = SshMessageSchema.parse(JSON.parse(data.toString("utf8")));
+      } catch {
+        ws.send(JSON.stringify({ type: "error", error: "bad_message" }));
+        return;
+      }
+
+      if (msg.type === "connect") {
+        if (connected) return;
+        const row = opts.db
+          .prepare(
+            `SELECT
+               id,
+               ssh_host as sshHost,
+               ssh_port as sshPort,
+               ssh_user as sshUser,
+               ssh_auth_type as sshAuthType,
+               ssh_password_enc as sshPasswordEnc,
+               ssh_key_enc as sshKeyEnc
+             FROM machines
+             WHERE id = ?`
+          )
+          .get(msg.machineId) as
+          | {
+              id: number;
+              sshHost: string;
+              sshPort: number;
+              sshUser: string;
+              sshAuthType: string;
+              sshPasswordEnc: string;
+              sshKeyEnc: string;
+            }
+          | undefined;
+        if (!row) {
+          ws.send(JSON.stringify({ type: "error", error: "not_found" }));
+          return;
+        }
+
+        const host = (row.sshHost ?? "").trim();
+        const port = Number(row.sshPort ?? 22);
+        const username = (row.sshUser ?? "").trim();
+        const authType = (row.sshAuthType ?? "password").trim();
+        if (!host || !username || !Number.isFinite(port) || port <= 0 || port > 65535) {
+          ws.send(JSON.stringify({ type: "error", error: "ssh_not_configured" }));
+          return;
+        }
+
+        const cols = Number(msg.cols ?? 120);
+        const rows = Number(msg.rows ?? 30);
+
+        ssh = new SshClient();
+        connected = true;
+
+        ssh.on("ready", () => {
+          try {
+            ws.send(JSON.stringify({ type: "ready" }));
+          } catch {
+            // ignore
+          }
+          ssh!.shell(
+            {
+              term: "xterm-256color",
+              cols: Math.max(20, Math.min(500, cols)),
+              rows: Math.max(5, Math.min(200, rows)),
+            },
+            (err: any, s: any) => {
+              if (err) {
+                ws.send(JSON.stringify({ type: "error", error: "shell_failed" }));
+                ws.close(1011, "shell_failed");
+                cleanup();
+                return;
+              }
+              stream = s;
+              stream.on("data", (chunk: Buffer) => {
+                try {
+                  ws.send(JSON.stringify({ type: "output", dataB64: chunk.toString("base64") }));
+                } catch {
+                  // ignore
+                }
+              });
+              stream.on("close", () => {
+                try {
+                  ws.send(JSON.stringify({ type: "exit" }));
+                } catch {
+                  // ignore
+                }
+                ws.close(1000, "exit");
+                cleanup();
+              });
+            }
+          );
+        });
+
+        ssh.on("error", (e: any) => {
+          try {
+            ws.send(JSON.stringify({ type: "error", error: e?.level ? `ssh_${e.level}` : "ssh_error" }));
+          } catch {
+            // ignore
+          }
+          try {
+            ws.close(1011, "ssh_error");
+          } catch {
+            // ignore
+          }
+          cleanup();
+        });
+
+        try {
+          const common: any = {
+            host,
+            port,
+            username,
+            readyTimeout: 15_000,
+            keepaliveInterval: 10_000,
+            keepaliveCountMax: 3,
+            hostVerifier: () => true,
+          };
+          if (authType === "key") {
+            if (!row.sshKeyEnc) {
+              ws.send(JSON.stringify({ type: "error", error: "ssh_key_missing" }));
+              cleanup();
+              return;
+            }
+            const key = decryptText(row.sshKeyEnc, opts.agentKeySecret);
+            ssh.connect({ ...common, privateKey: key });
+          } else {
+            if (!row.sshPasswordEnc) {
+              ws.send(JSON.stringify({ type: "error", error: "ssh_password_missing" }));
+              cleanup();
+              return;
+            }
+            const password = decryptText(row.sshPasswordEnc, opts.agentKeySecret);
+            ssh.connect({ ...common, password });
+          }
+        } catch {
+          ws.send(JSON.stringify({ type: "error", error: "ssh_connect_failed" }));
+          cleanup();
+        }
+        return;
+      }
+
+      if (msg.type === "input") {
+        if (!stream) return;
+        try {
+          const buf = Buffer.from(msg.dataB64, "base64");
+          stream.write(buf);
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
+      if (msg.type === "resize") {
+        if (!stream?.setWindow) return;
+        const cols = Math.max(20, Math.min(500, Number(msg.cols)));
+        const rows = Math.max(5, Math.min(200, Number(msg.rows)));
+        try {
+          stream.setWindow(rows, cols, 0, 0);
+        } catch {
+          // ignore
+        }
+        return;
+      }
+    });
+  }
 
   function handleUi(ws: WebSocket, _req: IncomingMessage, url: URL) {
     const token = url.searchParams.get("token") ?? "";
@@ -447,6 +650,17 @@ function updateMonthlyTraffic(db: Db, machineId: number, at: number, netRx: numb
 
 const UiMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("subscribe"), machineIds: z.array(z.number().int().positive()) }),
+]);
+
+const SshMessageSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("connect"),
+    machineId: z.number().int().positive(),
+    cols: z.number().int().positive().max(500).optional(),
+    rows: z.number().int().positive().max(200).optional(),
+  }),
+  z.object({ type: z.literal("input"), dataB64: z.string().min(1) }),
+  z.object({ type: z.literal("resize"), cols: z.number().int().positive().max(500), rows: z.number().int().positive().max(200) }),
 ]);
 
 const AgentMessageSchema = z.discriminatedUnion("type", [

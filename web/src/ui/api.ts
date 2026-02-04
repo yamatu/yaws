@@ -95,6 +95,12 @@ export type Machine = {
   cpuCores?: number;
   intervalSec: number;
   agentWsUrl: string;
+  sshHost?: string;
+  sshPort?: number;
+  sshUser?: string;
+  sshAuthType?: "password" | "key";
+  sshHasPassword?: boolean;
+  sshHasKey?: boolean;
   expiresAt: number | null;
   purchaseAmountCents: number;
   billingCycle: "month" | "quarter" | "half_year" | "year" | "two_year" | "three_year";

@@ -28,6 +28,14 @@ export function MachinePage() {
   >("month");
   const [editAutoRenew, setEditAutoRenew] = useState(false);
   const [editAgentWsUrl, setEditAgentWsUrl] = useState("");
+  const [editSshHost, setEditSshHost] = useState("");
+  const [editSshPort, setEditSshPort] = useState<number>(22);
+  const [editSshUser, setEditSshUser] = useState("");
+  const [editSshAuthType, setEditSshAuthType] = useState<"password" | "key">("password");
+  const [editSshPassword, setEditSshPassword] = useState("");
+  const [editSshPrivateKey, setEditSshPrivateKey] = useState("");
+  const [clearSshPassword, setClearSshPassword] = useState(false);
+  const [clearSshKey, setClearSshKey] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [installScript, setInstallScript] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -50,6 +58,15 @@ export function MachinePage() {
           setEditAutoRenew(!!m.autoRenew);
           setEditPurchaseAmount((m.purchaseAmountCents ?? 0) / 100);
           setEditExpiresDate(m.expiresAt ? new Date(m.expiresAt).toISOString().slice(0, 10) : "");
+
+          setEditSshHost((m.sshHost ?? "").trim());
+          setEditSshPort(Number(m.sshPort ?? 22));
+          setEditSshUser((m.sshUser ?? "").trim());
+          setEditSshAuthType((m.sshAuthType ?? "password") as any);
+          setEditSshPassword("");
+          setEditSshPrivateKey("");
+          setClearSshPassword(false);
+          setClearSshKey(false);
         }
         const ms = await apiFetch<{ metrics: Metric[] }>(`/api/machines/${machineId}/metrics?limit=300`, {
           signal: ac.signal,
@@ -209,6 +226,11 @@ export function MachinePage() {
   }
 
   const left = daysLeft(machine.expiresAt);
+  const sshOk = !!(
+    (machine.sshHost ?? "").trim() &&
+    (machine.sshUser ?? "").trim() &&
+    ((machine.sshAuthType ?? "password") === "key" ? !!machine.sshHasKey : !!machine.sshHasPassword)
+  );
 
   return (
     <div className="grid gap-3">
@@ -224,6 +246,33 @@ export function MachinePage() {
             <span className={`h-2 w-2 rounded-full ${machine.online ? "bg-emerald-400" : "bg-white/25"}`} />
             {machine.online ? "在线" : "离线"}
           </span>
+          {sshOk ? (
+            <Link
+              className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15"
+              to="ssh"
+              title="WebSSH"
+              aria-label="WebSSH"
+            >
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-5 w-5">
+                <path d="M4 6h16v12H4V6Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+                <path d="M7 10l3 2-3 2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M12 14h5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </Link>
+          ) : (
+            <button
+              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/40"
+              title="未配置 SSH"
+              aria-label="SSH 未配置"
+              disabled
+            >
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-5 w-5">
+                <path d="M4 6h16v12H4V6Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+                <path d="M7 10l3 2-3 2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M12 14h5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+          )}
           <button
             className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15"
             onClick={async () => {
@@ -534,6 +583,17 @@ export function MachinePage() {
               <div>购买金额：{formatMoneyCents(machine.purchaseAmountCents)}</div>
               <div>计费周期：{cycleLabel(machine.billingCycle)}</div>
               <div>自动续费：{machine.autoRenew ? "开启" : "关闭"}</div>
+              <div>
+                SSH：
+                {(machine.sshHost ?? "").trim() && (machine.sshUser ?? "").trim()
+                  ? `${machine.sshUser}@${machine.sshHost}:${machine.sshPort ?? 22} · ${(machine.sshAuthType ?? "password") === "key" ? "Key" : "Password"}`
+                  : "未配置"}
+                {sshOk ? (
+                  <Link className="ml-2 text-sky-200/90 hover:underline" to="ssh">
+                    打开 WebSSH
+                  </Link>
+                ) : null}
+              </div>
             </div>
           ) : (
             <div className="grid gap-3">
@@ -561,6 +621,112 @@ export function MachinePage() {
                   value={editAgentWsUrl}
                   onChange={(e) => setEditAgentWsUrl(e.target.value)}
                 />
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                <div className="mb-2 text-sm font-semibold">SSH（Web）</div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <div>
+                    <div className="mb-1 text-xs text-white/60">Host</div>
+                    <input
+                      className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                      value={editSshHost}
+                      onChange={(e) => setEditSshHost(e.target.value)}
+                      placeholder="例如：1.2.3.4 或 example.com"
+                    />
+                  </div>
+                  <div>
+                    <div className="mb-1 text-xs text-white/60">Port</div>
+                    <input
+                      className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                      type="number"
+                      min={1}
+                      max={65535}
+                      value={editSshPort}
+                      onChange={(e) => setEditSshPort(Number(e.target.value))}
+                    />
+                  </div>
+                  <div>
+                    <div className="mb-1 text-xs text-white/60">用户名</div>
+                    <input
+                      className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                      value={editSshUser}
+                      onChange={(e) => setEditSshUser(e.target.value)}
+                      placeholder="例如：root"
+                    />
+                  </div>
+                  <div>
+                    <div className="mb-1 text-xs text-white/60">认证方式</div>
+                    <select
+                      className="yaws-select w-full text-sm"
+                      value={editSshAuthType}
+                      onChange={(e) => setEditSshAuthType(e.target.value as any)}
+                    >
+                      <option value="password">密码</option>
+                      <option value="key">私钥</option>
+                    </select>
+                  </div>
+                </div>
+
+                {editSshAuthType === "password" ? (
+                  <div className="mt-3">
+                    <div className="mb-1 flex items-center gap-2 text-xs text-white/60">
+                      <div className="flex-1">密码（不会回显，留空表示不修改）</div>
+                      <div className="text-white/50">{machine.sshHasPassword ? "已设置" : "未设置"}</div>
+                    </div>
+                    <input
+                      className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                      type="password"
+                      value={editSshPassword}
+                      onChange={(e) => {
+                        setEditSshPassword(e.target.value);
+                        setClearSshPassword(false);
+                      }}
+                      placeholder={machine.sshHasPassword ? "********" : "请输入密码"}
+                    />
+                    <label className="mt-2 flex items-center gap-2 text-xs text-white/70">
+                      <input
+                        type="checkbox"
+                        checked={clearSshPassword}
+                        onChange={(e) => {
+                          setClearSshPassword(e.target.checked);
+                          if (e.target.checked) setEditSshPassword("");
+                        }}
+                      />
+                      清空已保存的密码
+                    </label>
+                  </div>
+                ) : (
+                  <div className="mt-3">
+                    <div className="mb-1 flex items-center gap-2 text-xs text-white/60">
+                      <div className="flex-1">私钥（PEM，留空表示不修改）</div>
+                      <div className="text-white/50">{machine.sshHasKey ? "已设置" : "未设置"}</div>
+                    </div>
+                    <textarea
+                      className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 font-mono text-xs outline-none focus:border-white/30"
+                      style={{ minHeight: 120, resize: "vertical" }}
+                      value={editSshPrivateKey}
+                      onChange={(e) => {
+                        setEditSshPrivateKey(e.target.value);
+                        setClearSshKey(false);
+                      }}
+                      placeholder={machine.sshHasKey ? "(已保存，粘贴新私钥以更新)" : "粘贴私钥内容"}
+                    />
+                    <label className="mt-2 flex items-center gap-2 text-xs text-white/70">
+                      <input
+                        type="checkbox"
+                        checked={clearSshKey}
+                        onChange={(e) => {
+                          setClearSshKey(e.target.checked);
+                          if (e.target.checked) setEditSshPrivateKey("");
+                        }}
+                      />
+                      清空已保存的私钥
+                    </label>
+                  </div>
+                )}
+
+                <div className="mt-2 text-xs text-white/50">提示：SSH 连接由主控发起，请确保主控能访问该 Host:Port。</div>
               </div>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <div>
@@ -620,6 +786,12 @@ export function MachinePage() {
                           name: editName,
                           groupName: editGroupName,
                           agentWsUrl: editAgentWsUrl,
+                          sshHost: editSshHost,
+                          sshPort: editSshPort,
+                          sshUser: editSshUser,
+                          sshAuthType: editSshAuthType,
+                          ...(clearSshPassword ? { sshPassword: "" } : editSshPassword ? { sshPassword: editSshPassword } : {}),
+                          ...(clearSshKey ? { sshPrivateKey: "" } : editSshPrivateKey ? { sshPrivateKey: editSshPrivateKey } : {}),
                           expiresAt,
                           purchaseAmount: editPurchaseAmount,
                           billingCycle: editBillingCycle,
@@ -633,6 +805,12 @@ export function MachinePage() {
                               name: editName,
                               groupName: editGroupName,
                               agentWsUrl: editAgentWsUrl,
+                              sshHost: editSshHost,
+                              sshPort: editSshPort,
+                              sshUser: editSshUser,
+                              sshAuthType: editSshAuthType,
+                              sshHasPassword: clearSshPassword ? false : editSshPassword ? true : !!prev.sshHasPassword,
+                              sshHasKey: clearSshKey ? false : editSshPrivateKey ? true : !!prev.sshHasKey,
                               expiresAt,
                               purchaseAmountCents: Math.round(editPurchaseAmount * 100),
                               billingCycle: editBillingCycle,
@@ -640,6 +818,10 @@ export function MachinePage() {
                             }
                           : prev
                       );
+                      setEditSshPassword("");
+                      setEditSshPrivateKey("");
+                      setClearSshPassword(false);
+                      setClearSshKey(false);
                       setEditing(false);
                     } catch (e: any) {
                       setSaveError(e?.message ?? "保存失败");

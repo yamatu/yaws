@@ -8,6 +8,7 @@ import { MachineNewPage } from "./ui/MachineNewPage";
 import { PublicDashboardPage } from "./ui/PublicDashboardPage";
 import { SettingsPage } from "./ui/SettingsPage";
 import { PublicMachinePage } from "./ui/PublicMachinePage";
+import { SshPage } from "./ui/SshPage";
 import { getToken } from "./ui/auth";
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -20,6 +21,14 @@ export const router = createBrowserRouter([
   { path: "/", element: <PublicDashboardPage /> },
   { path: "/m/:id", element: <PublicMachinePage /> },
   { path: "/login", element: <LoginPage /> },
+  {
+    path: "/app/machines/:id/ssh",
+    element: (
+      <RequireAuth>
+        <SshPage />
+      </RequireAuth>
+    ),
+  },
   {
     path: "/app",
     element: (
