@@ -244,6 +244,9 @@ export function PublicDashboardPage() {
                       <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-2 py-1 text-violet-200">
                         速度：{lm ? `RX ${formatBps(sp.rxBps)} / TX ${formatBps(sp.txBps)}` : "—"}
                       </span>
+                      <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-1 text-sky-200">
+                        连接：{lm ? `TCP ${String(lm.tcpConn ?? 0)} · UDP ${String(lm.udpConn ?? 0)}` : "—"}
+                      </span>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 text-amber-200">
@@ -329,7 +332,10 @@ export function PublicDashboardPage() {
                     <div className="text-white/70">内存：{lm ? `${Math.round((memP ?? 0) * 100)}%` : "—"}</div>
                     <div className="text-white/70">磁盘：{lm ? `${Math.round((diskP ?? 0) * 100)}%` : "—"}</div>
                     <div className="text-violet-200/90">
-                      网速：{lm ? `RX ${formatBps(sp.rxBps)} / TX ${formatBps(sp.txBps)}` : "—"}
+                      <span>网速：{lm ? `RX ${formatBps(sp.rxBps)} / TX ${formatBps(sp.txBps)}` : "—"}</span>
+                      <span className="ml-2 text-sky-200/90">
+                        连接：{lm ? `TCP ${String(lm.tcpConn ?? 0)} · UDP ${String(lm.udpConn ?? 0)}` : "—"}
+                      </span>
                     </div>
                     <div className="text-amber-200/90">
                       到期：{m.expiresAt ? new Date(m.expiresAt).toLocaleDateString() : "—"}

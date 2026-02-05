@@ -228,17 +228,11 @@ export function PublicMachinePage() {
               </div>
               <div className="mt-1 text-sm text-white/80">
                 <span className="text-violet-200/90">速度：RX {formatBps(rxBps)} · TX {formatBps(txBps)}</span>
+                <span className="ml-2 text-sky-200/90">
+                  连接：TCP {last ? String(last.tcpConn ?? 0) : "—"} · UDP {last ? String(last.udpConn ?? 0) : "—"}
+                </span>
               </div>
               <div className="mt-2 text-xs text-white/50">按 5 秒刷新间隔计算速度。</div>
-            </div>
-
-            <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
-              <div className="mb-1 text-xs text-white/60">连接数</div>
-              <div className="text-sm text-white/80">
-                <span className="text-sky-200/90">TCP: {last ? String(last.tcpConn ?? 0) : "—"}</span> ·{" "}
-                <span className="text-amber-200/90">UDP: {last ? String(last.udpConn ?? 0) : "—"}</span>
-              </div>
-              <div className="mt-2 text-xs text-white/50">来自 `/proc/net/tcp*` + `/proc/net/udp*` 的条目数量。</div>
             </div>
           </div>
         </div>
