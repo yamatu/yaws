@@ -29,17 +29,17 @@ export function MachineNewPage() {
   const canSubmit = useMemo(() => name.trim().length > 0, [name]);
 
   return (
-    <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+    <div className="yaws-card p-5">
       <div className="mb-4">
-        <div className="text-lg font-extrabold">新增机器</div>
-        <div className="text-xs text-white/60">通讯方式目前固定为 WS（探针连接 `/ws/agent`）</div>
+        <div className="text-lg font-extrabold tracking-wide">新增机器</div>
+        <div className="text-xs text-white/50">通讯方式目前固定为 WS（探针连接 `/ws/agent`）</div>
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <div>
-          <div className="mb-1 text-xs text-white/60">名称</div>
+          <div className="mb-1 text-xs text-white/50">名称</div>
           <input
-            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+            className="yaws-input"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="例如：prod-01"
@@ -47,9 +47,9 @@ export function MachineNewPage() {
         </div>
 
         <div>
-          <div className="mb-1 text-xs text-white/60">分组（可选）</div>
+          <div className="mb-1 text-xs text-white/50">分组（可选）</div>
           <input
-            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+            className="yaws-input"
             value={groupName}
             onChange={(e) => setGroupName(e.target.value)}
             placeholder="例如：香港 / 东京 / AWS"
@@ -57,9 +57,9 @@ export function MachineNewPage() {
         </div>
 
         <div>
-          <div className="mb-1 text-xs text-white/60">上报间隔（秒）</div>
+          <div className="mb-1 text-xs text-white/50">上报间隔（秒）</div>
           <input
-            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+            className="yaws-input"
             type="number"
             min={2}
             max={3600}
@@ -69,20 +69,20 @@ export function MachineNewPage() {
         </div>
 
         <div className="md:col-span-2">
-          <div className="mb-1 text-xs text-white/60">探针连接地址（agent 使用）</div>
+          <div className="mb-1 text-xs text-white/50">探针连接地址（agent 使用）</div>
           <input
-            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+            className="yaws-input"
             value={agentWsUrl}
             onChange={(e) => setAgentWsUrl(e.target.value)}
             placeholder="ws://<主控IP>:3001/ws/agent"
           />
-          <div className="mt-1 text-xs text-white/50">注意：被控端需要能访问这个地址（通常填写主控公网 IP/域名）。</div>
+          <div className="mt-1 text-xs text-white/35">注意：被控端需要能访问这个地址（通常填写主控公网 IP/域名）。</div>
         </div>
 
         <div>
-          <div className="mb-1 text-xs text-white/60">到期日期</div>
+          <div className="mb-1 text-xs text-white/50">到期日期</div>
           <input
-            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+            className="yaws-input"
             type="date"
             value={expiresDate}
             onChange={(e) => setExpiresDate(e.target.value)}
@@ -90,9 +90,9 @@ export function MachineNewPage() {
         </div>
 
         <div>
-          <div className="mb-1 text-xs text-white/60">购买金额（元）</div>
+          <div className="mb-1 text-xs text-white/50">购买金额（元）</div>
           <input
-            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+            className="yaws-input"
             type="number"
             min={0}
             step={0.01}
@@ -102,7 +102,7 @@ export function MachineNewPage() {
         </div>
 
         <div>
-          <div className="mb-1 text-xs text-white/60">计费周期</div>
+          <div className="mb-1 text-xs text-white/50">计费周期</div>
           <select
             className="yaws-select w-full text-sm"
             value={billingCycle}
@@ -118,16 +118,16 @@ export function MachineNewPage() {
         </div>
 
         <div className="flex items-end gap-2">
-          <label className="flex items-center gap-2 text-sm text-white/80">
+          <label className="flex items-center gap-2 text-sm text-white/70">
             <input type="checkbox" checked={autoRenew} onChange={(e) => setAutoRenew(e.target.checked)} />
             自动续费（仅站内展示）
           </label>
         </div>
 
         <div className="md:col-span-2">
-          <div className="mb-1 text-xs text-white/60">备注</div>
+          <div className="mb-1 text-xs text-white/50">备注</div>
           <textarea
-            className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+            className="yaws-input font-mono text-xs"
             style={{ minHeight: 90, resize: "vertical" }}
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
@@ -136,19 +136,19 @@ export function MachineNewPage() {
       </div>
 
       {error ? (
-        <div className="mt-3 rounded-2xl border border-rose-400/40 bg-rose-500/10 p-3 text-sm">{error}</div>
+        <div className="mt-3 yaws-alert-error">{error}</div>
       ) : null}
 
       <div className="mt-4 flex items-center gap-2">
         <div className="flex-1" />
         <button
-          className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15"
+          className="yaws-btn"
           onClick={() => nav(-1)}
         >
           取消
         </button>
         <button
-          className="rounded-xl border border-sky-400/40 bg-sky-400/15 px-3 py-2 text-sm font-semibold hover:bg-sky-400/20 disabled:opacity-60"
+          className="yaws-btn-primary disabled:opacity-50"
           disabled={!canSubmit || loading}
           onClick={async () => {
             setLoading(true);

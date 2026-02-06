@@ -211,14 +211,14 @@ export function MachinePage() {
   }, [machine]);
 
   if (!Number.isInteger(machineId) || machineId <= 0) {
-    return <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">bad machine id</div>;
+    return <div className="yaws-card p-4">bad machine id</div>;
   }
 
   if (!machine) {
     return (
-      <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+      <div className="yaws-card p-4">
         <div className="mb-2 font-extrabold">机器不存在</div>
-        <Link className="inline-flex rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15" to="/app">
+        <Link className="yaws-btn inline-flex" to="/app">
           返回
         </Link>
       </div>
@@ -234,21 +234,21 @@ export function MachinePage() {
 
   return (
     <div className="grid gap-3">
-      <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+      <div className="yaws-card p-4">
         <div className="mb-2 flex items-start gap-3">
           <div className="flex-1">
             <div className="text-lg font-extrabold">{machine.name}</div>
-            <div className="text-xs text-white/60">
+            <div className="text-xs text-white/40">
               ID: {machine.id} · Last seen: {fmtTime(machine.lastSeenAt)}
             </div>
           </div>
-          <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-2 py-1 text-xs text-white/70">
-            <span className={`h-2 w-2 rounded-full ${machine.online ? "bg-emerald-400" : "bg-white/25"}`} />
+          <span className="inline-flex items-center gap-2 rounded-full border border-white/[0.06] bg-white/5 px-2 py-1 text-xs text-white/50">
+            <span className={machine.online ? "yaws-dot-online" : "yaws-dot-offline"} />
             {machine.online ? "在线" : "离线"}
           </span>
           {sshOk ? (
             <Link
-              className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15"
+              className="yaws-btn"
               to="ssh"
               title="WebSSH"
               aria-label="WebSSH"
@@ -261,7 +261,7 @@ export function MachinePage() {
             </Link>
           ) : (
             <button
-              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/40"
+              className="rounded-lg border border-white/[0.06] bg-white/[0.03] px-3 py-2 text-sm text-white/30"
               title="未配置 SSH"
               aria-label="SSH 未配置"
               disabled
@@ -274,7 +274,7 @@ export function MachinePage() {
             </button>
           )}
           <button
-            className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15"
+            className="yaws-btn"
             onClick={async () => {
               if (!confirm("确认删除该机器及其指标数据？")) return;
               await apiFetch(`/api/machines/${machine.id}`, { method: "DELETE" });
@@ -285,8 +285,8 @@ export function MachinePage() {
           </button>
         </div>
 
-        <div className="flex flex-wrap gap-2 text-xs text-white/70">
-          <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 text-amber-200">
+        <div className="flex flex-wrap gap-2 text-xs text-white/50">
+          <span className="yaws-badge border-amber-400/20 bg-amber-500/8 text-amber-300/80">
             到期：{machine.expiresAt ? new Date(machine.expiresAt).toLocaleDateString() : "—"}
             {left != null ? (
               <span className={`ml-1 ${left <= 10 ? "text-rose-300" : "text-amber-100"}`}>（{left} 天）</span>
@@ -294,31 +294,31 @@ export function MachinePage() {
               ""
             )}
           </span>
-          <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-1 text-emerald-200">
+          <span className="yaws-badge border-emerald-400/20 bg-emerald-500/8 text-emerald-300/80">
             {cycleLabel(machine.billingCycle)} · {formatMoneyCents(machine.purchaseAmountCents)}
             {machine.autoRenew ? " · 自动续费" : ""}
           </span>
-          <span className="rounded-full border border-teal-400/30 bg-teal-500/10 px-2 py-1 text-teal-200">
+          <span className="yaws-badge border-teal-400/20 bg-teal-500/8 text-teal-300/80">
             账期流量：RX {formatBytes(machine.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(machine.monthTraffic?.txBytes ?? 0)}
           </span>
         </div>
 
-        {machine.notes ? <div className="mt-3 whitespace-pre-wrap text-sm text-white/70">{machine.notes}</div> : null}
+        {machine.notes ? <div className="mt-3 whitespace-pre-wrap text-sm text-white/50">{machine.notes}</div> : null}
 
         <div className="mt-3 grid grid-cols-1 gap-2 text-sm md:grid-cols-2">
           {sysRows.map(([k, v]) => (
             <div
               key={k}
-              className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-3 py-2"
+              className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-black/20 px-3 py-2"
             >
-              <div className="text-white/60">{k}</div>
+              <div className="text-white/40">{k}</div>
               <div className="ml-3 text-right text-white/90">{v}</div>
             </div>
           ))}
         </div>
 
         {uptime ? (
-          <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">
+          <div className="yaws-panel mt-3">
             <div className="mb-2 flex items-center gap-2">
               <div className="flex-1 text-sm font-semibold">在线率（SLA）</div>
               <select
@@ -332,10 +332,10 @@ export function MachinePage() {
                 <option value={72}>近 3 天</option>
                 <option value={168}>近 7 天</option>
               </select>
-              <div className="text-xs text-white/60">{Math.round(uptime.upPct * 10000) / 100}%</div>
+              <div className="text-xs text-white/40">{Math.round(uptime.upPct * 10000) / 100}%</div>
             </div>
 
-            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-white/60">
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-white/40">
               <span className="inline-flex items-center gap-1">
                 <span className="h-2 w-3 rounded-sm bg-emerald-400" />
                 在线
@@ -356,7 +356,7 @@ export function MachinePage() {
                 <div
                   key={b.at}
                   title={`${new Date(b.at).toLocaleString()} · ${b.state === "up" ? "在线" : b.state === "warn" ? "可能掉线" : "离线"}`}
-                  className={`h-3 rounded-sm border border-white/10 ${
+                  className={`h-3 rounded-sm border border-white/[0.06] ${
                     b.state === "up" ? "bg-emerald-400" : b.state === "warn" ? "bg-amber-400" : "bg-rose-500"
                   }`}
                 />
@@ -370,15 +370,15 @@ export function MachinePage() {
         ) : null}
 
         {monthRows.length ? (
-          <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3">
+          <div className="yaws-panel mt-3">
             <div className="mb-2 text-sm font-semibold">账期流量（按到期日重置）</div>
             <div className="grid grid-cols-1 gap-2 text-sm md:grid-cols-2">
               {monthRows.map((r) => (
                 <div
                   key={r.month}
-                  className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                  className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/5 px-3 py-2"
                 >
-                  <div className="text-white/60">{r.month}</div>
+                  <div className="text-white/40">{r.month}</div>
                   <div className="ml-3 text-right text-white/90">
                     RX {formatBytes(r.rxBytes)} · TX {formatBytes(r.txBytes)}
                   </div>
@@ -390,23 +390,23 @@ export function MachinePage() {
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
-          <div className="mb-1 text-xs text-white/60">CPU</div>
+        <div className="yaws-card p-4">
+          <div className="mb-1 text-xs text-white/40">CPU</div>
           <div className="mb-2 flex items-end gap-2">
             <div className="text-3xl font-black">{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
             <div className="flex-1" />
-            <div className="text-xs text-white/60">{last ? new Date(last.at).toLocaleTimeString() : "—"}</div>
+            <div className="text-xs text-white/40">{last ? new Date(last.at).toLocaleTimeString() : "—"}</div>
           </div>
           <div className="yaws-meter">
             <div className="h-full" style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }} />
           </div>
-          <div className="mt-2 text-xs text-white/60">
+          <div className="mt-2 text-xs text-white/40">
             load: {last ? `${last.load1.toFixed(2)} / ${last.load5.toFixed(2)} / ${last.load15.toFixed(2)}` : "—"}
           </div>
         </div>
 
-        <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
-          <div className="mb-1 text-xs text-white/60">内存</div>
+        <div className="yaws-card p-4">
+          <div className="mb-1 text-xs text-white/40">内存</div>
           <div className="mb-2 flex items-end gap-2">
             <div className="text-lg font-black">
               {last ? `${formatBytes(last.memUsed)} / ${formatBytes(last.memTotal)}` : "—"}
@@ -419,8 +419,8 @@ export function MachinePage() {
           </div>
         </div>
 
-        <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
-          <div className="mb-1 text-xs text-white/60">磁盘（/）</div>
+        <div className="yaws-card p-4">
+          <div className="mb-1 text-xs text-white/40">磁盘（/）</div>
           <div className="mb-2 flex items-end gap-2">
             <div className="text-lg font-black">
               {last ? `${formatBytes(last.diskUsed)} / ${formatBytes(last.diskTotal)}` : "—"}
@@ -433,8 +433,8 @@ export function MachinePage() {
           </div>
         </div>
 
-        <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
-          <div className="mb-1 text-xs text-white/60">流量（累计）</div>
+        <div className="yaws-card p-4">
+          <div className="mb-1 text-xs text-white/40">流量（累计）</div>
           <div className="text-sm text-white/80">
             <span className="text-cyan-200/90">RX: {last ? formatBytes(last.netRxBytes) : "—"}</span> ·{" "}
             <span className="text-cyan-200/90">TX: {last ? formatBytes(last.netTxBytes) : "—"}</span>
@@ -445,8 +445,8 @@ export function MachinePage() {
           <div className="mt-2 text-xs text-white/50">来自 `/proc/net/dev` 汇总（排除 lo）。</div>
         </div>
 
-        <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
-          <div className="mb-1 text-xs text-white/60">连接数</div>
+        <div className="yaws-card p-4">
+          <div className="mb-1 text-xs text-white/40">连接数</div>
           <div className="text-sm text-white/80">
             <span className="text-sky-200/90">TCP: {last ? String(last.tcpConn ?? 0) : "—"}</span> ·{" "}
             <span className="text-amber-200/90">UDP: {last ? String(last.udpConn ?? 0) : "—"}</span>
@@ -456,11 +456,11 @@ export function MachinePage() {
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+        <div className="yaws-card p-4">
           <div className="mb-2 flex items-center gap-2">
             <div className="flex-1 font-extrabold">探针配置</div>
             <button
-              className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15"
+              className="yaws-btn"
               onClick={async () => {
                 if (!setup?.downloadConfigUrl) return;
                 const token = getToken();
@@ -481,7 +481,7 @@ export function MachinePage() {
               下载 config
             </button>
             <button
-              className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15"
+              className="yaws-btn"
               onClick={async () => {
                 if (!confirm("重置 agentKey 会导致旧探针断连，继续？")) return;
                 const r = await apiFetch<{ ok: true; agentKey: string }>(`/api/machines/${machineId}/reset-key`, {
@@ -494,7 +494,7 @@ export function MachinePage() {
               重置 key
             </button>
             <button
-              className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15"
+              className="yaws-btn"
               onClick={async () => {
                 try {
                   const s = await apiFetchText(`/api/machines/${machineId}/install-script`);
@@ -510,21 +510,21 @@ export function MachinePage() {
 
           {setup?.agentKey ? (
             <div className="grid gap-2">
-              <div className="text-xs text-white/60">推荐：下载配置文件后直接运行（无需复制 agentKey）</div>
-              <pre className="overflow-auto rounded-2xl border border-white/10 bg-black/25 p-3 text-xs">
+              <div className="text-xs text-white/40">推荐：下载配置文件后直接运行（无需复制 agentKey）</div>
+              <pre className="overflow-auto rounded-lg border border-white/[0.06] bg-black/30 p-3 text-xs">
                 <code>{configCmd}</code>
               </pre>
-              <div className="text-xs text-white/60">或直接命令行（已自动填充 agentKey）</div>
-              <pre className="overflow-auto rounded-2xl border border-white/10 bg-black/25 p-3 text-xs">
+              <div className="text-xs text-white/40">或直接命令行（已自动填充 agentKey）</div>
+              <pre className="overflow-auto rounded-lg border border-white/[0.06] bg-black/30 p-3 text-xs">
                 <code>{agentCmd}</code>
               </pre>
 
               {installScript ? (
                 <div className="grid gap-2">
                   <div className="flex items-center gap-2">
-                    <div className="flex-1 text-xs text-white/60">复制到被控端 root 执行（会从 GitHub Releases 下载对应架构）</div>
+                    <div className="flex-1 text-xs text-white/40">复制到被控端 root 执行（会从 GitHub Releases 下载对应架构）</div>
                     <button
-                      className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-xs hover:bg-white/15"
+                      className="yaws-btn text-xs"
                       onClick={async () => {
                         await navigator.clipboard.writeText(installScript);
                         alert("已复制");
@@ -533,24 +533,24 @@ export function MachinePage() {
                       复制脚本
                     </button>
                   </div>
-                  <pre className="overflow-auto rounded-2xl border border-white/10 bg-black/25 p-3 text-xs">
+                  <pre className="overflow-auto rounded-lg border border-white/[0.06] bg-black/30 p-3 text-xs">
                     <code>{installScript}</code>
                   </pre>
                 </div>
               ) : null}
             </div>
           ) : (
-            <div className="text-sm text-white/70">
-              当前机器没有可导出的 agentKey（可能是旧数据）。点击“重置 key”生成新的。
+            <div className="text-sm text-white/50">
+              当前机器没有可导出的 agentKey（可能是旧数据）。点击"重置 key"生成新的。
             </div>
           )}
         </div>
 
-        <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+        <div className="yaws-card p-4">
           <div className="mb-2 flex items-center gap-2">
             <div className="flex-1 font-extrabold">到期/续费（站内展示）</div>
             <button
-              className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15"
+              className="yaws-btn"
               onClick={() => {
                 setEditing((v) => !v);
                 setSaveError(null);
@@ -559,7 +559,7 @@ export function MachinePage() {
               {editing ? "关闭编辑" : "编辑"}
             </button>
             <button
-              className="rounded-xl border border-sky-400/40 bg-sky-400/15 px-3 py-2 text-sm font-semibold hover:bg-sky-400/20"
+              className="yaws-btn-primary"
               onClick={async () => {
                 const r = await apiFetch<{ ok: true; expiresAt: number }>(`/api/machines/${machineId}/renew`, {
                   method: "POST",
@@ -574,7 +574,7 @@ export function MachinePage() {
           </div>
 
           {saveError ? (
-            <div className="mb-2 rounded-2xl border border-rose-400/40 bg-rose-500/10 p-3 text-sm">{saveError}</div>
+            <div className="yaws-alert-error mb-2">{saveError}</div>
           ) : null}
 
           {!editing ? (
@@ -598,47 +598,47 @@ export function MachinePage() {
           ) : (
             <div className="grid gap-3">
               <div>
-                <div className="mb-1 text-xs text-white/60">名称</div>
+                <div className="mb-1 text-xs text-white/40">名称</div>
                 <input
-                  className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                  className="yaws-input"
                   value={editName}
                   onChange={(e) => setEditName(e.target.value)}
                 />
               </div>
               <div>
-                <div className="mb-1 text-xs text-white/60">分组（可选）</div>
+                <div className="mb-1 text-xs text-white/40">分组（可选）</div>
                 <input
-                  className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                  className="yaws-input"
                   value={editGroupName}
                   onChange={(e) => setEditGroupName(e.target.value)}
                   placeholder="例如：香港 / 东京 / AWS"
                 />
               </div>
               <div>
-                <div className="mb-1 text-xs text-white/60">探针连接地址</div>
+                <div className="mb-1 text-xs text-white/40">探针连接地址</div>
                 <input
-                  className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                  className="yaws-input"
                   value={editAgentWsUrl}
                   onChange={(e) => setEditAgentWsUrl(e.target.value)}
                 />
               </div>
 
-              <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+              <div className="yaws-panel">
                 <div className="mb-2 text-sm font-semibold">SSH（Web）</div>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <div>
-                    <div className="mb-1 text-xs text-white/60">Host</div>
+                    <div className="mb-1 text-xs text-white/40">Host</div>
                     <input
-                      className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                      className="yaws-input"
                       value={editSshHost}
                       onChange={(e) => setEditSshHost(e.target.value)}
                       placeholder="例如：1.2.3.4 或 example.com"
                     />
                   </div>
                   <div>
-                    <div className="mb-1 text-xs text-white/60">Port</div>
+                    <div className="mb-1 text-xs text-white/40">Port</div>
                     <input
-                      className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                      className="yaws-input"
                       type="number"
                       min={1}
                       max={65535}
@@ -647,16 +647,16 @@ export function MachinePage() {
                     />
                   </div>
                   <div>
-                    <div className="mb-1 text-xs text-white/60">用户名</div>
+                    <div className="mb-1 text-xs text-white/40">用户名</div>
                     <input
-                      className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                      className="yaws-input"
                       value={editSshUser}
                       onChange={(e) => setEditSshUser(e.target.value)}
                       placeholder="例如：root"
                     />
                   </div>
                   <div>
-                    <div className="mb-1 text-xs text-white/60">认证方式</div>
+                    <div className="mb-1 text-xs text-white/40">认证方式</div>
                     <select
                       className="yaws-select w-full text-sm"
                       value={editSshAuthType}
@@ -670,12 +670,12 @@ export function MachinePage() {
 
                 {editSshAuthType === "password" ? (
                   <div className="mt-3">
-                    <div className="mb-1 flex items-center gap-2 text-xs text-white/60">
+                    <div className="mb-1 flex items-center gap-2 text-xs text-white/40">
                       <div className="flex-1">密码（不会回显，留空表示不修改）</div>
                       <div className="text-white/50">{machine.sshHasPassword ? "已设置" : "未设置"}</div>
                     </div>
                     <input
-                      className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                      className="yaws-input"
                       type="password"
                       value={editSshPassword}
                       onChange={(e) => {
@@ -684,7 +684,7 @@ export function MachinePage() {
                       }}
                       placeholder={machine.sshHasPassword ? "********" : "请输入密码"}
                     />
-                    <label className="mt-2 flex items-center gap-2 text-xs text-white/70">
+                    <label className="mt-2 flex items-center gap-2 text-xs text-white/50">
                       <input
                         type="checkbox"
                         checked={clearSshPassword}
@@ -698,12 +698,12 @@ export function MachinePage() {
                   </div>
                 ) : (
                   <div className="mt-3">
-                    <div className="mb-1 flex items-center gap-2 text-xs text-white/60">
+                    <div className="mb-1 flex items-center gap-2 text-xs text-white/40">
                       <div className="flex-1">私钥（PEM，留空表示不修改）</div>
                       <div className="text-white/50">{machine.sshHasKey ? "已设置" : "未设置"}</div>
                     </div>
                     <textarea
-                      className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 font-mono text-xs outline-none focus:border-white/30"
+                      className="yaws-input font-mono text-xs"
                       style={{ minHeight: 120, resize: "vertical" }}
                       value={editSshPrivateKey}
                       onChange={(e) => {
@@ -712,7 +712,7 @@ export function MachinePage() {
                       }}
                       placeholder={machine.sshHasKey ? "(已保存，粘贴新私钥以更新)" : "粘贴私钥内容"}
                     />
-                    <label className="mt-2 flex items-center gap-2 text-xs text-white/70">
+                    <label className="mt-2 flex items-center gap-2 text-xs text-white/50">
                       <input
                         type="checkbox"
                         checked={clearSshKey}
@@ -730,18 +730,18 @@ export function MachinePage() {
               </div>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <div>
-                  <div className="mb-1 text-xs text-white/60">到期日期</div>
+                  <div className="mb-1 text-xs text-white/40">到期日期</div>
                   <input
-                    className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                    className="yaws-input"
                     type="date"
                     value={editExpiresDate}
                     onChange={(e) => setEditExpiresDate(e.target.value)}
                   />
                 </div>
                 <div>
-                  <div className="mb-1 text-xs text-white/60">购买金额（元）</div>
+                  <div className="mb-1 text-xs text-white/40">购买金额（元）</div>
                   <input
-                    className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                    className="yaws-input"
                     type="number"
                     min={0}
                     step={0.01}
@@ -750,7 +750,7 @@ export function MachinePage() {
                   />
                 </div>
                 <div>
-                  <div className="mb-1 text-xs text-white/60">计费周期</div>
+                  <div className="mb-1 text-xs text-white/40">计费周期</div>
                   <select
                     className="yaws-select w-full text-sm"
                     value={editBillingCycle}
@@ -775,7 +775,7 @@ export function MachinePage() {
               <div className="flex items-center gap-2">
                 <div className="flex-1" />
                 <button
-                  className="rounded-xl border border-sky-400/40 bg-sky-400/15 px-3 py-2 text-sm font-semibold hover:bg-sky-400/20"
+                  className="yaws-btn-primary"
                   onClick={async () => {
                     setSaveError(null);
                     try {
@@ -836,17 +836,17 @@ export function MachinePage() {
         </div>
       </div>
 
-      <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+      <div className="yaws-card p-4">
         <div className="mb-2 flex items-end gap-2">
           <div className="flex-1">
             <div className="font-extrabold">最近指标</div>
-            <div className="text-xs text-white/60">最近 {metrics.length} 条</div>
+            <div className="text-xs text-white/40">最近 {metrics.length} 条</div>
           </div>
         </div>
         <div className="overflow-auto">
           <table className="w-full border-collapse text-xs">
             <thead>
-              <tr className="text-white/70">
+              <tr className="text-white/40">
                 <th className="px-2 py-2 text-left">时间</th>
                 <th className="px-2 py-2 text-right">CPU</th>
                 <th className="px-2 py-2 text-right">内存</th>
@@ -869,7 +869,7 @@ export function MachinePage() {
                   const rx = next && dt > 0 ? Math.max(0, (m.netRxBytes - next.netRxBytes) / dt) : 0;
                   const tx = next && dt > 0 ? Math.max(0, (m.netTxBytes - next.netTxBytes) / dt) : 0;
                   return (
-                    <tr key={m.at} className="border-t border-white/10">
+                    <tr key={m.at} className="border-t border-white/[0.06]">
                     <td className="px-2 py-2">{new Date(m.at).toLocaleString()}</td>
                     <td className="px-2 py-2 text-right">{Math.round(m.cpuUsage * 100)}%</td>
                     <td className="px-2 py-2 text-right">
@@ -890,7 +890,7 @@ export function MachinePage() {
           </table>
         </div>
         {loc?.state?.createdAgentKey ? (
-          <div className="mt-3 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-3 text-sm text-white/80">
+          <div className="yaws-alert-success mt-3 text-white/80">
             已创建 agentKey：<code className="text-white">{String(loc.state.createdAgentKey)}</code>（建议立刻下载 config 保存）
           </div>
         ) : null}

@@ -91,23 +91,20 @@ export function SettingsPage() {
   }, []);
 
   return (
-    <div className="grid gap-3">
-      <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
-        <div className="mb-1 text-lg font-extrabold">账号设置</div>
-        <div className="mb-4 text-xs text-white/60">修改用户名/密码后会自动更新登录 token。</div>
+    <div className="grid gap-4">
+      {/* Account settings */}
+      <div className="yaws-card p-5">
+        <div className="mb-1 text-lg font-extrabold tracking-wide">账号设置</div>
+        <div className="mb-5 text-xs text-white/40">修改用户名/密码后会自动更新登录 token。</div>
 
-        {error ? (
-          <div className="mb-3 rounded-2xl border border-rose-400/40 bg-rose-500/10 p-3 text-sm">{error}</div>
-        ) : null}
-        {ok ? (
-          <div className="mb-3 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-3 text-sm">{ok}</div>
-        ) : null}
+        {error ? <div className="mb-3 yaws-alert-error">{error}</div> : null}
+        {ok ? <div className="mb-3 yaws-alert-success">{ok}</div> : null}
 
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
-            <div className="mb-1 text-xs text-white/60">新用户名（可选）</div>
+            <div className="mb-1.5 text-xs font-medium text-white/50">新用户名（可选）</div>
             <input
-              className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+              className="yaws-input"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="留空表示不修改"
@@ -115,9 +112,9 @@ export function SettingsPage() {
           </div>
 
           <div>
-            <div className="mb-1 text-xs text-white/60">当前密码（必填）</div>
+            <div className="mb-1.5 text-xs font-medium text-white/50">当前密码（必填）</div>
             <input
-              className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+              className="yaws-input"
               type="password"
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
@@ -125,9 +122,9 @@ export function SettingsPage() {
           </div>
 
           <div className="md:col-span-2">
-            <div className="mb-1 text-xs text-white/60">新密码（可选，至少 6 位）</div>
+            <div className="mb-1.5 text-xs font-medium text-white/50">新密码（可选，至少 6 位）</div>
             <input
-              className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+              className="yaws-input"
               type="password"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
@@ -136,16 +133,13 @@ export function SettingsPage() {
           </div>
         </div>
 
-        <div className="mt-4 flex items-center gap-2">
+        <div className="mt-5 flex items-center gap-2">
           <div className="flex-1" />
-          <button
-            className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15"
-            onClick={() => nav(-1)}
-          >
+          <button className="yaws-btn" onClick={() => nav(-1)}>
             返回
           </button>
           <button
-            className="rounded-xl border border-sky-400/40 bg-sky-400/15 px-3 py-2 text-sm font-semibold hover:bg-sky-400/20 disabled:opacity-60"
+            className="yaws-btn-primary disabled:opacity-50"
             disabled={!canSubmit || loading}
             onClick={async () => {
               setLoading(true);
@@ -182,15 +176,16 @@ export function SettingsPage() {
         </div>
       </div>
 
-      <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
-        <div className="mb-1 text-lg font-extrabold">备份与恢复</div>
-        <div className="mb-4 text-xs text-white/60">备份会导出 SQLite 文件；恢复后服务会自动重启。</div>
+      {/* Backup & Restore */}
+      <div className="yaws-card p-5">
+        <div className="mb-1 text-lg font-extrabold tracking-wide">备份与恢复</div>
+        <div className="mb-5 text-xs text-white/40">备份会导出 SQLite 文件；恢复后服务会自动重启。</div>
 
-        <div className="grid gap-3 md:grid-cols-2">
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="yaws-panel p-4">
             <div className="mb-2 font-semibold">下载备份</div>
-            <div className="mb-3 text-xs text-white/60">点击后会下载 `yaws-backup-*.sqlite`（建议用压缩版更小）。</div>
-            <label className="mb-3 flex select-none items-center gap-2 text-xs text-white/70">
+            <div className="mb-3 text-xs text-white/40">点击后会下载 `yaws-backup-*.sqlite`（建议用压缩版更小）。</div>
+            <label className="mb-3 flex select-none items-center gap-2 text-xs text-white/50">
               <input
                 type="checkbox"
                 checked={backupGzip}
@@ -199,7 +194,7 @@ export function SettingsPage() {
               下载压缩备份（.sqlite.gz）
             </label>
             <button
-              className="rounded-xl border border-sky-400/40 bg-sky-400/15 px-3 py-2 text-sm font-semibold hover:bg-sky-400/20 disabled:opacity-60"
+              className="yaws-btn-primary disabled:opacity-50"
               disabled={backupLoading}
               onClick={async () => {
                 setBackupLoading(true);
@@ -227,13 +222,13 @@ export function SettingsPage() {
             </button>
           </div>
 
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+          <div className="yaws-panel p-4">
             <div className="mb-2 font-semibold">恢复备份</div>
-            <div className="mb-3 text-xs text-white/60">
+            <div className="mb-3 text-xs text-white/40">
               上传 `.sqlite` 或 `.sqlite.gz` 备份文件恢复数据（大文件建议先用压缩版）。
             </div>
             <input
-              className="mb-3 w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm outline-none focus:border-white/30"
+              className="yaws-input mb-3 text-sm"
               type="file"
               accept=".sqlite,.gz,.sqlite.gz,application/x-sqlite3,application/gzip,application/octet-stream"
               onChange={(e) => {
@@ -244,29 +239,29 @@ export function SettingsPage() {
               }}
             />
             {restoreFile ? (
-              <div className="mb-3 text-xs text-white/60">
+              <div className="mb-3 text-xs text-white/40">
                 已选择：{restoreFile.name}（{(restoreFile.size / 1024 / 1024).toFixed(1)} MB）
               </div>
             ) : null}
             {restoreLoading || restoreAttempted ? (
               <div className="mb-3">
-                <div className="mb-1 flex items-center justify-between text-xs text-white/60">
+                <div className="mb-1 flex items-center justify-between text-xs text-white/40">
                   <div>上传进度</div>
                   <div>
                     {Math.min(100, Math.max(0, Math.round(restoreProgress)))}% ·{" "}
                     {restoreUploaded > 0 ? `${(restoreUploaded / 1024 / 1024).toFixed(1)} MB` : "—"}
                   </div>
                 </div>
-                <div className="h-2 overflow-hidden rounded-full border border-white/10 bg-black/30">
+                <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
                   <div
-                    className="h-full bg-sky-400/70 transition-all"
+                    className="h-full rounded-full bg-sky-400/60 transition-all duration-300"
                     style={{ width: `${Math.min(100, Math.max(0, restoreProgress))}%` }}
                   />
                 </div>
               </div>
             ) : null}
             <button
-              className="rounded-xl border border-rose-400/40 bg-rose-500/15 px-3 py-2 text-sm font-semibold hover:bg-rose-500/20 disabled:opacity-60"
+              className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-4 py-2 text-sm font-semibold transition-all duration-200 hover:bg-rose-500/15 disabled:opacity-50"
               disabled={!restoreFile || restoreLoading}
               onClick={async () => {
                 if (!restoreFile) return;
@@ -335,29 +330,26 @@ export function SettingsPage() {
         </div>
       </div>
 
-      <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+      {/* Telegram */}
+      <div className="yaws-card p-5">
         <div className="mb-1 flex items-center justify-between gap-2">
-          <div className="text-lg font-extrabold">Telegram 通知</div>
+          <div className="text-lg font-extrabold tracking-wide">Telegram 通知</div>
           <div
-            className={`rounded-full border px-2 py-0.5 text-xs ${
-              tgConfigured ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-100" : "border-white/15 bg-white/10 text-white/70"
+            className={`yaws-badge ${
+              tgConfigured ? "border-emerald-400/25 bg-emerald-500/8 text-emerald-300/80" : "border-white/[0.08] bg-white/[0.04] text-white/50"
             }`}
           >
             {tgConfigured ? "已配置" : "未配置"}
           </div>
         </div>
-        <div className="mb-4 text-xs text-white/60">
+        <div className="mb-5 text-xs text-white/40">
           用于机器离线/恢复在线/到期提醒。你也可以只用环境变量配置（Docker compose 里写 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID）。
         </div>
 
-        {tgError ? (
-          <div className="mb-3 rounded-2xl border border-rose-400/40 bg-rose-500/10 p-3 text-sm">{tgError}</div>
-        ) : null}
-        {tgOk ? (
-          <div className="mb-3 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-3 text-sm">{tgOk}</div>
-        ) : null}
+        {tgError ? <div className="mb-3 yaws-alert-error">{tgError}</div> : null}
+        {tgOk ? <div className="mb-3 yaws-alert-success">{tgOk}</div> : null}
 
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <label className="flex select-none items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -367,15 +359,15 @@ export function SettingsPage() {
             />
             启用 Telegram 通知
           </label>
-          <div className="text-right text-xs text-white/50 md:pt-1">
+          <div className="text-right text-xs text-white/30 md:pt-1">
             {tgBotTokenMasked ? `Bot token：${tgBotTokenMasked}` : "Bot token：—"}
           </div>
 
           <div>
-            <div className="mb-1 text-xs text-white/60">Bot Token（可选，留空表示不修改）</div>
+            <div className="mb-1.5 text-xs font-medium text-white/50">Bot Token（可选，留空表示不修改）</div>
             <div className="flex gap-2">
               <input
-                className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+                className="yaws-input"
                 type="password"
                 value={tgBotToken}
                 onChange={(e) => {
@@ -386,7 +378,7 @@ export function SettingsPage() {
                 disabled={tgLoading}
               />
               <button
-                className="shrink-0 rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15 disabled:opacity-60"
+                className="yaws-btn shrink-0 disabled:opacity-50"
                 disabled={tgLoading}
                 onClick={() => {
                   setTgBotToken("");
@@ -401,9 +393,9 @@ export function SettingsPage() {
           </div>
 
           <div>
-            <div className="mb-1 text-xs text-white/60">Chat ID（必填）</div>
+            <div className="mb-1.5 text-xs font-medium text-white/50">Chat ID（必填）</div>
             <input
-              className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+              className="yaws-input"
               value={tgChatId}
               onChange={(e) => setTgChatId(e.target.value)}
               placeholder="例如：123456789 或 -100xxxxxxxxxx"
@@ -412,9 +404,9 @@ export function SettingsPage() {
           </div>
 
           <div>
-            <div className="mb-1 text-xs text-white/60">离线判定（分钟）</div>
+            <div className="mb-1.5 text-xs font-medium text-white/50">离线判定（分钟）</div>
             <input
-              className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+              className="yaws-input"
               type="number"
               min={1}
               max={1440}
@@ -425,9 +417,9 @@ export function SettingsPage() {
           </div>
 
           <div>
-            <div className="mb-1 text-xs text-white/60">到期提前提醒（天）</div>
+            <div className="mb-1.5 text-xs font-medium text-white/50">到期提前提醒（天）</div>
             <input
-              className="w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 outline-none focus:border-white/30"
+              className="yaws-input"
               type="number"
               min={0}
               max={3650}
@@ -468,10 +460,10 @@ export function SettingsPage() {
           </div>
         </div>
 
-        <div className="mt-4 flex items-center gap-2">
+        <div className="mt-5 flex items-center gap-2">
           <div className="flex-1" />
           <button
-            className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15 disabled:opacity-60"
+            className="yaws-btn disabled:opacity-50"
             disabled={tgTesting || tgSaving || tgLoading}
             onClick={async () => {
               setTgTesting(true);
@@ -490,7 +482,7 @@ export function SettingsPage() {
             {tgTesting ? "发送中..." : "发送测试"}
           </button>
           <button
-            className="rounded-xl border border-sky-400/40 bg-sky-400/15 px-3 py-2 text-sm font-semibold hover:bg-sky-400/20 disabled:opacity-60"
+            className="yaws-btn-primary disabled:opacity-50"
             disabled={tgSaving || tgLoading}
             onClick={async () => {
               setTgSaving(true);

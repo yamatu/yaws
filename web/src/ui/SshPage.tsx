@@ -76,9 +76,10 @@ export function SshPage() {
         fontFamily:
           'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
         theme: {
-          background: "#06080b",
-          foreground: "#d7e0ea",
-          cursor: "#d7e0ea",
+          background: "#060810",
+          foreground: "#d0dae8",
+          cursor: "#d0dae8",
+          selectionBackground: "rgba(56, 189, 248, 0.25)",
         },
       });
       term.loadAddon(fit);
@@ -204,29 +205,36 @@ export function SshPage() {
   }, [isBadId, machineId, termReady]);
 
   if (isBadId) {
-    return <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">bad machine id</div>;
+    return <div className="yaws-card p-4">bad machine id</div>;
   }
 
   return (
     <div className="flex min-h-[100vh] h-[100dvh] flex-col">
-      <div className="flex items-center gap-2 border-b border-white/10 bg-black/20 px-4 py-3">
-        <Link className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15" to={"../"}>
+      <div className="flex items-center gap-3 border-b border-white/[0.06] bg-white/[0.03] px-5 py-3 backdrop-blur-xl">
+        <Link className="yaws-btn" to={"../"}>
           返回
         </Link>
         <div className="flex-1">
-          <div className="font-extrabold">SSH {machine ? `· ${machine.name}` : ""}</div>
-          <div className="text-xs text-white/60">{status === "connected" ? "已连接" : status === "connecting" ? "连接中..." : status === "closed" ? "已断开" : ""}</div>
+          <div className="font-bold tracking-wide">SSH {machine ? `· ${machine.name}` : ""}</div>
+          <div className="flex items-center gap-1.5 text-xs text-white/40">
+            <span className={`inline-block h-1.5 w-1.5 rounded-full ${
+              status === "connected" ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]" :
+              status === "connecting" ? "bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]" :
+              "bg-white/20"
+            }`} />
+            {status === "connected" ? "已连接" : status === "connecting" ? "连接中..." : status === "closed" ? "已断开" : ""}
+          </div>
         </div>
       </div>
 
       {error ? (
-        <div className="mx-4 mt-3 rounded-2xl border border-rose-400/40 bg-rose-500/10 p-3 text-sm">
+        <div className="mx-4 mt-3 yaws-alert-error">
           {error === "ssh_not_configured" ? "未配置 SSH（请先在机器详情页填写 SSH Host/User/认证信息）" : `连接失败：${error}`}
         </div>
       ) : null}
 
       <div className="flex-1 min-h-0 p-4">
-        <div className="h-full w-full overflow-hidden rounded-2xl border border-white/10 bg-black/60">
+        <div className="h-full w-full overflow-hidden rounded-xl border border-white/[0.06] bg-[#060810]">
           <div ref={containerRef} className="h-full w-full" />
         </div>
       </div>

@@ -94,60 +94,50 @@ export function PublicDashboardPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-5 py-5">
-      <div className="mb-4 flex items-center gap-3">
+      <div className="mb-6 flex items-center gap-3 rounded-2xl border border-white/[0.06] bg-white/[0.03] px-5 py-3.5 backdrop-blur-xl">
         <div className="flex-1">
-          <div className="font-extrabold tracking-wide">YAWS</div>
-          <div className="text-xs text-white/60">公开状态页（无需登录）</div>
+          <div className="text-lg font-extrabold tracking-wider text-white/95">YAWS</div>
+          <div className="text-xs text-white/40">公开状态页（无需登录）</div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <button
-            className={`rounded-xl border px-3 py-2 text-sm ${
+            className={`rounded-lg px-3 py-1.5 text-sm transition-all duration-200 ${
               viewMode === "cards"
-                ? "border-sky-400/40 bg-sky-400/15"
-                : "border-white/15 bg-white/10 hover:bg-white/15"
+                ? "border border-sky-400/30 bg-sky-400/12 text-white/90"
+                : "border border-white/[0.06] bg-white/[0.03] text-white/50 hover:bg-white/[0.06] hover:text-white/70"
             }`}
             onClick={() => setViewMode("cards")}
           >
             卡片
           </button>
           <button
-            className={`rounded-xl border px-3 py-2 text-sm ${
+            className={`rounded-lg px-3 py-1.5 text-sm transition-all duration-200 ${
               viewMode === "list"
-                ? "border-sky-400/40 bg-sky-400/15"
-                : "border-white/15 bg-white/10 hover:bg-white/15"
+                ? "border border-sky-400/30 bg-sky-400/12 text-white/90"
+                : "border border-white/[0.06] bg-white/[0.03] text-white/50 hover:bg-white/[0.06] hover:text-white/70"
             }`}
             onClick={() => setViewMode("list")}
           >
             列表
           </button>
         </div>
-        <Link className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm hover:bg-white/15" to="/login">
+        <Link className="yaws-btn" to="/login">
           登录后台
         </Link>
       </div>
 
-      {error ? (
-        <div className="mb-3 rounded-2xl border border-rose-400/40 bg-rose-500/10 p-3 text-sm">{error}</div>
-      ) : null}
+      {error ? <div className="mb-3 yaws-alert-error">{error}</div> : null}
 
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <button
-          className={`rounded-full border px-3 py-1 text-sm ${
-            groupKey === "__all__"
-              ? "border-sky-400/40 bg-sky-400/15 text-white"
-              : "border-white/15 bg-white/10 text-white/80 hover:bg-white/15"
-          }`}
+          className={`yaws-tag ${groupKey === "__all__" ? "yaws-tag-active" : ""}`}
           onClick={() => setGroupKey("__all__")}
         >
           全部
         </button>
         {groups.hasUngrouped ? (
           <button
-            className={`rounded-full border px-3 py-1 text-sm ${
-              groupKey === "__ungrouped__"
-                ? "border-sky-400/40 bg-sky-400/15 text-white"
-                : "border-white/15 bg-white/10 text-white/80 hover:bg-white/15"
-            }`}
+            className={`yaws-tag ${groupKey === "__ungrouped__" ? "yaws-tag-active" : ""}`}
             onClick={() => setGroupKey("__ungrouped__")}
           >
             未分组
@@ -156,11 +146,7 @@ export function PublicDashboardPage() {
         {groups.named.map((g) => (
           <button
             key={g}
-            className={`rounded-full border px-3 py-1 text-sm ${
-              groupKey === g
-                ? "border-sky-400/40 bg-sky-400/15 text-white"
-                : "border-white/15 bg-white/10 text-white/80 hover:bg-white/15"
-            }`}
+            className={`yaws-tag ${groupKey === g ? "yaws-tag-active" : ""}`}
             onClick={() => setGroupKey(g)}
             title={g}
           >
@@ -182,82 +168,82 @@ export function PublicDashboardPage() {
               <Link
                 to={`/m/${m.id}`}
                 key={m.id}
-                className="block rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur hover:bg-white/15"
+                className="yaws-card block p-4"
               >
-                <div className="mb-2 flex items-center gap-2">
-                  <div className="flex-1 font-extrabold">{m.name}</div>
-                  <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-2 py-1 text-xs text-white/70">
-                    <span className={`h-2 w-2 rounded-full ${m.online ? "bg-emerald-400" : "bg-white/25"}`} />
+                <div className="mb-3 flex items-center gap-2">
+                  <div className="flex-1 font-bold tracking-wide">{m.name}</div>
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.06] bg-white/[0.03] px-2.5 py-1 text-xs text-white/50">
+                    <span className={m.online ? "yaws-dot-online" : "yaws-dot-offline"} />
                     {m.online ? "在线" : "离线"}
                   </span>
                 </div>
 
-                <div className="mb-3 text-xs text-white/60">Last seen: {fmtTime(m.lastSeenAt)}</div>
+                <div className="mb-3 text-xs text-white/30">Last seen: {fmtTime(m.lastSeenAt)}</div>
 
                 <div className="grid gap-3">
                   <div>
-                    <div className="mb-1 flex items-center gap-2 text-xs">
-                      <div className="text-white/60">CPU</div>
+                    <div className="mb-1.5 flex items-center gap-2 text-xs">
+                      <div className="text-white/40">CPU</div>
                       <div className="flex-1" />
-                      <div>{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
-                      <div className="text-white/60">{lm ? `load ${lm.load1.toFixed(2)}` : ""}</div>
+                      <div className="font-medium">{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
+                      <div className="text-white/30">{lm ? `load ${lm.load1.toFixed(2)}` : ""}</div>
                     </div>
-                  <div className="yaws-meter">
-                    <div style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }} />
-                  </div>
+                    <div className="yaws-meter">
+                      <div style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }} />
+                    </div>
                   </div>
 
                   <div>
-                    <div className="mb-1 flex items-center gap-2 text-xs">
-                      <div className="text-white/60">内存</div>
+                    <div className="mb-1.5 flex items-center gap-2 text-xs">
+                      <div className="text-white/40">内存</div>
                       <div className="flex-1" />
-                      <div className="text-white/90">
+                      <div className="text-white/80">
                         {lm ? `${formatBytes(lm.memUsed)} / ${formatBytes(lm.memTotal)}` : "—"}
                       </div>
                     </div>
-                  <div className="yaws-meter">
-                    <div style={{ width: `${Math.round((memP ?? 0) * 100)}%` }} />
-                  </div>
+                    <div className="yaws-meter">
+                      <div style={{ width: `${Math.round((memP ?? 0) * 100)}%` }} />
+                    </div>
                   </div>
 
                   <div>
-                    <div className="mb-1 flex items-center gap-2 text-xs">
-                      <div className="text-white/60">磁盘</div>
+                    <div className="mb-1.5 flex items-center gap-2 text-xs">
+                      <div className="text-white/40">磁盘</div>
                       <div className="flex-1" />
-                      <div className="text-white/90">
+                      <div className="text-white/80">
                         {lm ? `${formatBytes(lm.diskUsed)} / ${formatBytes(lm.diskTotal)}` : "—"}
                       </div>
                     </div>
-                  <div className="yaws-meter">
-                    <div style={{ width: `${Math.round((diskP ?? 0) * 100)}%` }} />
-                  </div>
+                    <div className="yaws-meter">
+                      <div style={{ width: `${Math.round((diskP ?? 0) * 100)}%` }} />
+                    </div>
                   </div>
 
-                  <div className="grid gap-2 text-xs text-white/70">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="rounded-full border border-cyan-400/30 bg-cyan-500/10 px-2 py-1 text-cyan-200">
+                  <div className="grid gap-1.5 text-xs">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="yaws-badge border-cyan-400/20 bg-cyan-500/8 text-cyan-300/80">
                         流量：{lm ? `RX ${formatBytes(lm.netRxBytes)} · TX ${formatBytes(lm.netTxBytes)}` : "—"}
                       </span>
-                      <span className="rounded-full border border-teal-400/30 bg-teal-500/10 px-2 py-1 text-teal-200">
+                      <span className="yaws-badge border-teal-400/20 bg-teal-500/8 text-teal-300/80">
                         账期：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
                       </span>
-                      <span className="rounded-full border border-violet-400/30 bg-violet-500/10 px-2 py-1 text-violet-200">
+                      <span className="yaws-badge border-violet-400/20 bg-violet-500/8 text-violet-300/80">
                         速度：{lm ? `RX ${formatBps(sp.rxBps)} / TX ${formatBps(sp.txBps)}` : "—"}
                       </span>
-                      <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-1 text-sky-200">
+                      <span className="yaws-badge border-sky-400/20 bg-sky-500/8 text-sky-300/80">
                         连接：{lm ? `TCP ${String(lm.tcpConn ?? 0)} · UDP ${String(lm.udpConn ?? 0)}` : "—"}
                       </span>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-1 text-amber-200">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="yaws-badge border-amber-400/20 bg-amber-500/8 text-amber-300/80">
                         到期：{m.expiresAt ? new Date(m.expiresAt).toLocaleDateString() : "—"}
                         {left != null ? (
-                          <span className={`ml-1 ${left <= 10 ? "text-rose-300" : "text-amber-100"}`}>（{left} 天）</span>
+                          <span className={`ml-1 ${left <= 10 ? "text-rose-300" : "text-amber-200/80"}`}>（{left} 天）</span>
                         ) : (
                           ""
                         )}
                       </span>
-                      <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-1 text-emerald-200">
+                      <span className="yaws-badge border-emerald-400/20 bg-emerald-500/8 text-emerald-300/80">
                         {cycleLabel(m.billingCycle)}
                         {m.autoRenew ? " · 自动续费" : ""}
                       </span>
@@ -269,9 +255,9 @@ export function PublicDashboardPage() {
           })}
 
           {rows.length === 0 ? (
-            <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
-              <div className="font-extrabold">暂无机器</div>
-              <div className="mt-1 text-sm text-white/60">登录后台后新增机器并运行探针。</div>
+            <div className="yaws-card p-5">
+              <div className="font-bold">暂无机器</div>
+              <div className="mt-1 text-sm text-white/40">登录后台后新增机器并运行探针。</div>
             </div>
           ) : null}
         </div>
@@ -288,12 +274,12 @@ export function PublicDashboardPage() {
             return (
               <div
                 key={m.id}
-                className="rounded-2xl border border-white/15 bg-white/10 p-3 backdrop-blur hover:bg-white/15"
+                className="yaws-card p-3"
                 onClick={() => setExpanded((p) => ({ ...p, [m.id]: !p[m.id] }))}
               >
                 <div className="flex flex-col gap-2 md:flex-row md:items-center">
                   <div className="flex items-center gap-2 md:w-[420px]">
-                    <span className={`h-2 w-2 rounded-full ${m.online ? "bg-emerald-400" : "bg-white/25"}`} />
+                    <span className={m.online ? "yaws-dot-online" : "yaws-dot-offline"} />
                     <Link
                       className="flex-1 font-semibold hover:underline"
                       to={`/m/${m.id}`}
@@ -302,45 +288,39 @@ export function PublicDashboardPage() {
                       {m.name}
                     </Link>
                     <Link
-                      className="rounded-xl border border-white/15 bg-white/10 px-2 py-1 text-xs hover:bg-white/15"
+                      className="yaws-btn !px-2 !py-1 !text-xs"
                       to={`/m/${m.id}`}
                       onClick={(e) => e.stopPropagation()}
                     >
                       详情
                     </Link>
-                    <div className="rounded-xl border border-white/10 bg-white/5 px-2 py-1 text-xs text-white/60">
+                    <div className="rounded-md border border-white/[0.06] bg-white/[0.03] p-1.5 text-xs text-white/40">
                       <svg
-                        className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+                        className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}
                         viewBox="0 0 24 24"
                         fill="none"
                         xmlns="http://www.w3.org/2000/svg"
                         aria-hidden="true"
                       >
-                        <path
-                          d="M6 9l6 6 6-6"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
+                        <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
                     </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs md:flex md:flex-1 md:flex-wrap md:items-center md:justify-end">
-                    <div className="text-white/70">CPU：{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
-                    <div className="text-white/70">内存：{lm ? `${Math.round((memP ?? 0) * 100)}%` : "—"}</div>
-                    <div className="text-white/70">磁盘：{lm ? `${Math.round((diskP ?? 0) * 100)}%` : "—"}</div>
-                    <div className="text-violet-200/90">
+                    <div className="text-white/50">CPU：{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
+                    <div className="text-white/50">内存：{lm ? `${Math.round((memP ?? 0) * 100)}%` : "—"}</div>
+                    <div className="text-white/50">磁盘：{lm ? `${Math.round((diskP ?? 0) * 100)}%` : "—"}</div>
+                    <div className="text-violet-300/70">
                       <span>网速：{lm ? `RX ${formatBps(sp.rxBps)} / TX ${formatBps(sp.txBps)}` : "—"}</span>
-                      <span className="ml-2 text-sky-200/90">
+                      <span className="ml-2 text-sky-300/70">
                         连接：{lm ? `TCP ${String(lm.tcpConn ?? 0)} · UDP ${String(lm.udpConn ?? 0)}` : "—"}
                       </span>
                     </div>
-                    <div className="text-amber-200/90">
+                    <div className="text-amber-300/70">
                       到期：{m.expiresAt ? new Date(m.expiresAt).toLocaleDateString() : "—"}
                       {left != null ? (
-                        <span className={`ml-1 ${left <= 10 ? "text-rose-300" : "text-amber-100"}`}>（{left}天）</span>
+                        <span className={`ml-1 ${left <= 10 ? "text-rose-300" : "text-amber-200/80"}`}>（{left}天）</span>
                       ) : (
                         ""
                       )}
@@ -349,16 +329,16 @@ export function PublicDashboardPage() {
                 </div>
 
                 {isExpanded ? (
-                  <div className="mt-2 grid gap-2 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs text-white/70">
+                  <div className="yaws-panel mt-2 grid gap-1.5 text-xs text-white/50">
                     <div>Last seen: {fmtTime(m.lastSeenAt)}</div>
                     <div>load: {lm ? `${lm.load1.toFixed(2)} / ${lm.load5.toFixed(2)} / ${lm.load15.toFixed(2)}` : "—"}</div>
-                    <div className="text-cyan-200/90">
+                    <div className="text-cyan-300/70">
                       流量：{lm ? `RX ${formatBytes(lm.netRxBytes)} · TX ${formatBytes(lm.netTxBytes)}` : "—"}
                     </div>
-                    <div className="text-teal-200/90">
+                    <div className="text-teal-300/70">
                       账期：RX {formatBytes(m.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(m.monthTraffic?.txBytes ?? 0)}
                     </div>
-                    <div className="text-emerald-200/90">
+                    <div className="text-emerald-300/70">
                       计费：{cycleLabel(m.billingCycle)}
                       {m.autoRenew ? " · 自动续费" : ""}
                     </div>
