@@ -2,15 +2,25 @@ import { getToken } from "./auth";
 
 export const API_BASE = "";
 
+function buildHeaders(init?: RequestInit, opts?: { token?: string; setJsonContentType?: boolean }): Headers {
+  const headers = new Headers(init?.headers);
+  if (opts?.token) headers.set("authorization", `Bearer ${opts.token}`);
+  if (opts?.setJsonContentType && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+  return headers;
+}
+
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
+  const hasBody = init?.body != null;
+  const method = (init?.method ?? (hasBody ? "POST" : "GET")).toUpperCase();
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: {
-      "content-type": "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers ?? {}),
-    },
+    headers: buildHeaders(init, {
+      token,
+      setJsonContentType: hasBody && method !== "GET",
+    }),
   });
   if (!res.ok) {
     let body: any = null;
@@ -30,10 +40,7 @@ export async function apiFetchText(path: string, init?: RequestInit): Promise<st
   const token = getToken();
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: {
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers ?? {}),
-    },
+    headers: buildHeaders(init, { token }),
   });
   if (!res.ok) {
     let body: any = null;
@@ -56,10 +63,7 @@ export async function apiFetchBlob(
   const token = getToken();
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: {
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers ?? {}),
-    },
+    headers: buildHeaders(init, { token }),
   });
   if (!res.ok) {
     let body: any = null;
