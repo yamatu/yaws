@@ -194,7 +194,17 @@ app.get("/api/public/summary", (_req, res) => {
   const now = Date.now();
   const rows = db
     .prepare(
-      `SELECT
+      `WITH latest_metrics AS (
+         SELECT mm.machine_id, mm.id
+         FROM metrics mm
+         INNER JOIN (
+           SELECT machine_id, MAX(at) AS max_at
+           FROM metrics
+           GROUP BY machine_id
+         ) lm ON lm.machine_id = mm.machine_id AND lm.max_at = mm.at
+         GROUP BY mm.machine_id
+       )
+       SELECT
          m.id, m.name, m.online, m.last_seen_at as lastSeenAt,
          m.group_name as groupName,
          m.expires_at as expiresAt,
@@ -209,15 +219,14 @@ app.get("/api/public/summary", (_req, res) => {
          x.at as metricAt,
          x.cpu_usage as cpuUsage,
          x.mem_used as memUsed, x.mem_total as memTotal,
-          x.disk_used as diskUsed, x.disk_total as diskTotal,
-          x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
-          x.tcp_conn as tcpConn, x.udp_conn as udpConn,
-          x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
-        FROM machines m
+         x.disk_used as diskUsed, x.disk_total as diskTotal,
+         x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
+         x.tcp_conn as tcpConn, x.udp_conn as udpConn,
+         x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
+       FROM machines m
        LEFT JOIN traffic_cycles tc ON tc.machine_id = m.id AND tc.start_at <= ? AND tc.end_at > ?
-       LEFT JOIN metrics x ON x.id = (
-         SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
-       )
+       LEFT JOIN latest_metrics lm ON lm.machine_id = m.id
+       LEFT JOIN metrics x ON x.id = lm.id
        ORDER BY m.sort_order ASC, m.id ASC`
     )
     .all(now, now);
@@ -871,7 +880,17 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
   const now = Date.now();
   const rows = db
     .prepare(
-      `SELECT
+      `WITH latest_metrics AS (
+         SELECT mm.machine_id, mm.id
+         FROM metrics mm
+         INNER JOIN (
+           SELECT machine_id, MAX(at) AS max_at
+           FROM metrics
+           GROUP BY machine_id
+         ) lm ON lm.machine_id = mm.machine_id AND lm.max_at = mm.at
+         GROUP BY mm.machine_id
+       )
+       SELECT
          m.id,
          m.name,
          m.notes,
@@ -909,15 +928,14 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
          x.at as metricAt,
          x.cpu_usage as cpuUsage,
          x.mem_used as memUsed, x.mem_total as memTotal,
-          x.disk_used as diskUsed, x.disk_total as diskTotal,
-          x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
-          x.tcp_conn as tcpConn, x.udp_conn as udpConn,
-          x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
-        FROM machines m
+         x.disk_used as diskUsed, x.disk_total as diskTotal,
+         x.net_rx_bytes as netRxBytes, x.net_tx_bytes as netTxBytes,
+         x.tcp_conn as tcpConn, x.udp_conn as udpConn,
+         x.load_1 as load1, x.load_5 as load5, x.load_15 as load15
+       FROM machines m
        LEFT JOIN traffic_cycles tc ON tc.machine_id = m.id AND tc.start_at <= ? AND tc.end_at > ?
-       LEFT JOIN metrics x ON x.id = (
-         SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
-       )
+       LEFT JOIN latest_metrics lm ON lm.machine_id = m.id
+       LEFT JOIN metrics x ON x.id = lm.id
        ORDER BY m.sort_order ASC, m.id ASC`
     )
     .all(now, now);
