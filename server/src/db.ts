@@ -84,7 +84,6 @@ function migrate(db: Db) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_metrics_machine_at ON metrics(machine_id, at DESC);
-    CREATE INDEX IF NOT EXISTS idx_metrics_machine_at_id ON metrics(machine_id, at DESC, id DESC);
 
     CREATE TABLE IF NOT EXISTS traffic_monthly (
       machine_id INTEGER NOT NULL,
