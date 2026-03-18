@@ -46,9 +46,9 @@ export function MachinePage() {
     const ac = new AbortController();
     (async () => {
       try {
-        const res = await apiFetch<{ machines: Machine[] }>("/api/machines", { signal: ac.signal });
+        const res = await apiFetch<{ machine: Machine }>(`/api/machines/${machineId}`, { signal: ac.signal });
         if (!alive) return;
-        const m = res.machines.find((x) => x.id === machineId) ?? null;
+        const m = res.machine ?? null;
         setMachine(m);
         if (m) {
           setEditName(m.name);

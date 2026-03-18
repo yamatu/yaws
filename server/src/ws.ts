@@ -2,8 +2,7 @@ import type { IncomingMessage } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 import { z } from "zod";
 import type { Db } from "./db.js";
-import { verifyToken } from "./auth.js";
-import bcrypt from "bcryptjs";
+import { verifyAgentKey, verifyToken } from "./auth.js";
 import { Client as SshClient } from "ssh2";
 import { decryptText } from "./crypto.js";
 
@@ -322,7 +321,7 @@ export function attachWebSockets(opts: {
             ws.close(1008, "unknown machine");
             return;
           }
-          if (!bcrypt.compareSync(msg.key, row.agent_key_hash)) {
+          if (!verifyAgentKey(msg.key, row.agent_key_hash, opts.agentKeySecret)) {
             ws.send(JSON.stringify({ type: "error", error: "bad_key" }));
             ws.close(1008, "bad key");
             return;
@@ -453,6 +452,19 @@ export function attachWebSockets(opts: {
       client.ws.send(payload);
     }
   }
+
+  function closeAgent(machineId: number, code = 1001, reason = "machine_deleted") {
+    const agent = agents.get(machineId);
+    if (!agent) return;
+    agents.delete(machineId);
+    try {
+      agent.ws.close(code, reason);
+    } catch {
+      // ignore
+    }
+  }
+
+  return { closeAgent };
 }
 
 function daysInMonthUtc(year: number, month0: number) {

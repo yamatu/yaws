@@ -10,9 +10,8 @@ import Database from "better-sqlite3";
 import { loadEnv } from "./env.js";
 import { openDb } from "./db.js";
 import { authMiddleware } from "./http.js";
-import { hashPassword, signToken, verifyPassword } from "./auth.js";
+import { hashAgentKey, hashPassword, signToken, verifyPassword } from "./auth.js";
 import { attachWebSockets } from "./ws.js";
-import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { decryptText, encryptText } from "./crypto.js";
 
@@ -21,6 +20,7 @@ const db = openDb(env.DATABASE_PATH);
 const agentKeySecret = env.AGENT_KEY_SECRET ?? env.JWT_SECRET;
 const agentReleaseBaseUrl =
   env.AGENT_RELEASE_BASE_URL?.trim() || `https://github.com/${env.AGENT_GITHUB_REPO}/releases/latest/download`;
+const MACHINE_DELETE_METRICS_BATCH = 5000;
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -867,6 +867,70 @@ app.get("/api/machines", requireAuth, (_req, res) => {
   });
 });
 
+app.get("/api/machines/:id", requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
+  const now = Date.now();
+  const m = db
+    .prepare(
+      `SELECT
+        machines.id,
+        machines.name,
+        machines.notes,
+        machines.sort_order as sortOrder,
+        machines.group_name as groupName,
+        machines.hostname,
+        machines.os_name as osName,
+        machines.os_version as osVersion,
+        machines.arch,
+        machines.kernel_version as kernelVersion,
+        machines.cpu_model as cpuModel,
+        machines.cpu_cores as cpuCores,
+        machines.interval_sec as intervalSec,
+        machines.agent_ws_url as agentWsUrl,
+        machines.ssh_host as sshHost,
+        machines.ssh_port as sshPort,
+        machines.ssh_user as sshUser,
+        machines.ssh_auth_type as sshAuthType,
+        CASE WHEN machines.ssh_password_enc != '' THEN 1 ELSE 0 END as sshHasPassword,
+        CASE WHEN machines.ssh_key_enc != '' THEN 1 ELSE 0 END as sshHasKey,
+        machines.expires_at as expiresAt,
+        machines.purchase_amount_cents as purchaseAmountCents,
+        machines.billing_cycle as billingCycle,
+        machines.billing_anchor_day as anchorDay,
+        machines.auto_renew as autoRenew,
+        machines.created_at as createdAt,
+        machines.updated_at as updatedAt,
+        machines.last_seen_at as lastSeenAt,
+        machines.online,
+        tc.period_key as periodKey,
+        tc.start_at as periodStartAt,
+        tc.end_at as periodEndAt,
+        tc.rx_bytes as periodRxBytes,
+        tc.tx_bytes as periodTxBytes
+      FROM machines
+      LEFT JOIN traffic_cycles tc ON tc.machine_id = machines.id AND tc.start_at <= ? AND tc.end_at > ?
+      WHERE machines.id = ?`
+    )
+    .get(now, now, id) as any | undefined;
+  if (!m) return res.status(404).json({ error: "not_found" });
+
+  const { anchorDay, periodKey, periodStartAt, periodEndAt, periodRxBytes, periodTxBytes, ...rest } = m;
+  const b = billingMonthBoundsUtc(now, anchorDay ?? 1);
+  res.json({
+    machine: {
+      ...rest,
+      sshPort: Number(rest.sshPort ?? 22),
+      sshAuthType: (rest.sshAuthType ?? "password") as any,
+      sshHasPassword: !!rest.sshHasPassword,
+      sshHasKey: !!rest.sshHasKey,
+      monthTraffic: periodKey
+        ? { month: periodKey, startAt: periodStartAt, endAt: periodEndAt, rxBytes: periodRxBytes ?? 0, txBytes: periodTxBytes ?? 0 }
+        : { month: b.periodKey, startAt: b.startAt, endAt: b.endAt, rxBytes: 0, txBytes: 0 },
+    },
+  });
+});
+
 app.get("/api/machines/summary", requireAuth, (_req, res) => {
   const now = Date.now();
   const rows = db
@@ -1014,7 +1078,7 @@ app.post("/api/machines", requireAuth, asyncRoute(async (req, res) => {
   const now = Date.now();
   const billingAnchorDay = body.data.expiresAt ? new Date(body.data.expiresAt).getUTCDate() : new Date(now).getUTCDate();
   const agentKey = body.data.agentKey ?? randomAgentKey();
-  const agentKeyHash = await bcrypt.hash(agentKey, 12);
+  const agentKeyHash = hashAgentKey(agentKey, agentKeySecret);
   const agentKeyEnc = encryptText(agentKey, agentKeySecret);
 
   const sshHost = (body.data.sshHost ?? "").trim();
@@ -1093,7 +1157,7 @@ app.put("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
   const now = Date.now();
   const hasExpiresAt = Object.prototype.hasOwnProperty.call(req.body ?? {}, "expiresAt");
   const anchorDay = hasExpiresAt && body.data.expiresAt ? new Date(body.data.expiresAt).getUTCDate() : null;
-  const keyHash = body.data.agentKey ? await bcrypt.hash(body.data.agentKey, 12) : null;
+  const keyHash = body.data.agentKey ? hashAgentKey(body.data.agentKey, agentKeySecret) : null;
   const keyEnc = body.data.agentKey ? encryptText(body.data.agentKey, agentKeySecret) : null;
 
   const hasSshPassword = Object.prototype.hasOwnProperty.call(req.body ?? {}, "sshPassword");
@@ -1152,13 +1216,33 @@ app.put("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
-app.delete("/api/machines/:id", requireAuth, (req, res) => {
+app.delete("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
-  const info = db.prepare("DELETE FROM machines WHERE id = ?").run(id);
-  if (info.changes === 0) return res.status(404).json({ error: "not_found" });
+  const row = db.prepare("SELECT id FROM machines WHERE id = ?").get(id) as { id: number } | undefined;
+  if (!row) return res.status(404).json({ error: "not_found" });
+
+  wsHub.closeAgent(id);
+  db.prepare("UPDATE machines SET online = 0 WHERE id = ?").run(id);
+
+  const deleteMetricsBatch = db.prepare(
+    `DELETE FROM metrics
+     WHERE id IN (
+       SELECT id FROM metrics
+       WHERE machine_id = ?
+       LIMIT ?
+     )`
+  );
+
+  while (true) {
+    const info = deleteMetricsBatch.run(id, MACHINE_DELETE_METRICS_BATCH);
+    if (info.changes === 0) break;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  db.prepare("DELETE FROM machines WHERE id = ?").run(id);
   res.json({ ok: true });
-});
+}));
 
 app.get("/api/machines/:id/agent-config", requireAuth, (req, res) => {
   const id = Number(req.params.id);
@@ -1183,7 +1267,7 @@ app.post("/api/machines/:id/reset-key", requireAuth, asyncRoute(async (req, res)
   const machine = db.prepare("SELECT id FROM machines WHERE id = ?").get(id) as { id: number } | undefined;
   if (!machine) return res.status(404).json({ error: "not_found" });
   const agentKey = randomAgentKey();
-  const agentKeyHash = await bcrypt.hash(agentKey, 12);
+  const agentKeyHash = hashAgentKey(agentKey, agentKeySecret);
   const agentKeyEnc = encryptText(agentKey, agentKeySecret);
   db.prepare("UPDATE machines SET agent_key_hash = ?, agent_key_enc = ?, updated_at = ? WHERE id = ?").run(
     agentKeyHash,
@@ -1308,7 +1392,7 @@ if (fs.existsSync(webDist)) {
 }
 
 const server = http.createServer(app);
-attachWebSockets({ server, db, jwtSecret: env.JWT_SECRET, agentKeySecret });
+const wsHub = attachWebSockets({ server, db, jwtSecret: env.JWT_SECRET, agentKeySecret });
 
 server.listen(env.PORT, () => {
   // eslint-disable-next-line no-console
