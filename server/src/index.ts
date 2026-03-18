@@ -867,7 +867,7 @@ app.get("/api/machines", requireAuth, (_req, res) => {
   });
 });
 
-app.get("/api/machines/:id", requireAuth, (req, res) => {
+app.get("/api/machines/:id(\\d+)", requireAuth, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
   const now = Date.now();
