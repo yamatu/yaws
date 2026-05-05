@@ -61,6 +61,7 @@ function migrate(db: Db) {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       last_seen_at INTEGER,
+      deleted_at INTEGER,
       online INTEGER NOT NULL DEFAULT 0
     );
 
@@ -176,7 +177,10 @@ function migrate(db: Db) {
     { name: "billing_cycle", sql: "ALTER TABLE machines ADD COLUMN billing_cycle TEXT NOT NULL DEFAULT 'month'" },
     { name: "billing_anchor_day", sql: "ALTER TABLE machines ADD COLUMN billing_anchor_day INTEGER NOT NULL DEFAULT 0" },
     { name: "auto_renew", sql: "ALTER TABLE machines ADD COLUMN auto_renew INTEGER NOT NULL DEFAULT 0" },
+    { name: "deleted_at", sql: "ALTER TABLE machines ADD COLUMN deleted_at INTEGER" },
   ]);
+
+  db.exec("CREATE INDEX IF NOT EXISTS idx_machines_deleted_sort ON machines(deleted_at, sort_order, id)");
 
   ensureColumns(db, "metrics", [
     { name: "net_rx_bytes", sql: "ALTER TABLE metrics ADD COLUMN net_rx_bytes INTEGER NOT NULL DEFAULT 0" },

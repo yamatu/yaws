@@ -20,15 +20,71 @@ const db = openDb(env.DATABASE_PATH);
 const agentKeySecret = env.AGENT_KEY_SECRET ?? env.JWT_SECRET;
 const agentReleaseBaseUrl =
   env.AGENT_RELEASE_BASE_URL?.trim() || `https://github.com/${env.AGENT_GITHUB_REPO}/releases/latest/download`;
-const MACHINE_DELETE_METRICS_BATCH = 5000;
+const MACHINE_DELETE_METRICS_BATCH = 1000;
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+
+let isRestoring = false;
 
 function asyncRoute(fn: (req: Request, res: express.Response, next: express.NextFunction) => Promise<any>) {
   return (req: Request, res: express.Response, next: express.NextFunction) => {
     fn(req, res, next).catch(next);
   };
+}
+
+let deletedMachineCleanupRunning = false;
+let deletedMachineCleanupTimer: NodeJS.Timeout | null = null;
+
+function scheduleDeletedMachineCleanup(delayMs = 0) {
+  if (deletedMachineCleanupRunning || deletedMachineCleanupTimer) return;
+  deletedMachineCleanupTimer = setTimeout(() => {
+    deletedMachineCleanupTimer = null;
+    void cleanupDeletedMachines();
+  }, delayMs);
+  deletedMachineCleanupTimer.unref();
+}
+
+async function cleanupDeletedMachines() {
+  if (deletedMachineCleanupRunning) return;
+  deletedMachineCleanupRunning = true;
+
+  const nextMachine = db.prepare("SELECT id FROM machines WHERE deleted_at IS NOT NULL ORDER BY deleted_at ASC LIMIT 1");
+  const deleteMetricsBatch = db.prepare(
+    `DELETE FROM metrics
+     WHERE id IN (
+       SELECT id FROM metrics
+       WHERE machine_id = ?
+       ORDER BY id ASC
+       LIMIT ?
+     )`
+  );
+  const deleteMachine = db.prepare("DELETE FROM machines WHERE id = ? AND deleted_at IS NOT NULL");
+
+  try {
+    while (!isRestoring) {
+      const row = nextMachine.get() as { id: number } | undefined;
+      if (!row) break;
+
+      const info = deleteMetricsBatch.run(row.id, MACHINE_DELETE_METRICS_BATCH);
+      if (info.changes > 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        continue;
+      }
+
+      deleteMachine.run(row.id);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[machines] deleted-machine cleanup failed", e);
+  } finally {
+    deletedMachineCleanupRunning = false;
+    if (!isRestoring) {
+      const remaining = nextMachine.get() as { id: number } | undefined;
+      if (remaining) scheduleDeletedMachineCleanup(1000);
+    }
+  }
 }
 app.use(
   cors({
@@ -37,7 +93,6 @@ app.use(
   })
 );
 
-let isRestoring = false;
 app.use((req, res, next) => {
   if (!isRestoring) return next();
   if (req.path === "/health") return next();
@@ -218,6 +273,7 @@ app.get("/api/public/summary", (_req, res) => {
        LEFT JOIN metrics x ON x.id = (
          SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
        )
+       WHERE m.deleted_at IS NULL
        ORDER BY m.sort_order ASC, m.id ASC`
     )
     .all(now, now);
@@ -301,7 +357,7 @@ app.get("/api/public/machines/:id", (req, res) => {
         online
       FROM machines
       LEFT JOIN traffic_cycles tc ON tc.machine_id = machines.id AND tc.start_at <= ? AND tc.end_at > ?
-      WHERE machines.id = ?`
+      WHERE machines.id = ? AND machines.deleted_at IS NULL`
     )
     .get(now, now, id) as any | undefined;
   if (!m) return res.status(404).json({ error: "not_found" });
@@ -341,7 +397,9 @@ app.get("/api/public/machines/:id/uptime", (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
 
-  const row = db.prepare("SELECT id FROM machines WHERE id = ?").get(id) as { id: number } | undefined;
+  const row = db.prepare("SELECT id FROM machines WHERE id = ? AND deleted_at IS NULL").get(id) as
+    | { id: number }
+    | undefined;
   if (!row) return res.status(404).json({ error: "not_found" });
 
   const hours = Number((req.query as any).hours ?? 24);
@@ -837,6 +895,12 @@ app.get("/api/machines", requireAuth, (_req, res) => {
         tc.tx_bytes as periodTxBytes,
         interval_sec as intervalSec,
         agent_ws_url as agentWsUrl,
+        ssh_host as sshHost,
+        ssh_port as sshPort,
+        ssh_user as sshUser,
+        ssh_auth_type as sshAuthType,
+        CASE WHEN ssh_password_enc != '' THEN 1 ELSE 0 END as sshHasPassword,
+        CASE WHEN ssh_key_enc != '' THEN 1 ELSE 0 END as sshHasKey,
         expires_at as expiresAt,
         purchase_amount_cents as purchaseAmountCents,
         billing_cycle as billingCycle,
@@ -846,6 +910,7 @@ app.get("/api/machines", requireAuth, (_req, res) => {
         last_seen_at as lastSeenAt, online
       FROM machines
       LEFT JOIN traffic_cycles tc ON tc.machine_id = machines.id AND tc.start_at <= ? AND tc.end_at > ?
+      WHERE machines.deleted_at IS NULL
       ORDER BY sort_order ASC, id ASC`
     )
     .all(now, now);
@@ -910,7 +975,7 @@ app.get("/api/machines/:id(\\d+)", requireAuth, (req, res) => {
         tc.tx_bytes as periodTxBytes
       FROM machines
       LEFT JOIN traffic_cycles tc ON tc.machine_id = machines.id AND tc.start_at <= ? AND tc.end_at > ?
-      WHERE machines.id = ?`
+      WHERE machines.id = ? AND machines.deleted_at IS NULL`
     )
     .get(now, now, id) as any | undefined;
   if (!m) return res.status(404).json({ error: "not_found" });
@@ -982,6 +1047,7 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
        LEFT JOIN metrics x ON x.id = (
          SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1
        )
+       WHERE m.deleted_at IS NULL
        ORDER BY m.sort_order ASC, m.id ASC`
     )
     .all(now, now);
@@ -1053,6 +1119,10 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
 app.get("/api/machines/:id/traffic-monthly", requireAuth, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
+  const machine = db.prepare("SELECT id FROM machines WHERE id = ? AND deleted_at IS NULL").get(id) as
+    | { id: number }
+    | undefined;
+  if (!machine) return res.status(404).json({ error: "not_found" });
   const limit = Math.max(1, Math.min(60, Number(req.query.limit ?? 12)));
   const rows = db
     .prepare(
@@ -1089,7 +1159,7 @@ app.post("/api/machines", requireAuth, asyncRoute(async (req, res) => {
   const sshKeyEnc = body.data.sshPrivateKey ? encryptText(body.data.sshPrivateKey, agentKeySecret) : "";
 
   const nextSortOrder =
-    (db.prepare("SELECT COALESCE(MAX(sort_order), 0) as m FROM machines").get() as any)?.m + 1;
+    (db.prepare("SELECT COALESCE(MAX(sort_order), 0) as m FROM machines WHERE deleted_at IS NULL").get() as any)?.m + 1;
   const info = db
     .prepare(
       `INSERT INTO machines (
@@ -1138,7 +1208,7 @@ app.put("/api/machines/order", requireAuth, (req, res) => {
   if (uniq.size !== ids.length) return res.status(400).json({ error: "duplicate_ids" });
 
   const tx = db.transaction(() => {
-    const stmt = db.prepare("UPDATE machines SET sort_order = ? WHERE id = ?");
+    const stmt = db.prepare("UPDATE machines SET sort_order = ? WHERE id = ? AND deleted_at IS NULL");
     ids.forEach((id, idx) => stmt.run(idx + 1, id));
   });
   tx();
@@ -1151,7 +1221,9 @@ app.put("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
   const body = MachineUpdateSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });
 
-  const machine = db.prepare("SELECT id FROM machines WHERE id = ?").get(id) as { id: number } | undefined;
+  const machine = db.prepare("SELECT id FROM machines WHERE id = ? AND deleted_at IS NULL").get(id) as
+    | { id: number }
+    | undefined;
   if (!machine) return res.status(404).json({ error: "not_found" });
 
   const now = Date.now();
@@ -1186,7 +1258,7 @@ app.put("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
          billing_cycle = COALESCE(?, billing_cycle),
          auto_renew = COALESCE(?, auto_renew),
          updated_at = ?
-     WHERE id = ?`
+     WHERE id = ? AND deleted_at IS NULL`
   ).run(
     body.data.name ?? null,
     body.data.notes ?? null,
@@ -1219,36 +1291,26 @@ app.put("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
 app.delete("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
-  const row = db.prepare("SELECT id FROM machines WHERE id = ?").get(id) as { id: number } | undefined;
+  const row = db.prepare("SELECT id FROM machines WHERE id = ? AND deleted_at IS NULL").get(id) as
+    | { id: number }
+    | undefined;
   if (!row) return res.status(404).json({ error: "not_found" });
 
   wsHub.closeAgent(id);
-  db.prepare("UPDATE machines SET online = 0 WHERE id = ?").run(id);
-
-  const deleteMetricsBatch = db.prepare(
-    `DELETE FROM metrics
-     WHERE id IN (
-       SELECT id FROM metrics
-       WHERE machine_id = ?
-       LIMIT ?
-     )`
+  db.prepare("UPDATE machines SET online = 0, deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL").run(
+    Date.now(),
+    Date.now(),
+    id
   );
-
-  while (true) {
-    const info = deleteMetricsBatch.run(id, MACHINE_DELETE_METRICS_BATCH);
-    if (info.changes === 0) break;
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-
-  db.prepare("DELETE FROM machines WHERE id = ?").run(id);
-  res.json({ ok: true });
+  scheduleDeletedMachineCleanup();
+  res.json({ ok: true, pendingCleanup: true });
 }));
 
 app.get("/api/machines/:id/agent-config", requireAuth, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
   const row = db
-    .prepare("SELECT id, agent_key_enc, agent_ws_url FROM machines WHERE id = ?")
+    .prepare("SELECT id, agent_key_enc, agent_ws_url FROM machines WHERE id = ? AND deleted_at IS NULL")
     .get(id) as { id: number; agent_key_enc: string; agent_ws_url: string } | undefined;
   if (!row) return res.status(404).json({ error: "not_found" });
 
@@ -1264,12 +1326,14 @@ app.get("/api/machines/:id/agent-config", requireAuth, (req, res) => {
 app.post("/api/machines/:id/reset-key", requireAuth, asyncRoute(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
-  const machine = db.prepare("SELECT id FROM machines WHERE id = ?").get(id) as { id: number } | undefined;
+  const machine = db.prepare("SELECT id FROM machines WHERE id = ? AND deleted_at IS NULL").get(id) as
+    | { id: number }
+    | undefined;
   if (!machine) return res.status(404).json({ error: "not_found" });
   const agentKey = randomAgentKey();
   const agentKeyHash = hashAgentKey(agentKey, agentKeySecret);
   const agentKeyEnc = encryptText(agentKey, agentKeySecret);
-  db.prepare("UPDATE machines SET agent_key_hash = ?, agent_key_enc = ?, updated_at = ? WHERE id = ?").run(
+  db.prepare("UPDATE machines SET agent_key_hash = ?, agent_key_enc = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL").run(
     agentKeyHash,
     agentKeyEnc,
     Date.now(),
@@ -1283,14 +1347,14 @@ app.post("/api/machines/:id/renew", requireAuth, (req, res) => {
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
   const body = RenewSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });
-  const row = db.prepare("SELECT expires_at as expiresAt FROM machines WHERE id = ?").get(id) as
+  const row = db.prepare("SELECT expires_at as expiresAt FROM machines WHERE id = ? AND deleted_at IS NULL").get(id) as
     | { expiresAt: number | null }
     | undefined;
   if (!row) return res.status(404).json({ error: "not_found" });
 
   const base = Math.max(Date.now(), row.expiresAt ?? 0);
   const next = addCycle(base, body.data.cycle, body.data.count);
-  db.prepare("UPDATE machines SET expires_at = ?, updated_at = ? WHERE id = ?").run(next, Date.now(), id);
+  db.prepare("UPDATE machines SET expires_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL").run(next, Date.now(), id);
   res.json({ ok: true, expiresAt: next });
 });
 
@@ -1298,7 +1362,9 @@ app.get("/api/machines/:id/uptime", requireAuth, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
 
-  const row = db.prepare("SELECT id FROM machines WHERE id = ?").get(id) as { id: number } | undefined;
+  const row = db.prepare("SELECT id FROM machines WHERE id = ? AND deleted_at IS NULL").get(id) as
+    | { id: number }
+    | undefined;
   if (!row) return res.status(404).json({ error: "not_found" });
 
   const hours = Number((req.query as any).hours ?? 24);
@@ -1319,7 +1385,7 @@ app.get("/api/machines/:id/setup", requireAuth, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
   const row = db
-    .prepare("SELECT id, agent_key_enc, agent_ws_url FROM machines WHERE id = ?")
+    .prepare("SELECT id, agent_key_enc, agent_ws_url FROM machines WHERE id = ? AND deleted_at IS NULL")
     .get(id) as { id: number; agent_key_enc: string; agent_ws_url: string } | undefined;
   if (!row) return res.status(404).json({ error: "not_found" });
   const wsUrl = row.agent_ws_url || inferAgentWsUrl(req);
@@ -1336,7 +1402,7 @@ app.get("/api/machines/:id/install-script", requireAuth, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
   const row = db
-    .prepare("SELECT id, interval_sec, agent_key_enc, agent_ws_url FROM machines WHERE id = ?")
+    .prepare("SELECT id, interval_sec, agent_key_enc, agent_ws_url FROM machines WHERE id = ? AND deleted_at IS NULL")
     .get(id) as { id: number; interval_sec: number; agent_key_enc: string; agent_ws_url: string } | undefined;
   if (!row) return res.status(404).json({ error: "not_found" });
   if (!row.agent_key_enc) return res.status(409).json({ error: "no_key" });
@@ -1361,6 +1427,10 @@ app.get("/api/machines/:id/install-script", requireAuth, (req, res) => {
 app.get("/api/machines/:id/metrics", requireAuth, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
+  const machine = db.prepare("SELECT id FROM machines WHERE id = ? AND deleted_at IS NULL").get(id) as
+    | { id: number }
+    | undefined;
+  if (!machine) return res.status(404).json({ error: "not_found" });
   const limit = Math.max(1, Math.min(2000, Number(req.query.limit ?? 200)));
   const rows = db
     .prepare(
@@ -1411,6 +1481,7 @@ try {
 }
 
 startMetricsPruner();
+scheduleDeletedMachineCleanup(1000);
 startTelegramNotifier();
 
 const BootstrapSchema = z.object({ username: z.string().min(1), password: z.string().min(6) });
@@ -1640,6 +1711,7 @@ function startTelegramNotifier() {
            billing_cycle as billingCycle,
            auto_renew as autoRenew
          FROM machines
+         WHERE deleted_at IS NULL
          ORDER BY sort_order ASC, id ASC`
       )
       .all() as Array<{

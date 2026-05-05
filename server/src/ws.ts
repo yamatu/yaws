@@ -136,7 +136,7 @@ export function attachWebSockets(opts: {
                  ssh_password_enc as sshPasswordEnc,
                  ssh_key_enc as sshKeyEnc
                FROM machines
-               WHERE id = ?`
+               WHERE id = ? AND deleted_at IS NULL`
             )
             .get(msg.machineId) as
             | {
@@ -314,7 +314,7 @@ export function attachWebSockets(opts: {
         const msg = AgentMessageSchema.parse(JSON.parse(data.toString("utf8")));
         if (msg.type === "hello") {
           const row = opts.db
-            .prepare("SELECT id, agent_key_hash, interval_sec FROM machines WHERE id = ?")
+            .prepare("SELECT id, agent_key_hash, interval_sec FROM machines WHERE id = ? AND deleted_at IS NULL")
             .get(msg.machineId) as { id: number; agent_key_hash: string; interval_sec: number } | undefined;
           if (!row) {
             ws.send(JSON.stringify({ type: "error", error: "unknown_machine" }));
@@ -341,7 +341,7 @@ export function attachWebSockets(opts: {
                    kernel_version = COALESCE(NULLIF(?, ''), kernel_version),
                    cpu_model = COALESCE(NULLIF(?, ''), cpu_model),
                    cpu_cores = COALESCE(?, cpu_cores)
-               WHERE id = ?`
+               WHERE id = ? AND deleted_at IS NULL`
             )
             .run(
               Date.now(),
@@ -379,6 +379,14 @@ export function attachWebSockets(opts: {
           const l1 = msg.load?.l1 ?? 0;
           const l5 = msg.load?.l5 ?? 0;
           const l15 = msg.load?.l15 ?? 0;
+          const touch = opts.db
+            .prepare("UPDATE machines SET last_seen_at = ?, online = 1 WHERE id = ? AND deleted_at IS NULL")
+            .run(at, machineId);
+          if (touch.changes === 0) {
+            ws.close(1008, "unknown machine");
+            return;
+          }
+
           opts.db
             .prepare(
               `INSERT INTO metrics (
@@ -406,9 +414,6 @@ export function attachWebSockets(opts: {
               l5,
               l15
             );
-          opts.db
-            .prepare("UPDATE machines SET last_seen_at = ?, online = 1 WHERE id = ?")
-            .run(at, machineId);
 
           const monthTraffic = msg.net ? updateBillingMonthTraffic(opts.db, machineId, at, netRx, netTx) : null;
 
@@ -436,7 +441,7 @@ export function attachWebSockets(opts: {
       if (machineId == null) return;
       const agent = agents.get(machineId);
       if (agent?.ws === ws) agents.delete(machineId);
-      opts.db.prepare("UPDATE machines SET online = 0 WHERE id = ?").run(machineId);
+      opts.db.prepare("UPDATE machines SET online = 0 WHERE id = ? AND deleted_at IS NULL").run(machineId);
       broadcastUi({ type: "machine_status", machineId, online: false, lastSeenAt: Date.now() });
     });
   }
@@ -540,7 +545,7 @@ function updateBillingMonthTraffic(db: Db, machineId: number, at: number, netRx:
   let anchorDay = state?.anchorDay ?? 0;
   if (!anchorDay) {
     const row = db
-      .prepare("SELECT billing_anchor_day as anchorDay FROM machines WHERE id = ?")
+      .prepare("SELECT billing_anchor_day as anchorDay FROM machines WHERE id = ? AND deleted_at IS NULL")
       .get(machineId) as { anchorDay: number } | undefined;
     anchorDay = row?.anchorDay ?? 1;
     if (!anchorDay) anchorDay = 1;

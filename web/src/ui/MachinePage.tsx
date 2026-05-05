@@ -37,6 +37,8 @@ export function MachinePage() {
   const [clearSshPassword, setClearSshPassword] = useState(false);
   const [clearSshKey, setClearSshKey] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [installScript, setInstallScript] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -275,15 +277,25 @@ export function MachinePage() {
           )}
           <button
             className="yaws-btn"
+            disabled={deleteBusy}
             onClick={async () => {
               if (!confirm("确认删除该机器及其指标数据？")) return;
-              await apiFetch(`/api/machines/${machine.id}`, { method: "DELETE" });
-              nav("/app", { replace: true });
+              setDeleteBusy(true);
+              setDeleteError(null);
+              try {
+                await apiFetch(`/api/machines/${machine.id}`, { method: "DELETE" });
+                nav("/app", { replace: true });
+              } catch (e: any) {
+                setDeleteError(e?.message ?? "删除失败");
+                setDeleteBusy(false);
+              }
             }}
           >
-            删除
+            {deleteBusy ? "删除中..." : "删除"}
           </button>
         </div>
+
+        {deleteError ? <div className="mt-3 yaws-alert-error">{deleteError}</div> : null}
 
         <div className="flex flex-wrap gap-2 text-xs text-white/50">
           <span className="yaws-badge border-amber-400/20 bg-amber-500/8 text-amber-300/80">
