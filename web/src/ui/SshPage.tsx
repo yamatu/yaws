@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import type { Terminal } from "xterm";
-import type { FitAddon } from "xterm-addon-fit";
+import type { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
 import { apiFetch, type Machine } from "./api";
 import { getToken } from "./auth";
 
@@ -62,9 +62,9 @@ export function SshPage() {
     let alive = true;
     (async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
-        import("xterm"),
-        import("xterm-addon-fit"),
-        import("xterm/css/xterm.css"),
+        import("@xterm/xterm"),
+        import("@xterm/addon-fit"),
+        import("@xterm/xterm/css/xterm.css"),
       ]);
       if (!alive) return;
 
