@@ -22,8 +22,9 @@ export function attachWebSockets(opts: {
   db: Db;
   jwtSecret: string;
   agentKeySecret: string;
+  previousAgentKeySecret?: string;
 }) {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
   const uiClients = new Set<UiClient>();
   const agents = new Map<number, AgentClient>();
 
@@ -308,11 +309,21 @@ export function attachWebSockets(opts: {
 
   function handleAgent(ws: WebSocket, _req: IncomingMessage, _url: URL) {
     let machineId: number | null = null;
+    let authenticating = false;
+    const authTimeout = setTimeout(() => {
+      if (machineId == null) ws.close(1008, "hello timeout");
+    }, 10_000);
+    authTimeout.unref();
 
-    ws.on("message", (data) => {
+    ws.on("message", async (data) => {
       try {
         const msg = AgentMessageSchema.parse(JSON.parse(data.toString("utf8")));
         if (msg.type === "hello") {
+          if (machineId != null || authenticating) {
+            ws.close(1008, "duplicate hello");
+            return;
+          }
+          authenticating = true;
           const row = opts.db
             .prepare("SELECT id, agent_key_hash, interval_sec FROM machines WHERE id = ? AND deleted_at IS NULL")
             .get(msg.machineId) as { id: number; agent_key_hash: string; interval_sec: number } | undefined;
@@ -321,14 +332,23 @@ export function attachWebSockets(opts: {
             ws.close(1008, "unknown machine");
             return;
           }
-          if (!verifyAgentKey(msg.key, row.agent_key_hash, opts.agentKeySecret)) {
+          let keyOk = await verifyAgentKey(msg.key, row.agent_key_hash, opts.agentKeySecret);
+          if (
+            !keyOk &&
+            opts.previousAgentKeySecret &&
+            opts.previousAgentKeySecret !== opts.agentKeySecret &&
+            !row.agent_key_hash.startsWith("$2")
+          ) {
+            keyOk = await verifyAgentKey(msg.key, row.agent_key_hash, opts.previousAgentKeySecret);
+          }
+          if (ws.readyState !== WebSocket.OPEN) return;
+          if (!keyOk) {
             ws.send(JSON.stringify({ type: "error", error: "bad_key" }));
             ws.close(1008, "bad key");
             return;
           }
 
-          machineId = row.id;
-          agents.set(machineId, { ws, machineId });
+          const connectedAt = Date.now();
           opts.db
             .prepare(
               `UPDATE machines
@@ -344,7 +364,7 @@ export function attachWebSockets(opts: {
                WHERE id = ? AND deleted_at IS NULL`
             )
             .run(
-              Date.now(),
+              connectedAt,
               msg.hostname ?? "",
               msg.osName ?? "",
               msg.osVersion ?? "",
@@ -352,14 +372,21 @@ export function attachWebSockets(opts: {
               msg.kernelVersion ?? "",
               msg.cpuModel ?? "",
               msg.cpuCores ?? null,
-              machineId
+              row.id
             );
+
+          machineId = row.id;
+          authenticating = false;
+          clearTimeout(authTimeout);
+          const previous = agents.get(machineId);
+          agents.set(machineId, { ws, machineId });
+          if (previous && previous.ws !== ws) previous.ws.close(1000, "replaced");
 
           broadcastUi({
             type: "machine_status",
             machineId,
             online: true,
-            lastSeenAt: Date.now(),
+            lastSeenAt: connectedAt,
           });
           ws.send(JSON.stringify({ type: "hello_ok", machineId, intervalSec: row.interval_sec }));
           return;
@@ -433,14 +460,16 @@ export function attachWebSockets(opts: {
           });
         }
       } catch {
-        ws.send(JSON.stringify({ type: "error", error: "bad_message" }));
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "error", error: "bad_message" }));
       }
     });
 
     ws.on("close", () => {
+      clearTimeout(authTimeout);
       if (machineId == null) return;
       const agent = agents.get(machineId);
-      if (agent?.ws === ws) agents.delete(machineId);
+      if (agent?.ws !== ws) return;
+      agents.delete(machineId);
       opts.db.prepare("UPDATE machines SET online = 0 WHERE id = ? AND deleted_at IS NULL").run(machineId);
       broadcastUi({ type: "machine_status", machineId, online: false, lastSeenAt: Date.now() });
     });
@@ -461,11 +490,10 @@ export function attachWebSockets(opts: {
   function closeAgent(machineId: number, code = 1001, reason = "machine_deleted") {
     const agent = agents.get(machineId);
     if (!agent) return;
-    agents.delete(machineId);
     try {
       agent.ws.close(code, reason);
     } catch {
-      // ignore
+      agents.delete(machineId);
     }
   }
 
@@ -701,7 +729,7 @@ function updateMonthlyTraffic(db: Db, machineId: number, at: number, netRx: numb
 }
 
 const UiMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("subscribe"), machineIds: z.array(z.number().int().positive()) }),
+  z.object({ type: z.literal("subscribe"), machineIds: z.array(z.number().int().positive()).max(10_000) }),
 ]);
 
 const SshMessageSchema = z.discriminatedUnion("type", [
@@ -711,7 +739,7 @@ const SshMessageSchema = z.discriminatedUnion("type", [
     cols: z.number().int().positive().max(500).optional(),
     rows: z.number().int().positive().max(200).optional(),
   }),
-  z.object({ type: z.literal("input"), dataB64: z.string().min(1) }),
+  z.object({ type: z.literal("input"), dataB64: z.string().min(1).max(128 * 1024) }),
   z.object({ type: z.literal("resize"), cols: z.number().int().positive().max(500), rows: z.number().int().positive().max(200) }),
 ]);
 
@@ -719,13 +747,13 @@ const AgentMessageSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("hello"),
     machineId: z.number().int().positive(),
-    key: z.string().min(1),
-    hostname: z.string().optional(),
-    osName: z.string().optional(),
-    osVersion: z.string().optional(),
-    arch: z.string().optional(),
-    kernelVersion: z.string().optional(),
-    cpuModel: z.string().optional(),
+    key: z.string().min(1).max(4096),
+    hostname: z.string().max(255).optional(),
+    osName: z.string().max(255).optional(),
+    osVersion: z.string().max(255).optional(),
+    arch: z.string().max(64).optional(),
+    kernelVersion: z.string().max(255).optional(),
+    cpuModel: z.string().max(512).optional(),
     cpuCores: z.number().int().nonnegative().optional(),
   }),
   z.object({

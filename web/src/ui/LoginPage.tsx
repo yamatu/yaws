@@ -56,7 +56,13 @@ export function LoginPage() {
                   setToken(res.token);
                   nav("/app", { replace: true });
                 } catch (e: any) {
-                  setError(e?.message === "invalid_credentials" ? "账号或密码错误" : `登录失败：${e?.message ?? "unknown"}`);
+                  const message =
+                    e?.message === "invalid_credentials"
+                      ? "账号或密码错误"
+                      : e?.message === "too_many_attempts"
+                        ? "登录尝试过多，请稍后再试"
+                        : `登录失败：${e?.message ?? "unknown"}`;
+                  setError(message);
                 } finally {
                   setLoading(false);
                 }

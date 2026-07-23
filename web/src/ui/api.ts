@@ -161,17 +161,10 @@ export type PublicMachineDetail = {
   machine: {
     id: number;
     name: string;
-    notes: string;
-    sortOrder: number;
     groupName: string;
-    intervalSec: number;
-    agentWsUrl: string;
     expiresAt: number | null;
-    purchaseAmountCents: number;
     billingCycle: "month" | "quarter" | "half_year" | "year" | "two_year" | "three_year";
     autoRenew: 0 | 1;
-    createdAt: number;
-    updatedAt: number;
     lastSeenAt: number | null;
     online: 0 | 1;
     monthTraffic?: { month: string; startAt?: number; endAt?: number; rxBytes: number; txBytes: number };

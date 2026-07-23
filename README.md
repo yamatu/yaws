@@ -53,10 +53,20 @@
 
 ## 快速开始（Docker 推荐）
 
-1) 修改 `docker-compose.yml`（至少改这两项为 16+ 随机字符串）
+1) 创建 Docker 环境变量文件，并为下面两项分别生成随机密钥
 
 - `JWT_SECRET`
 - `AGENT_KEY_SECRET`
+
+```bash
+cp .env.example .env
+openssl rand -hex 32
+openssl rand -hex 32
+```
+
+将两次输出分别填入 `.env`。部署后不要直接更换 `AGENT_KEY_SECRET`。
+
+从旧版本轮换密钥时，把新值写入 `AGENT_KEY_SECRET`，旧值临时写入 `AGENT_KEY_SECRET_PREVIOUS`。启动日志显示 `skipped 0` 后即可删除 `AGENT_KEY_SECRET_PREVIOUS`；程序会自动重加密探针、SSH 与 Telegram 凭据。
 
 2) 启动
 
@@ -161,6 +171,8 @@ git push origin v0.1.2
 
 ## 开发（本地）
 
+需要 Node.js 22 或更高版本。Linux 裸机还需 GLIBC 2.38+；较旧发行版请使用项目提供的 Docker 镜像。
+
 ```bash
 npm install
 npm run dev
@@ -179,6 +191,7 @@ npm run dev
 - `DATABASE_PATH`：SQLite 路径（Docker 推荐用 `../data/yaws.sqlite` 或容器内绝对路径 `/app/data/yaws.sqlite`）
 - `JWT_SECRET`：JWT 密钥（至少 16 字符）
 - `AGENT_KEY_SECRET`：用于加密保存 agentKey（可选但强烈建议，至少 16 字符）
+- `AGENT_KEY_SECRET_PREVIOUS`：仅在轮换加密密钥时临时填写旧值
 - `CORS_ORIGIN`：开发时跨域来源；生产同域可不需要
 - `METRICS_RETENTION_DAYS`：指标保留天数（默认 30）
 - `METRICS_PRUNE_INTERVAL_MIN`：清理频率（默认 10 分钟）

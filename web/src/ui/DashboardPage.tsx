@@ -21,6 +21,9 @@ type LiveMetric = {
 type ViewMode = "cards" | "list";
 type SortMode = "custom" | "expiry" | "offline";
 type GroupKey = string; // "__all__" | "__ungrouped__" | groupName
+type PendingMachineUpdate = Pick<MachineSummary, "online" | "lastSeenAt"> & {
+  monthTraffic?: MachineSummary["monthTraffic"];
+};
 
 export function DashboardPage() {
   const nav = useNavigate();
@@ -28,6 +31,9 @@ export function DashboardPage() {
   const [latest, setLatest] = useState<Record<number, LiveMetric>>({});
   const [wsOk, setWsOk] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const liveFlushTimerRef = useRef<number | null>(null);
+  const pendingMachinesRef = useRef(new Map<number, PendingMachineUpdate>());
+  const pendingMetricsRef = useRef(new Map<number, Omit<LiveMetric, "rxBps" | "txBps">>());
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const v = localStorage.getItem("yaws_view_mode");
     return v === "list" || v === "cards" ? (v as ViewMode) : "cards";
@@ -43,6 +49,45 @@ export function DashboardPage() {
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragOverId, setDragOverId] = useState<number | null>(null);
   const [groupKey, setGroupKey] = useState<GroupKey>(() => localStorage.getItem("yaws_group") || "__all__");
+
+  function scheduleLiveFlush() {
+    if (liveFlushTimerRef.current != null) return;
+    liveFlushTimerRef.current = window.setTimeout(() => {
+      liveFlushTimerRef.current = null;
+      const machineUpdates = pendingMachinesRef.current;
+      const metricUpdates = pendingMetricsRef.current;
+      pendingMachinesRef.current = new Map();
+      pendingMetricsRef.current = new Map();
+
+      if (machineUpdates.size > 0) {
+        setMachines((prev) =>
+          prev.map((machine) => {
+            const update = machineUpdates.get(machine.id);
+            if (!update) return machine;
+            return { ...machine, ...update };
+          })
+        );
+      }
+
+      if (metricUpdates.size > 0) {
+        setLatest((prev) => {
+          const next = { ...prev };
+          for (const [machineId, metric] of metricUpdates) {
+            const previous = next[machineId];
+            const dt = previous ? (metric.at - previous.at) / 1000 : 0;
+            const rxBps = previous && dt > 0
+              ? Math.max(0, ((metric.netRxBytes ?? 0) - (previous.netRxBytes ?? 0)) / dt)
+              : 0;
+            const txBps = previous && dt > 0
+              ? Math.max(0, ((metric.netTxBytes ?? 0) - (previous.netTxBytes ?? 0)) / dt)
+              : 0;
+            next[machineId] = { ...metric, rxBps, txBps };
+          }
+          return next;
+        });
+      }
+    }, 200);
+  }
 
   useEffect(() => {
     let alive = true;
@@ -83,6 +128,10 @@ export function DashboardPage() {
       ac.abort();
       wsRef.current?.close();
       wsRef.current = null;
+      if (liveFlushTimerRef.current != null) window.clearTimeout(liveFlushTimerRef.current);
+      liveFlushTimerRef.current = null;
+      pendingMachinesRef.current.clear();
+      pendingMetricsRef.current.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -136,50 +185,44 @@ export function DashboardPage() {
         onEvent: (ev) => {
           if (ev.type === "hello") setWsOk(true);
           if (ev.type === "machine_status") {
-            setMachines((prev) =>
-              prev.map((m) =>
-                m.id === ev.machineId ? { ...m, online: ev.online ? 1 : 0, lastSeenAt: ev.lastSeenAt } : m
-              )
-            );
+            const previous = pendingMachinesRef.current.get(ev.machineId);
+            pendingMachinesRef.current.set(ev.machineId, {
+              ...previous,
+              online: ev.online ? 1 : 0,
+              lastSeenAt: ev.lastSeenAt,
+            });
+            scheduleLiveFlush();
           }
           if (ev.type === "metrics") {
-            if (ev.monthTraffic) {
-              setMachines((prev) =>
-                prev.map((m) =>
-                  m.id === ev.machineId
-                    ? { ...m, monthTraffic: { month: ev.monthTraffic!.month, rxBytes: ev.monthTraffic!.rxBytes, txBytes: ev.monthTraffic!.txBytes } }
-                    : m
-                )
-              );
-            }
-            setLatest((prev) => {
-              const prevOne = prev[ev.machineId];
-              const at = ev.metric.at;
-              const rx = ev.metric.net?.rxBytes ?? 0;
-              const tx = ev.metric.net?.txBytes ?? 0;
-              const dt = prevOne ? (at - prevOne.at) / 1000 : 0;
-              const rxBps = prevOne && dt > 0 ? Math.max(0, (rx - (prevOne.netRxBytes ?? 0)) / dt) : 0;
-              const txBps = prevOne && dt > 0 ? Math.max(0, (tx - (prevOne.netTxBytes ?? 0)) / dt) : 0;
-              return {
-                ...prev,
-                [ev.machineId]: {
-                  at,
-                  cpuUsage: ev.metric.cpu.usage,
-                  memUsed: ev.metric.mem.used,
-                  memTotal: ev.metric.mem.total,
-                  diskUsed: ev.metric.disk.used,
-                  diskTotal: ev.metric.disk.total,
-                  netRxBytes: rx,
-                  netTxBytes: tx,
-                  rxBps,
-                  txBps,
-                  load1: ev.metric.load?.l1,
-                },
-              };
+            const previous = pendingMachinesRef.current.get(ev.machineId);
+            pendingMachinesRef.current.set(ev.machineId, {
+              ...previous,
+              online: 1,
+              lastSeenAt: ev.metric.at,
+              ...(ev.monthTraffic
+                ? {
+                    monthTraffic: {
+                      month: ev.monthTraffic.month,
+                      startAt: ev.monthTraffic.startAt,
+                      endAt: ev.monthTraffic.endAt,
+                      rxBytes: ev.monthTraffic.rxBytes,
+                      txBytes: ev.monthTraffic.txBytes,
+                    },
+                  }
+                : {}),
             });
-            setMachines((prev) =>
-              prev.map((m) => (m.id === ev.machineId ? { ...m, lastSeenAt: ev.metric.at, online: 1 } : m))
-            );
+            pendingMetricsRef.current.set(ev.machineId, {
+              at: ev.metric.at,
+              cpuUsage: ev.metric.cpu.usage,
+              memUsed: ev.metric.mem.used,
+              memTotal: ev.metric.mem.total,
+              diskUsed: ev.metric.disk.used,
+              diskTotal: ev.metric.disk.total,
+              netRxBytes: ev.metric.net?.rxBytes ?? 0,
+              netTxBytes: ev.metric.net?.txBytes ?? 0,
+              load1: ev.metric.load?.l1,
+            });
+            scheduleLiveFlush();
           }
         },
         onClose: () => setWsOk(false),

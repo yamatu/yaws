@@ -1,12 +1,12 @@
-FROM node:22-bookworm AS build
+FROM node:22-trixie AS build
 
 WORKDIR /app
 
-COPY package.json ./
+COPY package.json package-lock.json ./
 COPY server/package.json server/package.json
 COPY web/package.json web/package.json
 
-RUN npm install
+RUN npm ci
 
 COPY server server
 COPY web web
@@ -14,7 +14,7 @@ COPY README.md ./
 
 RUN npm run build && npm prune --omit=dev --workspaces --include-workspace-root
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:22-trixie-slim AS runtime
 
 ENV NODE_ENV=production
 

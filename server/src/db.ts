@@ -9,6 +9,9 @@ export function openDb(databasePath: string): Db {
   if (dir && dir !== "." && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const db = new Database(databasePath);
   db.pragma("journal_mode = WAL");
+  db.pragma("synchronous = NORMAL");
+  db.pragma("busy_timeout = 5000");
+  db.pragma("temp_store = MEMORY");
   db.pragma("foreign_keys = ON");
   migrate(db);
   return db;
@@ -85,6 +88,7 @@ function migrate(db: Db) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_metrics_machine_at ON metrics(machine_id, at DESC);
+    CREATE INDEX IF NOT EXISTS idx_metrics_at ON metrics(at ASC);
 
     CREATE TABLE IF NOT EXISTS traffic_monthly (
       machine_id INTEGER NOT NULL,

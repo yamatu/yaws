@@ -18,19 +18,157 @@ import { decryptText, encryptText } from "./crypto.js";
 const env = loadEnv();
 const db = openDb(env.DATABASE_PATH);
 const agentKeySecret = env.AGENT_KEY_SECRET ?? env.JWT_SECRET;
+const previousAgentKeySecret = env.AGENT_KEY_SECRET_PREVIOUS;
 const agentReleaseBaseUrl =
   env.AGENT_RELEASE_BASE_URL?.trim() || `https://github.com/${env.AGENT_GITHUB_REPO}/releases/latest/download`;
 const MACHINE_DELETE_METRICS_BATCH = 1000;
+const METRICS_PRUNE_BATCH = 2000;
+const LOGIN_ATTEMPT_WINDOW_MS = 10 * 60_000;
+const LOGIN_MAX_FAILURES = 20;
+const DUMMY_PASSWORD_HASH = "$2a$12$/wQ5jIvg0j0acNviV2e8Le6RuFF3IjDaXcmV7/hMkJ0Pz7eQzqKTy";
+
+if (previousAgentKeySecret && previousAgentKeySecret !== agentKeySecret) {
+  rotateStoredSecrets(previousAgentKeySecret, agentKeySecret);
+}
 
 const app = express();
+app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
+app.use((_req, res, next) => {
+  res.setHeader("x-content-type-options", "nosniff");
+  res.setHeader("x-frame-options", "DENY");
+  res.setHeader("referrer-policy", "no-referrer");
+  next();
+});
 
 let isRestoring = false;
+const loginFailures = new Map<string, { count: number; windowStartedAt: number }>();
 
 function asyncRoute(fn: (req: Request, res: express.Response, next: express.NextFunction) => Promise<any>) {
   return (req: Request, res: express.Response, next: express.NextFunction) => {
     fn(req, res, next).catch(next);
   };
+}
+
+function rotateStoredSecrets(previousSecret: string, currentSecret: string) {
+  let rotatedValues = 0;
+  let skippedValues = 0;
+
+  const rotateValue = (payload: string) => {
+    if (!payload) return { payload, plaintext: null as string | null, rotated: false };
+    try {
+      return { payload, plaintext: decryptText(payload, currentSecret), rotated: false };
+    } catch {
+      try {
+        const plaintext = decryptText(payload, previousSecret);
+        rotatedValues += 1;
+        return { payload: encryptText(plaintext, currentSecret), plaintext, rotated: true };
+      } catch {
+        skippedValues += 1;
+        return { payload, plaintext: null as string | null, rotated: false };
+      }
+    }
+  };
+
+  const rotate = db.transaction(() => {
+    const machines = db
+      .prepare(
+        `SELECT
+           id,
+           agent_key_hash as agentKeyHash,
+           agent_key_enc as agentKeyEnc,
+           ssh_password_enc as sshPasswordEnc,
+           ssh_key_enc as sshKeyEnc
+         FROM machines`
+      )
+      .all() as Array<{
+      id: number;
+      agentKeyHash: string;
+      agentKeyEnc: string;
+      sshPasswordEnc: string;
+      sshKeyEnc: string;
+    }>;
+    const updateMachine = db.prepare(
+      `UPDATE machines
+       SET agent_key_hash = ?, agent_key_enc = ?, ssh_password_enc = ?, ssh_key_enc = ?, updated_at = ?
+       WHERE id = ?`
+    );
+
+    for (const machine of machines) {
+      const agentKey = rotateValue(machine.agentKeyEnc);
+      const sshPassword = rotateValue(machine.sshPasswordEnc);
+      const sshKey = rotateValue(machine.sshKeyEnc);
+      const agentKeyHash = agentKey.plaintext
+        ? hashAgentKey(agentKey.plaintext, currentSecret)
+        : machine.agentKeyHash;
+      const changed =
+        agentKey.rotated ||
+        sshPassword.rotated ||
+        sshKey.rotated ||
+        agentKeyHash !== machine.agentKeyHash;
+      if (!changed) continue;
+      updateMachine.run(
+        agentKeyHash,
+        agentKey.payload,
+        sshPassword.payload,
+        sshKey.payload,
+        Date.now(),
+        machine.id
+      );
+    }
+
+    const telegram = db.prepare("SELECT value FROM settings WHERE key = 'telegram_token_enc'").get() as
+      | { value: string }
+      | undefined;
+    if (telegram?.value) {
+      const token = rotateValue(telegram.value);
+      if (token.rotated) {
+        db.prepare("UPDATE settings SET value = ?, updated_at = ? WHERE key = 'telegram_token_enc'").run(
+          token.payload,
+          Date.now()
+        );
+      }
+    }
+  });
+
+  rotate();
+  // eslint-disable-next-line no-console
+  console.log(`[security] rotated ${rotatedValues} encrypted values; skipped ${skippedValues}`);
+}
+
+function loginAttemptKey(req: Request) {
+  return req.socket.remoteAddress ?? "unknown";
+}
+
+function loginRetryAfterMs(key: string, now: number) {
+  const state = loginFailures.get(key);
+  if (!state) return 0;
+  const elapsed = now - state.windowStartedAt;
+  if (elapsed >= LOGIN_ATTEMPT_WINDOW_MS) {
+    loginFailures.delete(key);
+    return 0;
+  }
+  return state.count >= LOGIN_MAX_FAILURES ? LOGIN_ATTEMPT_WINDOW_MS - elapsed : 0;
+}
+
+function recordLoginFailure(key: string, now: number) {
+  const state = loginFailures.get(key);
+  if (!state || now - state.windowStartedAt >= LOGIN_ATTEMPT_WINDOW_MS) {
+    loginFailures.set(key, { count: 1, windowStartedAt: now });
+  } else {
+    state.count += 1;
+  }
+
+  if (loginFailures.size > 5000) {
+    for (const [entryKey, entry] of loginFailures) {
+      if (now - entry.windowStartedAt >= LOGIN_ATTEMPT_WINDOW_MS) loginFailures.delete(entryKey);
+    }
+    while (loginFailures.size > 5000) {
+      const oldestKey = loginFailures.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      loginFailures.delete(oldestKey);
+    }
+  }
 }
 
 let deletedMachineCleanupRunning = false;
@@ -330,8 +468,7 @@ app.get("/api/public/machines/:id", (req, res) => {
   const m = db
     .prepare(
       `SELECT
-        id, name, notes,
-        sort_order as sortOrder,
+        id, name,
         group_name as groupName,
         billing_anchor_day as anchorDay,
         tc.period_key as periodKey,
@@ -339,20 +476,9 @@ app.get("/api/public/machines/:id", (req, res) => {
         tc.end_at as periodEndAt,
         tc.rx_bytes as periodRxBytes,
         tc.tx_bytes as periodTxBytes,
-        interval_sec as intervalSec,
-        agent_ws_url as agentWsUrl,
-        ssh_host as sshHost,
-        ssh_port as sshPort,
-        ssh_user as sshUser,
-        ssh_auth_type as sshAuthType,
-        CASE WHEN ssh_password_enc != '' THEN 1 ELSE 0 END as sshHasPassword,
-        CASE WHEN ssh_key_enc != '' THEN 1 ELSE 0 END as sshHasKey,
         expires_at as expiresAt,
-        purchase_amount_cents as purchaseAmountCents,
         billing_cycle as billingCycle,
         auto_renew as autoRenew,
-        machines.created_at as createdAt,
-        machines.updated_at as updatedAt,
         last_seen_at as lastSeenAt,
         online
       FROM machines
@@ -372,7 +498,7 @@ app.get("/api/public/machines/:id", (req, res) => {
          net_rx_bytes as netRxBytes, net_tx_bytes as netTxBytes,
          tcp_conn as tcpConn, udp_conn as udpConn,
          load_1 as load1, load_5 as load5, load_15 as load15
-       FROM metrics WHERE machine_id = ? ORDER BY at DESC LIMIT 300`
+       FROM metrics WHERE machine_id = ? ORDER BY at DESC LIMIT 2`
     )
     .all(id) as any[];
 
@@ -425,9 +551,15 @@ app.post("/api/auth/bootstrap", asyncRoute(async (req, res) => {
 
   const passwordHash = await hashPassword(body.data.password);
   const now = Date.now();
-  const info = db
-    .prepare("INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, 'admin', ?)")
-    .run(body.data.username, passwordHash, now);
+  const createAdmin = db.transaction(() => {
+    const current = db.prepare("SELECT COUNT(*) as c FROM users").get() as { c: number };
+    if (current.c > 0) return null;
+    return db
+      .prepare("INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, 'admin', ?)")
+      .run(body.data.username, passwordHash, now);
+  });
+  const info = createAdmin();
+  if (!info) return res.status(409).json({ error: "already_bootstrapped" });
 
   return res.json({ ok: true, userId: Number(info.lastInsertRowid) });
 }));
@@ -436,14 +568,26 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
   const body = LoginSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });
 
+  const username = body.data.username.trim();
+  const attemptKey = loginAttemptKey(req);
+  const now = Date.now();
+  const retryAfterMs = loginRetryAfterMs(attemptKey, now);
+  if (retryAfterMs > 0) {
+    res.setHeader("retry-after", String(Math.ceil(retryAfterMs / 1000)));
+    return res.status(429).json({ error: "too_many_attempts" });
+  }
+
   const row = db
     .prepare("SELECT id, username, password_hash, role FROM users WHERE username = ?")
-    .get(body.data.username) as { id: number; username: string; password_hash: string; role: string } | undefined;
-  if (!row) return res.status(401).json({ error: "invalid_credentials" });
+    .get(username) as { id: number; username: string; password_hash: string; role: string } | undefined;
 
-  const ok = await verifyPassword(body.data.password, row.password_hash);
-  if (!ok) return res.status(401).json({ error: "invalid_credentials" });
+  const ok = await verifyPassword(body.data.password, row?.password_hash ?? DUMMY_PASSWORD_HASH);
+  if (!row || !ok) {
+    recordLoginFailure(attemptKey, now);
+    return res.status(401).json({ error: "invalid_credentials" });
+  }
 
+  loginFailures.delete(attemptKey);
   const token = signToken({ id: row.id, username: row.username, role: row.role }, env.JWT_SECRET);
   return res.json({ token });
 }));
@@ -592,7 +736,16 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, asyncRoute(async (req,
         // Decompress to sqlite file.
         const gunzip = zlib.createGunzip();
         const outDb = fs.createWriteStream(tmpDb, { mode: 0o600 });
-        fs.createReadStream(tmpUpload).pipe(gunzip).pipe(outDb);
+        const uploadInput = fs.createReadStream(tmpUpload);
+        let decompressedBytes = 0;
+        gunzip.on("data", (chunk: Buffer) => {
+          decompressedBytes += chunk.length;
+          if (decompressedBytes <= maxBytes || aborted) return;
+          gunzip.destroy();
+          outDb.destroy();
+          abort(413, "file_too_large");
+        });
+        uploadInput.pipe(gunzip).pipe(outDb);
         const done = () => {
           try {
             const fd = fs.openSync(tmpDb, "r");
@@ -616,9 +769,18 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, asyncRoute(async (req,
             return abort(400, "not_sqlite");
           }
         };
-        outDb.on("finish", done);
-        outDb.on("error", () => abort(500, "write_failed"));
-        gunzip.on("error", () => abort(400, "bad_gzip"));
+        outDb.on("finish", () => {
+          if (!aborted) done();
+        });
+        uploadInput.on("error", () => {
+          if (!aborted) abort(400, "upload_failed");
+        });
+        outDb.on("error", () => {
+          if (!aborted) abort(500, "write_failed");
+        });
+        gunzip.on("error", () => {
+          if (!aborted) abort(400, "bad_gzip");
+        });
         return;
       }
 
@@ -768,8 +930,8 @@ app.post("/api/admin/restore", requireAuth, requireAdmin, asyncRoute(async (req,
 
 const TelegramSettingsSchema = z.object({
   enabled: z.boolean().optional(),
-  botToken: z.string().optional(),
-  chatId: z.string().optional(),
+  botToken: z.string().max(512).optional(),
+  chatId: z.string().max(128).optional(),
   offlineAfterMin: z.number().int().min(1).max(1440).optional(),
   expiryWarnDays: z.number().int().min(0).max(3650).optional(),
   notifyOffline: z.boolean().optional(),
@@ -1196,7 +1358,50 @@ app.post("/api/machines", requireAuth, asyncRoute(async (req, res) => {
       now,
       now
     );
-  res.json({ ok: true, id: Number(info.lastInsertRowid), agentKey });
+  const id = Number(info.lastInsertRowid);
+  const period = billingMonthBoundsUtc(now, billingAnchorDay);
+  res.json({
+    ok: true,
+    id,
+    agentKey,
+    machine: {
+      id,
+      name: body.data.name,
+      notes: body.data.notes ?? "",
+      sortOrder: nextSortOrder,
+      groupName: (body.data.groupName ?? "").trim(),
+      hostname: "",
+      osName: "",
+      osVersion: "",
+      arch: "",
+      kernelVersion: "",
+      cpuModel: "",
+      cpuCores: 0,
+      intervalSec: body.data.intervalSec,
+      agentWsUrl: body.data.agentWsUrl ?? "",
+      sshHost,
+      sshPort,
+      sshUser,
+      sshAuthType,
+      sshHasPassword: !!body.data.sshPassword,
+      sshHasKey: !!body.data.sshPrivateKey,
+      expiresAt: body.data.expiresAt ?? null,
+      purchaseAmountCents: Math.max(0, Math.round((body.data.purchaseAmount ?? 0) * 100)),
+      billingCycle: body.data.billingCycle ?? "month",
+      autoRenew: body.data.autoRenew ? 1 : 0,
+      createdAt: now,
+      updatedAt: now,
+      lastSeenAt: null,
+      online: 0,
+      monthTraffic: {
+        month: period.periodKey,
+        startAt: period.startAt,
+        endAt: period.endAt,
+        rxBytes: 0,
+        txBytes: 0,
+      },
+    },
+  });
 }));
 
 app.put("/api/machines/order", requireAuth, (req, res) => {
@@ -1462,7 +1667,13 @@ if (fs.existsSync(webDist)) {
 }
 
 const server = http.createServer(app);
-const wsHub = attachWebSockets({ server, db, jwtSecret: env.JWT_SECRET, agentKeySecret });
+const wsHub = attachWebSockets({
+  server,
+  db,
+  jwtSecret: env.JWT_SECRET,
+  agentKeySecret,
+  previousAgentKeySecret,
+});
 
 server.listen(env.PORT, () => {
   // eslint-disable-next-line no-console
@@ -1484,15 +1695,20 @@ startMetricsPruner();
 scheduleDeletedMachineCleanup(1000);
 startTelegramNotifier();
 
-const BootstrapSchema = z.object({ username: z.string().min(1), password: z.string().min(6) });
-const LoginSchema = z.object({ username: z.string().min(1), password: z.string().min(1) });
+const NewPasswordSchema = z
+  .string()
+  .min(6)
+  .max(1024)
+  .refine((value) => Buffer.byteLength(value, "utf8") <= 72, "password_too_long");
+const BootstrapSchema = z.object({ username: z.string().trim().min(1).max(128), password: NewPasswordSchema });
+const LoginSchema = z.object({ username: z.string().trim().min(1).max(128), password: z.string().min(1).max(1024) });
 const MachineCreateSchema = z.object({
-  name: z.string().min(1),
-  notes: z.string().optional(),
+  name: z.string().trim().min(1).max(128),
+  notes: z.string().max(10_000).optional(),
   groupName: z.string().max(64).optional(),
   intervalSec: z.number().int().min(2).max(3600).default(5),
-  agentKey: z.string().min(8).optional(),
-  agentWsUrl: z.string().optional(),
+  agentKey: z.string().min(8).max(4096).optional(),
+  agentWsUrl: z.string().max(2048).optional(),
   sshHost: z.string().max(255).optional(),
   sshPort: z.number().int().min(1).max(65535).optional(),
   sshUser: z.string().max(64).optional(),
@@ -1500,17 +1716,17 @@ const MachineCreateSchema = z.object({
   sshPassword: z.string().max(4096).optional(),
   sshPrivateKey: z.string().max(20000).optional(),
   expiresAt: z.number().int().nullable().optional(),
-  purchaseAmount: z.number().nonnegative().optional(),
+  purchaseAmount: z.number().nonnegative().max(1_000_000_000).optional(),
   billingCycle: z.enum(["month", "quarter", "half_year", "year", "two_year", "three_year"]).optional(),
   autoRenew: z.boolean().optional(),
 });
 const MachineUpdateSchema = z.object({
-  name: z.string().min(1).optional(),
-  notes: z.string().optional(),
+  name: z.string().trim().min(1).max(128).optional(),
+  notes: z.string().max(10_000).optional(),
   groupName: z.string().max(64).optional(),
   intervalSec: z.number().int().min(2).max(3600).optional(),
-  agentKey: z.string().min(8).optional(),
-  agentWsUrl: z.string().optional(),
+  agentKey: z.string().min(8).max(4096).optional(),
+  agentWsUrl: z.string().max(2048).optional(),
   sshHost: z.string().max(255).optional(),
   sshPort: z.number().int().min(1).max(65535).optional(),
   sshUser: z.string().max(64).optional(),
@@ -1518,7 +1734,7 @@ const MachineUpdateSchema = z.object({
   sshPassword: z.string().max(4096).optional(),
   sshPrivateKey: z.string().max(20000).optional(),
   expiresAt: z.number().int().nullable().optional(),
-  purchaseAmount: z.number().nonnegative().optional(),
+  purchaseAmount: z.number().nonnegative().max(1_000_000_000).optional(),
   billingCycle: z.enum(["month", "quarter", "half_year", "year", "two_year", "three_year"]).optional(),
   autoRenew: z.boolean().optional(),
 });
@@ -1529,9 +1745,9 @@ const RenewSchema = z.object({
 });
 
 const MeCredentialsSchema = z.object({
-  username: z.string().min(1).optional(),
-  currentPassword: z.string().min(1),
-  newPassword: z.string().min(6).optional(),
+  username: z.string().trim().min(1).max(128).optional(),
+  currentPassword: z.string().min(1).max(1024),
+  newPassword: NewPasswordSchema.optional(),
 });
 
 const MachinesOrderSchema = z.object({
@@ -1575,22 +1791,50 @@ function addCycle(
 function startMetricsPruner() {
   const retentionMs = env.METRICS_RETENTION_DAYS * 24 * 3600 * 1000;
   const intervalMs = env.METRICS_PRUNE_INTERVAL_MIN * 60 * 1000;
+  const deleteBatch = db.prepare(
+    `DELETE FROM metrics
+     WHERE id IN (
+       SELECT id FROM metrics
+       WHERE at < ?
+       ORDER BY at ASC
+       LIMIT ?
+     )`
+  );
+  let running = false;
 
   const prune = () => {
+    if (running || isRestoring) return;
+    running = true;
     const cutoff = Date.now() - retentionMs;
-    try {
-      const info = db.prepare("DELETE FROM metrics WHERE at < ?").run(cutoff);
-      if (info.changes > 0) {
-        // eslint-disable-next-line no-console
-        console.log(`[metrics] pruned ${info.changes} rows older than ${env.METRICS_RETENTION_DAYS} days`);
+    let deleted = 0;
+
+    const step = () => {
+      if (isRestoring) {
+        running = false;
+        return;
       }
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.error("[metrics] prune failed", e);
-    }
+      try {
+        const info = deleteBatch.run(cutoff, METRICS_PRUNE_BATCH);
+        deleted += info.changes;
+        if (info.changes === METRICS_PRUNE_BATCH) {
+          setTimeout(step, 10).unref();
+          return;
+        }
+        if (deleted > 0) {
+          // eslint-disable-next-line no-console
+          console.log(`[metrics] pruned ${deleted} rows older than ${env.METRICS_RETENTION_DAYS} days`);
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("[metrics] prune failed", e);
+      }
+      running = false;
+    };
+
+    step();
   };
 
-  prune();
+  setTimeout(prune, Math.min(30_000, intervalMs)).unref();
   setInterval(prune, intervalMs).unref();
 }
 

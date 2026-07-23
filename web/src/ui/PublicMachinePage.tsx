@@ -24,16 +24,6 @@ export function PublicMachinePage() {
         if (!alive) return;
         setData(res);
         setError(null);
-
-        try {
-          const up = await apiFetch<UptimeSummary>(`/api/public/machines/${machineId}/uptime?hours=${uptimeHours}&bucketMin=5`, {
-            signal: ac.signal,
-          });
-          if (!alive) return;
-          setUptime(up);
-        } catch {
-          // ignore
-        }
         const last = res.metrics.length ? res.metrics[res.metrics.length - 1] : null;
         if (last) {
           const prev = lastRef.current;
@@ -56,6 +46,34 @@ export function PublicMachinePage() {
       alive = false;
       ac.abort();
       window.clearInterval(t);
+    };
+  }, [machineId]);
+
+  useEffect(() => {
+    if (!Number.isInteger(machineId) || machineId <= 0) return;
+    let alive = true;
+    let loading = false;
+    const ac = new AbortController();
+    const loadUptime = () => {
+      if (loading) return;
+      loading = true;
+      void apiFetch<UptimeSummary>(`/api/public/machines/${machineId}/uptime?hours=${uptimeHours}&bucketMin=5`, {
+        signal: ac.signal,
+      })
+        .then((up) => {
+          if (alive) setUptime(up);
+        })
+        .catch(() => {})
+        .finally(() => {
+          loading = false;
+        });
+    };
+    loadUptime();
+    const timer = window.setInterval(loadUptime, 60_000);
+    return () => {
+      alive = false;
+      ac.abort();
+      window.clearInterval(timer);
     };
   }, [machineId, uptimeHours]);
 

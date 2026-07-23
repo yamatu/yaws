@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiFetch } from "./api";
+import { apiFetch, type Machine } from "./api";
 
 function defaultAgentWsUrl() {
   try {
@@ -155,7 +155,7 @@ export function MachineNewPage() {
             setError(null);
             try {
               const expiresAt = expiresDate ? new Date(`${expiresDate}T00:00:00`).getTime() : null;
-              const res = await apiFetch<{ ok: true; id: number; agentKey: string }>("/api/machines", {
+              const res = await apiFetch<{ ok: true; id: number; agentKey: string; machine: Machine }>("/api/machines", {
                 method: "POST",
                 body: JSON.stringify({
                   name,
@@ -169,7 +169,10 @@ export function MachineNewPage() {
                   autoRenew,
                 }),
               });
-              nav(`/app/machines/${res.id}`, { replace: true, state: { createdAgentKey: res.agentKey } as any });
+              nav(`/app/machines/${res.id}`, {
+                replace: true,
+                state: { createdAgentKey: res.agentKey, createdMachine: res.machine },
+              });
             } catch (e: any) {
               setError(`创建失败：${e?.message ?? "unknown"}`);
             } finally {

@@ -10,7 +10,11 @@ export function MachinePage() {
   const machineId = Number(id);
   const nav = useNavigate();
   const loc = useLocation() as any;
-  const [machine, setMachine] = useState<Machine | null>(null);
+  const createdMachine = loc?.state?.createdMachine as Machine | undefined;
+  const initialMachine = createdMachine?.id === machineId ? createdMachine : null;
+  const [machine, setMachine] = useState<Machine | null>(initialMachine);
+  const [machineLoading, setMachineLoading] = useState(!initialMachine);
+  const [machineLoadError, setMachineLoadError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<Metric[]>([]);
   const [monthRows, setMonthRows] = useState<Array<{ month: string; rxBytes: number; txBytes: number; updatedAt: number }>>(
     []
@@ -46,138 +50,174 @@ export function MachinePage() {
     if (!Number.isInteger(machineId) || machineId <= 0) return;
     let alive = true;
     const ac = new AbortController();
-    (async () => {
-      try {
-        const res = await apiFetch<{ machine: Machine }>(`/api/machines/${machineId}`, { signal: ac.signal });
+    const seededMachine = createdMachine?.id === machineId ? createdMachine : null;
+    setMachine(seededMachine);
+    setMachineLoading(!seededMachine);
+    setMachineLoadError(null);
+    setMetrics([]);
+    setMonthRows([]);
+    setSetup(null);
+    setUptime(null);
+
+    void apiFetch<{ machine: Machine }>(`/api/machines/${machineId}`, { signal: ac.signal })
+      .then((res) => {
         if (!alive) return;
-        const m = res.machine ?? null;
+        const m = res.machine;
         setMachine(m);
-        if (m) {
-          setEditName(m.name);
-          setEditGroupName(m.groupName ?? "");
-          setEditAgentWsUrl(m.agentWsUrl ?? "");
-          setEditBillingCycle(m.billingCycle);
-          setEditAutoRenew(!!m.autoRenew);
-          setEditPurchaseAmount((m.purchaseAmountCents ?? 0) / 100);
-          setEditExpiresDate(m.expiresAt ? new Date(m.expiresAt).toISOString().slice(0, 10) : "");
+        setMachineLoading(false);
+        setEditName(m.name);
+        setEditGroupName(m.groupName ?? "");
+        setEditAgentWsUrl(m.agentWsUrl ?? "");
+        setEditBillingCycle(m.billingCycle);
+        setEditAutoRenew(!!m.autoRenew);
+        setEditPurchaseAmount((m.purchaseAmountCents ?? 0) / 100);
+        setEditExpiresDate(m.expiresAt ? new Date(m.expiresAt).toISOString().slice(0, 10) : "");
+        setEditSshHost((m.sshHost ?? "").trim());
+        setEditSshPort(Number(m.sshPort ?? 22));
+        setEditSshUser((m.sshUser ?? "").trim());
+        setEditSshAuthType((m.sshAuthType ?? "password") as any);
+        setEditSshPassword("");
+        setEditSshPrivateKey("");
+        setClearSshPassword(false);
+        setClearSshKey(false);
+      })
+      .catch((e: any) => {
+        if (!alive || e?.name === "AbortError") return;
+        setMachineLoading(false);
+        setMachineLoadError(e?.message ?? "加载失败");
+      });
 
-          setEditSshHost((m.sshHost ?? "").trim());
-          setEditSshPort(Number(m.sshPort ?? 22));
-          setEditSshUser((m.sshUser ?? "").trim());
-          setEditSshAuthType((m.sshAuthType ?? "password") as any);
-          setEditSshPassword("");
-          setEditSshPrivateKey("");
-          setClearSshPassword(false);
-          setClearSshKey(false);
-        }
-        const ms = await apiFetch<{ metrics: Metric[] }>(`/api/machines/${machineId}/metrics?limit=300`, {
-          signal: ac.signal,
-        });
+    void apiFetch<{ metrics: Metric[] }>(`/api/machines/${machineId}/metrics?limit=300`, { signal: ac.signal })
+      .then((res) => {
         if (!alive) return;
-        setMetrics(ms.metrics);
+        setMetrics((current) => {
+          const byTime = new Map<number, Metric>();
+          for (const metric of res.metrics) byTime.set(metric.at, metric);
+          for (const metric of current) byTime.set(metric.at, metric);
+          return Array.from(byTime.values()).sort((a, b) => a.at - b.at).slice(-300);
+        });
+      })
+      .catch(() => {});
 
-        try {
-          const up = await apiFetch<UptimeSummary>(`/api/machines/${machineId}/uptime?hours=${uptimeHours}&bucketMin=5`, {
-            signal: ac.signal,
-          });
-          if (!alive) return;
-          setUptime(up);
-        } catch {
-          // ignore
-        }
+    void apiFetch<{ rows: Array<{ month: string; rxBytes: number; txBytes: number; updatedAt: number }> }>(
+      `/api/machines/${machineId}/traffic-monthly?limit=12`,
+      { signal: ac.signal }
+    )
+      .then((res) => {
+        if (alive) setMonthRows(res.rows);
+      })
+      .catch(() => {});
 
-        try {
-          const tr = await apiFetch<{ rows: Array<{ month: string; rxBytes: number; txBytes: number; updatedAt: number }> }>(
-            `/api/machines/${machineId}/traffic-monthly?limit=12`,
-            { signal: ac.signal }
-          );
-          if (!alive) return;
-          setMonthRows(tr.rows);
-        } catch {
-          // ignore
-        }
-        try {
-          const s = await apiFetch<{
-            machineId: number;
-            wsUrl: string;
-            agentKey: string | null;
-            downloadConfigUrl: string;
-          }>(`/api/machines/${machineId}/setup`, { signal: ac.signal });
-          if (!alive) return;
-          setSetup({ wsUrl: s.wsUrl, agentKey: s.agentKey, downloadConfigUrl: s.downloadConfigUrl });
-        } catch {
-          // ignore
-        }
+    void apiFetch<{
+      machineId: number;
+      wsUrl: string;
+      agentKey: string | null;
+      downloadConfigUrl: string;
+    }>(`/api/machines/${machineId}/setup`, { signal: ac.signal })
+      .then((res) => {
+        if (alive) setSetup({ wsUrl: res.wsUrl, agentKey: res.agentKey, downloadConfigUrl: res.downloadConfigUrl });
+      })
+      .catch(() => {});
 
-        try {
-          wsRef.current?.close();
-          const ws = connectUiWs({
-            onEvent: (ev) => {
-              if (ev.type === "machine_status" && ev.machineId === machineId) {
-                setMachine((prev) =>
-                  prev ? { ...prev, online: ev.online ? 1 : 0, lastSeenAt: ev.lastSeenAt } : prev
-                );
-              }
-              if (ev.type === "metrics" && ev.machineId === machineId) {
-                if (ev.monthTraffic) {
-                  setMachine((prev) =>
-                    prev
-                      ? {
-                          ...prev,
-                          monthTraffic: { month: ev.monthTraffic!.month, rxBytes: ev.monthTraffic!.rxBytes, txBytes: ev.monthTraffic!.txBytes },
-                        }
-                      : prev
-                  );
-                  setMonthRows((prev) => {
-                    const i = prev.findIndex((r) => r.month === ev.monthTraffic!.month);
-                    const row = {
-                      month: ev.monthTraffic!.month,
-                      rxBytes: ev.monthTraffic!.rxBytes,
-                      txBytes: ev.monthTraffic!.txBytes,
-                      updatedAt: ev.monthTraffic!.updatedAt ?? Date.now(),
-                    };
-                    if (i >= 0) {
-                      const next = prev.slice();
-                      next[i] = row;
-                      return next;
+    try {
+      wsRef.current?.close();
+      const ws = connectUiWs({
+        onEvent: (ev) => {
+          if (ev.type === "machine_status" && ev.machineId === machineId) {
+            setMachine((prev) =>
+              prev ? { ...prev, online: ev.online ? 1 : 0, lastSeenAt: ev.lastSeenAt } : prev
+            );
+          }
+          if (ev.type === "metrics" && ev.machineId === machineId) {
+            if (ev.monthTraffic) {
+              setMachine((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      monthTraffic: {
+                        month: ev.monthTraffic!.month,
+                        rxBytes: ev.monthTraffic!.rxBytes,
+                        txBytes: ev.monthTraffic!.txBytes,
+                      },
                     }
-                    return [row, ...prev].slice(0, 12);
-                  });
-                }
-                const m: Metric = {
-                  at: ev.metric.at,
-                  cpuUsage: ev.metric.cpu.usage,
-                  memUsed: ev.metric.mem.used,
-                  memTotal: ev.metric.mem.total,
-                  diskUsed: ev.metric.disk.used,
-                  diskTotal: ev.metric.disk.total,
-                  netRxBytes: ev.metric.net?.rxBytes ?? 0,
-                  netTxBytes: ev.metric.net?.txBytes ?? 0,
-                  tcpConn: ev.metric.conn?.tcp ?? 0,
-                  udpConn: ev.metric.conn?.udp ?? 0,
-                  load1: ev.metric.load?.l1 ?? 0,
-                  load5: ev.metric.load?.l5 ?? 0,
-                  load15: ev.metric.load?.l15 ?? 0,
+                  : prev
+              );
+              setMonthRows((prev) => {
+                const i = prev.findIndex((r) => r.month === ev.monthTraffic!.month);
+                const row = {
+                  month: ev.monthTraffic!.month,
+                  rxBytes: ev.monthTraffic!.rxBytes,
+                  txBytes: ev.monthTraffic!.txBytes,
+                  updatedAt: ev.monthTraffic!.updatedAt ?? Date.now(),
                 };
-                setMetrics((prev) => [...prev.slice(-299), m]);
-                setMachine((prev) => (prev ? { ...prev, lastSeenAt: m.at, online: 1 } : prev));
-              }
-            },
-            onClose: () => {},
-          });
-          wsRef.current = ws;
-          ws.onopen = () => ws.send(JSON.stringify({ type: "subscribe", machineIds: [machineId] }));
-        } catch {
-          // ignore
-        }
-      } catch {
-        // ignore
-      }
-    })();
+                if (i >= 0) {
+                  const next = prev.slice();
+                  next[i] = row;
+                  return next;
+                }
+                return [row, ...prev].slice(0, 12);
+              });
+            }
+            const metric: Metric = {
+              at: ev.metric.at,
+              cpuUsage: ev.metric.cpu.usage,
+              memUsed: ev.metric.mem.used,
+              memTotal: ev.metric.mem.total,
+              diskUsed: ev.metric.disk.used,
+              diskTotal: ev.metric.disk.total,
+              netRxBytes: ev.metric.net?.rxBytes ?? 0,
+              netTxBytes: ev.metric.net?.txBytes ?? 0,
+              tcpConn: ev.metric.conn?.tcp ?? 0,
+              udpConn: ev.metric.conn?.udp ?? 0,
+              load1: ev.metric.load?.l1 ?? 0,
+              load5: ev.metric.load?.l5 ?? 0,
+              load15: ev.metric.load?.l15 ?? 0,
+            };
+            setMetrics((prev) => [...prev.filter((item) => item.at !== metric.at).slice(-299), metric]);
+            setMachine((prev) => (prev ? { ...prev, lastSeenAt: metric.at, online: 1 } : prev));
+          }
+        },
+        onClose: () => {},
+      });
+      wsRef.current = ws;
+      ws.onopen = () => ws.send(JSON.stringify({ type: "subscribe", machineIds: [machineId] }));
+    } catch {
+      // ignore
+    }
+
     return () => {
       alive = false;
       ac.abort();
       wsRef.current?.close();
+      wsRef.current = null;
+    };
+  }, [machineId]);
+
+  useEffect(() => {
+    if (!Number.isInteger(machineId) || machineId <= 0) return;
+    let alive = true;
+    let loading = false;
+    const ac = new AbortController();
+    const loadUptime = () => {
+      if (loading) return;
+      loading = true;
+      void apiFetch<UptimeSummary>(`/api/machines/${machineId}/uptime?hours=${uptimeHours}&bucketMin=5`, {
+        signal: ac.signal,
+      })
+        .then((res) => {
+          if (alive) setUptime(res);
+        })
+        .catch(() => {})
+        .finally(() => {
+          loading = false;
+        });
+    };
+    loadUptime();
+    const timer = window.setInterval(loadUptime, 60_000);
+    return () => {
+      alive = false;
+      ac.abort();
+      window.clearInterval(timer);
     };
   }, [machineId, uptimeHours]);
 
@@ -219,7 +259,10 @@ export function MachinePage() {
   if (!machine) {
     return (
       <div className="yaws-card p-4">
-        <div className="mb-2 font-extrabold">机器不存在</div>
+        <div className="mb-2 font-extrabold">
+          {machineLoading ? "正在加载机器..." : machineLoadError ? "加载机器失败" : "机器不存在"}
+        </div>
+        {machineLoadError ? <div className="mb-3 text-sm text-rose-300/80">{machineLoadError}</div> : null}
         <Link className="yaws-btn inline-flex" to="/app">
           返回
         </Link>
