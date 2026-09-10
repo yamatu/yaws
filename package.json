@@ -1,14 +1,20 @@
 {
   "name": "yaws",
   "private": true,
+  "overrides": {
+    "qs": "^6.16.0"
+  },
   "workspaces": [
     "server",
     "web"
   ],
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "concurrently": "^9.1.2"
   },
   "scripts": {
+    "test": "npm run build -w server && node --import tsx --test server/test/security.test.ts server/test/integration.test.mjs",
+    "test:browser": "node --test web/test/workspace.spec.mjs",
     "dev": "concurrently -k -n server,web \"npm run dev -w server\" \"npm run dev -w web\"",
     "build": "npm run build -w web && npm run build -w server",
     "start": "npm run start -w server"

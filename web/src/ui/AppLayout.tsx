@@ -5,7 +5,7 @@ export function AppLayout() {
   const nav = useNavigate();
   return (
     <div className="mx-auto max-w-6xl px-5 py-5">
-      <div className="mb-6 flex items-center gap-3 rounded-2xl border border-white/[0.06] bg-white/[0.03] px-5 py-3.5 backdrop-blur-xl">
+      <div className="mb-6 flex flex-wrap items-center gap-2 border-b border-white/[0.1] px-1 py-3.5">
         <div className="flex-1">
           <Link to="/app" className="text-lg font-extrabold tracking-wider text-white/95">
             YAWS

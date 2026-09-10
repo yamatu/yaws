@@ -5,6 +5,7 @@ const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3001),
   DATABASE_PATH: z.string().default("./data/yaws.sqlite"),
   JWT_SECRET: z.string().min(16).default("dev-secret-change-me-please"),
+  BOOTSTRAP_TOKEN: z.string().optional(),
   AGENT_KEY_SECRET: z.string().min(16).optional(),
   AGENT_KEY_SECRET_PREVIOUS: z.preprocess(
     (value) => (value === "" ? undefined : value),

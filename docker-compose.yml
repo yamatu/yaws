@@ -7,6 +7,7 @@ services:
       PORT: "3001"
       DATABASE_PATH: "../data/yaws.sqlite"
       JWT_SECRET: "${JWT_SECRET:?set JWT_SECRET in .env}"
+      BOOTSTRAP_TOKEN: "${BOOTSTRAP_TOKEN:-}"
       AGENT_KEY_SECRET: "${AGENT_KEY_SECRET:?set AGENT_KEY_SECRET in .env}"
       AGENT_KEY_SECRET_PREVIOUS: "${AGENT_KEY_SECRET_PREVIOUS:-}"
       CORS_ORIGIN: "${CORS_ORIGIN:-http://localhost:3001}"

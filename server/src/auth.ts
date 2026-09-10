@@ -7,6 +7,7 @@ export type JwtUser = {
   id: number;
   username: string;
   role: string;
+  version?: number;
 };
 
 export function hashPassword(password: string) {
@@ -45,6 +46,7 @@ const JwtUserSchema = z.object({
   id: z.number().int().positive(),
   username: z.string().min(1),
   role: z.string().min(1),
+  version: z.number().int().nonnegative().default(0),
   iat: z.number().optional(),
   exp: z.number().optional(),
 });

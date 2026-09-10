@@ -18,7 +18,9 @@
 - 到期信息（站内展示）：到期时间、购买金额、计费周期（月/季/半年/年/两年/三年）、自动续费开关（仅展示）
 - Telegram 通知：离线/恢复在线/到期提醒（后台可配置；或使用环境变量）
 - 堡垒机：登录后台后统一查看已配置 SSH 主机、进入 WebSSH，并查看/断开活动会话；SSH 会话由主控服务端代理并记录审计信息
-- 延迟监控：后台添加 IP/域名后由主控服务端持续 Ping，结果保存到 SQLite，页面展示可用率与延迟折线图
+- 延迟监控：选择来源机器和目标 IP/域名，由该机器的 Agent 持续 Ping；保存历史样本，显示延迟、抖动和丢包率
+- SSH 工作区：机器专属快捷指令、SFTP 目录浏览/上传/下载、配置文件编辑、主机指纹校验
+- AI 工作区：自定义 Chat Completions / Responses 接口、模型和推理级别；生成文件差异与命令建议，经审批后应用
 - 备份与恢复（后台）：
   - 下载 SQLite 备份（支持 `.sqlite.gz` 压缩）
   - 上传备份恢复（支持 `.sqlite` / `.sqlite.gz`），恢复后自动重启
@@ -83,6 +85,7 @@ docker compose up -d --build
 ```bash
 curl -X POST http://localhost:3001/api/auth/bootstrap \
   -H 'content-type: application/json' \
+  -H "x-bootstrap-token: $BOOTSTRAP_TOKEN" \
   -d '{"username":"admin","password":"admin123"}'
 ```
 
@@ -92,6 +95,31 @@ curl -X POST http://localhost:3001/api/auth/bootstrap \
 - 后台登录：`http://localhost:3001/login`
 
 数据默认挂载到宿主机 `./data/`（SQLite 文件），升级/重启不会丢数据。
+
+## 机器出口监控与远程工作区
+
+- 主控与 Agent 都需要升级到 v0.2.0。旧 Agent 会显示“请升级被控端”；系统不会退回主控 Ping。
+- 在“机器出口延迟”选择来源机器（名称/IP/ID），目标默认 `google.com`，也可填写固定 IP。Agent 必须安装系统 `ping`（Debian/Ubuntu: `apt install iputils-ping`；Alpine: `apk add iputils`）。结果表示 ICMP RTT，不包含 HTTPS 请求耗时。
+- v0.1.3 的旧主控监控将保留历史并暂停；请删除旧项后，按机器重新添加，避免混合不同来源的数据。
+- 每台机器进入 SSH 工作区前须核对并保存 SSH 主机指纹。可在服务器运行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256`（以服务端实际使用的主机密钥为准）。连接地址或指纹变化后需重新核实。
+- “快捷指令”按机器保存；可插入终端或确认后执行。“文件”通过同一 SSH 用户的 SFTP 权限访问，识别 Nginx、Apache、Caddy、Docker、宝塔、1Panel 等常见目录，同时支持手动路径。
+- 文本编辑限制为 UTF-8、512 KiB；上传/下载限制为 8 MiB。上传不覆盖已有文件。保存会检查内容版本、保留原权限和所有者、生成 `.yaws-backup-*`，OpenSSH 使用原子替换；不支持扩展的 SFTP 使用保留原文件的回滚替换。ACL/xattr 不通过 SFTP 复制，特殊文件和二进制文件不支持在线编辑。
+- AI 设置支持完整接口地址或 `/v1` 基地址、模型、可选推理级别；`high`、`max` 等按提供方原样发送，具体支持范围由模型接口决定。模型必须支持工具调用。Responses 使用 `reasoning.effort`，Chat 使用 `reasoning_effort`。
+- AI 只读取选定目录中的文件并生成建议，文件内容会发送到配置的模型接口。常见凭据路径会被拒绝，但配置文件仍可能包含敏感值；请选择适合发送的目录。AI 的文件修改和命令逐项审批，命令使用 SSH 用户权限运行，不是容器沙箱。
+- AI 密钥、任务和修改内容加密存储；改变 API 域名不会复用之前域名的密钥。默认仅允许公共 HTTPS 接口，自建内网接口需显式开启“允许内网 / HTTP 接口”。
+- 生产环境首次初始化需在 `.env` 设置随机 `BOOTSTRAP_TOKEN`（至少 16 字符），并在请求头传入；已有管理员不受影响。改密后旧令牌及现有 WebSocket 会话立即失效。
+
+## 验证
+
+```bash
+npm ci
+npm run build
+npm test
+npm run test:browser  # 默认使用已安装的 Edge；可通过 PLAYWRIGHT_CHANNEL 改用 chrome
+cd agent && go test ./... && go vet ./...
+```
+
+浏览器测试使用内存数据库、SSH/SFTP 测试服务和模拟模型接口，不连接生产服务器。发布工作流运行后端/Agent 测试并生成 Linux amd64/arm64 产物及 SHA256 校验文件。
 
 ## 反向代理（Nginx，HTTPS + WebSocket + 大文件上传）
 

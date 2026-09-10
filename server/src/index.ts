@@ -15,6 +15,9 @@ import { attachWebSockets } from "./ws.js";
 import { z } from "zod";
 import { decryptText, encryptText } from "./crypto.js";
 import { createPingService } from "./ping.js";
+import { workspaceRouter } from "./workspace.js";
+import { aiRouter } from "./ai.js";
+import { WorkspaceError } from "./ssh.js";
 
 const env = loadEnv();
 const db = openDb(env.DATABASE_PATH);
@@ -35,6 +38,7 @@ if (previousAgentKeySecret && previousAgentKeySecret !== agentKeySecret) {
 const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
+app.use("/api", (_req, res, next) => { res.setHeader("cache-control", "no-store"); next(); });
 app.use((_req, res, next) => {
   res.setHeader("x-content-type-options", "nosniff");
   res.setHeader("x-frame-options", "DENY");
@@ -44,6 +48,14 @@ app.use((_req, res, next) => {
 
 let isRestoring = false;
 const loginFailures = new Map<string, { count: number; windowStartedAt: number }>();
+let passwordChecks = 0;
+app.use(["/api/auth/login", "/api/auth/bootstrap"], (_req, res, next) => {
+  if (passwordChecks >= 4) return res.status(429).json({ error: "too_many_attempts" });
+  passwordChecks++;
+  let released = false;
+  const release = () => { if (!released) { released = true; passwordChecks--; } };
+  res.once("finish", release); res.once("close", release); next();
+});
 
 function asyncRoute(fn: (req: Request, res: express.Response, next: express.NextFunction) => Promise<any>) {
   return (req: Request, res: express.Response, next: express.NextFunction) => {
@@ -129,6 +141,17 @@ function rotateStoredSecrets(previousSecret: string, currentSecret: string) {
           Date.now()
         );
       }
+    }
+    const ai = db.prepare("SELECT value FROM settings WHERE key = 'ai_config_enc'").get() as { value: string } | undefined;
+    if (ai?.value) {
+      const config = rotateValue(ai.value);
+      if (config.rotated) db.prepare("UPDATE settings SET value = ?, updated_at = ? WHERE key = 'ai_config_enc'").run(config.payload, Date.now());
+    }
+    for (const run of db.prepare("SELECT id,prompt,result FROM ai_runs").all() as Array<{id:string;prompt:string;result:string}>) {
+      db.prepare("UPDATE ai_runs SET prompt=?,result=? WHERE id=?").run(rotateValue(run.prompt).payload, rotateValue(run.result).payload, run.id);
+    }
+    for (const proposal of db.prepare("SELECT id,before_text,after_text FROM ai_proposals").all() as Array<{id:string;before_text:string;after_text:string}>) {
+      db.prepare("UPDATE ai_proposals SET before_text=?,after_text=? WHERE id=?").run(rotateValue(proposal.before_text).payload, rotateValue(proposal.after_text).payload, proposal.id);
     }
   });
 
@@ -544,6 +567,13 @@ app.get("/api/public/machines/:id/uptime", (req, res) => {
 });
 
 app.post("/api/auth/bootstrap", asyncRoute(async (req, res) => {
+  if (env.NODE_ENV === "production") {
+    const expected = Buffer.from(env.BOOTSTRAP_TOKEN ?? "");
+    const provided = Buffer.from(req.header("x-bootstrap-token") ?? "");
+    if (expected.length < 16 || expected.length !== provided.length || !crypto.timingSafeEqual(expected, provided)) {
+      return res.status(403).json({ error: "bootstrap_token_required" });
+    }
+  }
   const body = BootstrapSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ error: "bad_request" });
 
@@ -579,8 +609,8 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
   }
 
   const row = db
-    .prepare("SELECT id, username, password_hash, role FROM users WHERE username = ?")
-    .get(username) as { id: number; username: string; password_hash: string; role: string } | undefined;
+    .prepare("SELECT id, username, password_hash, role, auth_version as version FROM users WHERE username = ?")
+    .get(username) as { id: number; username: string; password_hash: string; role: string; version: number } | undefined;
 
   const ok = await verifyPassword(body.data.password, row?.password_hash ?? DUMMY_PASSWORD_HASH);
   if (!row || !ok) {
@@ -589,11 +619,11 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
   }
 
   loginFailures.delete(attemptKey);
-  const token = signToken({ id: row.id, username: row.username, role: row.role }, env.JWT_SECRET);
+  const token = signToken({ id: row.id, username: row.username, role: row.role, version: row.version }, env.JWT_SECRET);
   return res.json({ token });
 }));
 
-const requireAuth = authMiddleware(env.JWT_SECRET);
+const requireAuth = authMiddleware(env.JWT_SECRET, db);
 function requireAdmin(req: Request, res: express.Response, next: express.NextFunction) {
   const user = (req as any).user as { id: number; username: string; role: string } | undefined;
   if (!user) return res.status(401).json({ error: "missing_token" });
@@ -601,8 +631,11 @@ function requireAdmin(req: Request, res: express.Response, next: express.NextFun
   return next();
 }
 
-const pingService = createPingService(db, () => !isRestoring);
+const pingService = createPingService(db, () => !isRestoring, (machineId, target, signal) => wsHub.probeMachine(machineId, target, signal));
 app.use("/api/ping", requireAuth, requireAdmin, pingService.router);
+app.use("/api/machines", requireAuth, requireAdmin);
+app.use("/api/machines/:id/workspace", workspaceRouter(db, agentKeySecret));
+app.use("/api/ai", requireAuth, requireAdmin, aiRouter(db, agentKeySecret));
 
 app.get("/api/me", requireAuth, (req, res) => {
   return res.json({ user: (req as any).user });
@@ -1029,12 +1062,14 @@ app.put("/api/me/credentials", requireAuth, asyncRoute(async (req, res) => {
   const newUsername = body.data.username?.trim() || row.username;
   const newPasswordHash = body.data.newPassword ? await hashPassword(body.data.newPassword) : row.password_hash;
   try {
-    db.prepare("UPDATE users SET username = ?, password_hash = ? WHERE id = ?").run(newUsername, newPasswordHash, row.id);
+    db.prepare("UPDATE users SET username = ?, password_hash = ?, auth_version = auth_version + 1 WHERE id = ?").run(newUsername, newPasswordHash, row.id);
   } catch {
     return res.status(409).json({ error: "username_taken" });
   }
 
-  const token = signToken({ id: row.id, username: newUsername, role: row.role }, env.JWT_SECRET);
+  wsHub.closeUser(row.id);
+  const version = (db.prepare("SELECT auth_version as version FROM users WHERE id = ?").get(row.id) as { version: number }).version;
+  const token = signToken({ id: row.id, username: newUsername, role: row.role, version }, env.JWT_SECRET);
   return res.json({ ok: true, token, user: { id: row.id, username: newUsername, role: row.role } });
 }));
 
@@ -1098,7 +1133,7 @@ app.get("/api/machines", requireAuth, (_req, res) => {
   });
 });
 
-app.get("/api/machines/:id(\\d+)", requireAuth, (req, res) => {
+app.get(/^\/api\/machines\/(?<id>\d+)$/, requireAuth, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
   const now = Date.now();
@@ -1506,6 +1541,7 @@ app.delete("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
   if (!row) return res.status(404).json({ error: "not_found" });
 
   wsHub.closeAgent(id);
+  db.prepare("UPDATE ping_monitors SET enabled=0 WHERE machine_id=?").run(id);
   db.prepare("UPDATE machines SET online = 0, deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL").run(
     Date.now(),
     Date.now(),
@@ -1658,6 +1694,9 @@ app.get("/api/machines/:id/metrics", requireAuth, (req, res) => {
 });
 
 app.use((err: any, _req: Request, res: express.Response, _next: express.NextFunction) => {
+  if (err instanceof WorkspaceError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof z.ZodError) return res.status(400).json({ error: "bad_request" });
+  if (err?.type === "entity.too.large") return res.status(413).json({ error: "file_too_large" });
   // eslint-disable-next-line no-console
   console.error("[http] unhandled", err);
   if (res.headersSent) return;
@@ -1671,6 +1710,7 @@ const wsHub = attachWebSockets({
   jwtSecret: env.JWT_SECRET,
   agentKeySecret,
   previousAgentKeySecret,
+  corsOrigin: env.CORS_ORIGIN,
 });
 
 app.get("/api/ssh/sessions", requireAuth, requireAdmin, (_req, res) => {
@@ -1690,8 +1730,9 @@ app.delete("/api/ssh/sessions/:id", requireAuth, requireAdmin, (req, res) => {
 
 const webDist = path.resolve(process.cwd(), "../web/dist");
 if (fs.existsSync(webDist)) {
-  app.use(express.static(webDist, { maxAge: env.NODE_ENV === "production" ? "1h" : 0, etag: true }));
-  app.get("*", (req, res) => res.sendFile(path.join(webDist, "index.html")));
+  app.use("/assets", express.static(path.join(webDist, "assets"), { maxAge: "1y", immutable: true }));
+  app.use(express.static(webDist, { maxAge: 0, etag: true }));
+  app.get("/{*splat}", (req, res) => res.sendFile(path.join(webDist, "index.html")));
 }
 
 server.listen(env.PORT, () => {

@@ -16,17 +16,36 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25.x"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Verify controller and agent
+        run: |
+          npm ci
+          npm run build
+          npx tsc -p web/tsconfig.json --noEmit
+          npm test
+          cd agent
+          go test ./...
+          go vet ./...
 
       - name: Build agent (linux amd64/arm64)
         working-directory: agent
         run: |
           make linux-amd64 VERSION=${{ github.ref_name }} COMMIT=${{ github.sha }}
           make linux-arm64 VERSION=${{ github.ref_name }} COMMIT=${{ github.sha }}
+          (cd bin && sha256sum yaws-agent-linux-amd64 yaws-agent-linux-arm64 > SHA256SUMS)
 
       - name: Release assets
         uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
+          body_path: docs/releases/${{ github.ref_name }}.md
           files: |
             agent/bin/yaws-agent-linux-amd64
             agent/bin/yaws-agent-linux-arm64
+            agent/bin/SHA256SUMS

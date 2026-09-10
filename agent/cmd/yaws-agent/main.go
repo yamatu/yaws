@@ -18,16 +18,17 @@ import (
 )
 
 type helloMsg struct {
-	Type      string `json:"type"`
-	MachineID int    `json:"machineId"`
-	Key       string `json:"key"`
-	Hostname  string `json:"hostname,omitempty"`
-	OSName    string `json:"osName,omitempty"`
-	OSVersion string `json:"osVersion,omitempty"`
-	Arch      string `json:"arch,omitempty"`
-	Kernel    string `json:"kernelVersion,omitempty"`
-	CPUModel  string `json:"cpuModel,omitempty"`
-	CPUCores  int    `json:"cpuCores,omitempty"`
+	Type         string   `json:"type"`
+	MachineID    int      `json:"machineId"`
+	Key          string   `json:"key"`
+	Hostname     string   `json:"hostname,omitempty"`
+	OSName       string   `json:"osName,omitempty"`
+	OSVersion    string   `json:"osVersion,omitempty"`
+	Arch         string   `json:"arch,omitempty"`
+	Kernel       string   `json:"kernelVersion,omitempty"`
+	CPUModel     string   `json:"cpuModel,omitempty"`
+	CPUCores     int      `json:"cpuCores,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type metricsMsg struct {
@@ -167,6 +168,9 @@ func runOnce(
 		return err
 	}
 	defer conn.Close()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	conn.SetReadLimit(256 * 1024)
 
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -175,16 +179,17 @@ func runOnce(
 	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 	hello := helloMsg{
-		Type:      "hello",
-		MachineID: machineID,
-		Key:       key,
-		Hostname:  hostname,
-		OSName:    sys.OSName,
-		OSVersion: sys.OSVersion,
-		Arch:      sys.Arch,
-		Kernel:    sys.KernelVersion,
-		CPUModel:  sys.CPUModel,
-		CPUCores:  sys.CPUCores,
+		Type:         "hello",
+		MachineID:    machineID,
+		Key:          key,
+		Hostname:     hostname,
+		OSName:       sys.OSName,
+		OSVersion:    sys.OSVersion,
+		Arch:         sys.Arch,
+		Kernel:       sys.KernelVersion,
+		CPUModel:     sys.CPUModel,
+		CPUCores:     sys.CPUCores,
+		Capabilities: []string{"ping-v1"},
 	}
 	if err := conn.WriteJSON(hello); err != nil {
 		return err
@@ -197,7 +202,10 @@ func runOnce(
 		return err
 	}
 	var ok helloOkMsg
-	if err := json.Unmarshal(b, &ok); err == nil && ok.Type == "hello_ok" && ok.IntervalSec >= 2 {
+	if err := json.Unmarshal(b, &ok); err != nil || ok.Type != "hello_ok" {
+		return fmt.Errorf("agent authentication failed")
+	}
+	if ok.IntervalSec >= 2 {
 		serverInterval = time.Duration(ok.IntervalSec) * time.Second
 	}
 
@@ -211,13 +219,36 @@ func runOnce(
 	defer ticker.Stop()
 
 	readErr := make(chan error, 1)
+	results := make(chan pingResult, 4)
+	pingSlots := make(chan struct{}, 2)
 	go func() {
 		for {
 			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-			_, _, err := conn.ReadMessage()
+			_, data, err := conn.ReadMessage()
 			if err != nil {
 				readErr <- err
 				return
+			}
+			var request pingRequest
+			if json.Unmarshal(data, &request) != nil || request.Type != "ping" || len(request.RequestID) > 64 || request.RequestID == "" {
+				continue
+			}
+			select {
+			case pingSlots <- struct{}{}:
+				go func(r pingRequest) {
+					defer func() { <-pingSlots }()
+					result := measurePing(ctx, r)
+					select {
+					case results <- result:
+					case <-ctx.Done():
+					}
+				}(request)
+			default:
+				select {
+				case results <- pingResult{Type: "ping_result", RequestID: request.RequestID, Error: "agent_busy"}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -226,6 +257,11 @@ func runOnce(
 		select {
 		case <-ctx.Done():
 			return nil
+		case result := <-results:
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := conn.WriteJSON(result); err != nil {
+				return err
+			}
 		case err := <-readErr:
 			var closeErr *websocket.CloseError
 			if errors.As(err, &closeErr) {
@@ -242,6 +278,7 @@ func runOnce(
 			}
 			m.Type = "metrics"
 			m.At = time.Now().UnixMilli()
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteJSON(m); err != nil {
 				return err
 			}

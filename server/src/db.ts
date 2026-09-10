@@ -35,7 +35,8 @@ function migrate(db: Db) {
 
     CREATE TABLE IF NOT EXISTS ping_monitors (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      target TEXT NOT NULL UNIQUE,
+      machine_id INTEGER,
+      target TEXT NOT NULL,
       interval_sec INTEGER NOT NULL DEFAULT 5,
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL
@@ -186,6 +187,8 @@ function migrate(db: Db) {
   `);
 
   ensureColumns(db, "machines", [
+    { name: "ssh_host_fingerprint", sql: "ALTER TABLE machines ADD COLUMN ssh_host_fingerprint TEXT NOT NULL DEFAULT ''" },
+    { name: "ssh_fingerprint_address", sql: "ALTER TABLE machines ADD COLUMN ssh_fingerprint_address TEXT NOT NULL DEFAULT ''" },
     { name: "sort_order", sql: "ALTER TABLE machines ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0" },
     { name: "group_name", sql: "ALTER TABLE machines ADD COLUMN group_name TEXT NOT NULL DEFAULT ''" },
     { name: "hostname", sql: "ALTER TABLE machines ADD COLUMN hostname TEXT NOT NULL DEFAULT ''" },
@@ -215,6 +218,35 @@ function migrate(db: Db) {
   ]);
 
   db.exec("CREATE INDEX IF NOT EXISTS idx_machines_deleted_sort ON machines(deleted_at, sort_order, id)");
+
+  ensureColumns(db, "users", [{ name: "auth_version", sql: "ALTER TABLE users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 0" }]);
+  const pingColumns = db.prepare("PRAGMA table_info(ping_monitors)").all() as Array<{ name: string }>;
+  if (!pingColumns.some((c) => c.name === "machine_id")) {
+    db.transaction(() => {
+      db.exec(`CREATE TABLE ping_monitors_next (id INTEGER PRIMARY KEY AUTOINCREMENT, machine_id INTEGER,
+        target TEXT NOT NULL, interval_sec INTEGER NOT NULL DEFAULT 5, enabled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+        INSERT INTO ping_monitors_next SELECT id, NULL, target, interval_sec, 0, created_at FROM ping_monitors;
+        CREATE TABLE ping_samples_next (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          monitor_id INTEGER NOT NULL REFERENCES ping_monitors_next(id) ON DELETE CASCADE, at INTEGER NOT NULL, latency_ms REAL, error TEXT);
+        INSERT INTO ping_samples_next SELECT * FROM ping_samples;
+        DROP TABLE ping_samples; DROP TABLE ping_monitors;
+        ALTER TABLE ping_monitors_next RENAME TO ping_monitors;
+        ALTER TABLE ping_samples_next RENAME TO ping_samples;`);
+    })();
+  }
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ping_machine_target ON ping_monitors(machine_id, target);
+    CREATE INDEX IF NOT EXISTS idx_ping_monitor_at ON ping_samples(monitor_id, at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ping_at ON ping_samples(at);
+    CREATE TABLE IF NOT EXISTS ssh_shortcuts (id INTEGER PRIMARY KEY AUTOINCREMENT, machine_id INTEGER NOT NULL
+      REFERENCES machines(id) ON DELETE CASCADE, name TEXT NOT NULL, command TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS workspace_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, machine_id INTEGER NOT NULL,
+      operator_id INTEGER NOT NULL, action TEXT NOT NULL, path TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_workspace_audit_machine ON workspace_audit(machine_id, at DESC);
+    CREATE TABLE IF NOT EXISTS ai_runs (id TEXT PRIMARY KEY, machine_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+      root TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS ai_proposals (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES ai_runs(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL, path TEXT NOT NULL, before_text TEXT NOT NULL, after_text TEXT NOT NULL,
+      revision TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending');`);
 
   ensureColumns(db, "metrics", [
     { name: "net_rx_bytes", sql: "ALTER TABLE metrics ADD COLUMN net_rx_bytes INTEGER NOT NULL DEFAULT 0" },

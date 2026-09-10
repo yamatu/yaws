@@ -28,8 +28,7 @@ export function connectUiWs(opts: {
   const token = getToken();
   if (!token) throw new Error("missing_token");
   const url = new URL("/ws/ui", window.location.origin);
-  url.searchParams.set("token", token);
-  const ws = new WebSocket(url.toString().replace(/^http/, "ws"));
+  const ws = new WebSocket(url.toString().replace(/^http/, "ws"), ["yaws", `bearer.${token}`]);
   ws.onmessage = (e) => {
     try {
       opts.onEvent(JSON.parse(e.data));

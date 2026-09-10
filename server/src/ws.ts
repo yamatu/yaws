@@ -3,9 +3,10 @@ import WebSocket, { WebSocketServer } from "ws";
 import { z } from "zod";
 import type { Db } from "./db.js";
 import { verifyAgentKey, verifyToken } from "./auth.js";
-import { Client as SshClient } from "ssh2";
-import { decryptText } from "./crypto.js";
+import { currentUser } from "./http.js";
+import { terminalSocket, type TerminalSession } from "./ssh-terminal.js";
 import { randomUUID } from "node:crypto";
+import type { PingResult } from "./ping.js";
 
 type UiClient = {
   ws: WebSocket;
@@ -16,7 +17,13 @@ type UiClient = {
 type AgentClient = {
   ws: WebSocket;
   machineId: number;
+  capabilities: string[];
 };
+
+function browserToken(req: IncomingMessage) {
+  const protocol = req.headers["sec-websocket-protocol"]?.split(",").map((p) => p.trim()).find((p) => p.startsWith("bearer."));
+  return protocol?.slice(7) ?? "";
+}
 
 export function attachWebSockets(opts: {
   server: import("node:http").Server;
@@ -24,14 +31,39 @@ export function attachWebSockets(opts: {
   jwtSecret: string;
   agentKeySecret: string;
   previousAgentKeySecret?: string;
+  corsOrigin?: string;
 }) {
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024, handleProtocols: (protocols) => protocols.has("yaws") ? "yaws" : false });
   const uiClients = new Set<UiClient>();
   const agents = new Map<number, AgentClient>();
-  const sshSessions = new Map<string, WebSocket>();
+  const sshSessions = new Map<string, TerminalSession>();
+  const browserUsers = new Map<WebSocket, number>();
+  const browserTokens = new Map<WebSocket, string>();
+  opts.db.prepare("UPDATE ssh_sessions SET ended_at = ?, status = 'closed', reason = 'server_restarted' WHERE ended_at IS NULL").run(Date.now());
+  const pendingPings = new Map<string, { ws: WebSocket; finish: (result: PingResult) => void }>();
+  function probeMachine(machineId: number, target: string, signal?: AbortSignal): Promise<PingResult> {
+    const agent = agents.get(machineId);
+    const failed = (error: string) => ({ at: Date.now(), latencyMs: null, error });
+    if (!agent || agent.ws.readyState !== WebSocket.OPEN) return Promise.resolve(failed("agent_offline"));
+    if (!agent.capabilities.includes("ping-v1")) return Promise.resolve(failed("agent_upgrade_required"));
+    if (pendingPings.size >= 32 || agent.ws.bufferedAmount > 256 * 1024) return Promise.resolve(failed("agent_busy"));
+    return new Promise((resolve) => {
+      const requestId = randomUUID();
+      const abort = () => finish(failed("cancelled"));
+      const timer = setTimeout(() => finish(failed("agent_timeout")), 7000);
+      const finish = (result: PingResult) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); pendingPings.delete(requestId); resolve(result); };
+      pendingPings.set(requestId, { ws: agent.ws, finish });
+      if (signal?.aborted) return abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      agent.ws.send(JSON.stringify({ type: "ping", requestId, target }), (err) => { if (err) finish(failed("agent_offline")); });
+    });
+  }
 
   opts.server.on("upgrade", (req, socket, head) => {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+    if (!opts.db.open) { socket.destroy(); return; }
+    let url: URL;
+    try { url = new URL(req.url ?? "/", `http://${req.headers.host}`); } catch { socket.destroy(); return; }
+    if (wss.clients.size >= 1000) { socket.destroy(); return; }
     if (url.pathname !== "/ws/ui" && url.pathname !== "/ws/agent" && url.pathname !== "/ws/ssh") {
       socket.destroy();
       return;
@@ -40,13 +72,17 @@ export function attachWebSockets(opts: {
     // Hard reject before WebSocket upgrade for security.
     // This ensures unauthenticated clients can't even establish a WS connection.
     if (url.pathname === "/ws/ui" || url.pathname === "/ws/ssh") {
-      const token = url.searchParams.get("token") ?? "";
+      const token = browserToken(req);
+      const origin = req.headers.origin;
+      let originOk = false;
+      try { originOk = !!origin && (new URL(origin).host === req.headers.host || origin === opts.corsOrigin); } catch { originOk = false; }
+      if (!originOk) { socket.destroy(); return; }
       if (!token) {
         socket.destroy();
         return;
       }
       try {
-        const user = verifyToken(token, opts.jwtSecret);
+        const user = currentUser(opts.db, token, opts.jwtSecret);
         const row = opts.db
           .prepare("SELECT id, role FROM users WHERE id = ?")
           .get(user.id) as { id: number; role: string } | undefined;
@@ -64,7 +100,12 @@ export function attachWebSockets(opts: {
       }
     }
 
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      if (url.pathname !== "/ws/agent") { browserUsers.set(ws, currentUser(opts.db, browserToken(req), opts.jwtSecret).id); browserTokens.set(ws, browserToken(req)); }
+      ws.once("close", () => { browserUsers.delete(ws); browserTokens.delete(ws); });
+      ws.on("error", () => ws.terminate());
+      wss.emit("connection", ws, req);
+    });
   });
 
   wss.on("connection", (ws, req: IncomingMessage) => {
@@ -74,233 +115,16 @@ export function attachWebSockets(opts: {
     else handleSsh(ws, req, url);
   });
 
-  function handleSsh(ws: WebSocket, _req: IncomingMessage, url: URL) {
-    const token = url.searchParams.get("token") ?? "";
-    const safeSend = (msg: unknown) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      try {
-        ws.send(JSON.stringify(msg));
-      } catch {
-        // ignore
-      }
-    };
-
-    let user: ReturnType<typeof verifyToken>;
-    try {
-      user = verifyToken(token, opts.jwtSecret);
-      const row = opts.db
-        .prepare("SELECT id, role FROM users WHERE id = ?")
-        .get(user.id) as { id: number; role: string } | undefined;
-      if (!row || row.role !== "admin") {
-        ws.close(1008, "forbidden");
-        return;
-      }
-    } catch {
-      ws.close(1008, "invalid token");
-      return;
-    }
-
-    let ssh: SshClient | null = null;
-    let stream: any = null;
-    let connected = false;
-    let sessionId: string | null = null;
-
-    const cleanup = () => {
-      try {
-        stream?.end?.();
-      } catch {
-        // ignore
-      }
-      try {
-        ssh?.end();
-      } catch {
-        // ignore
-      }
-      stream = null;
-      ssh = null;
-      connected = false;
-      if (sessionId) {
-        sshSessions.delete(sessionId);
-        opts.db.prepare("UPDATE ssh_sessions SET ended_at = ?, status = CASE WHEN status IN ('connected', 'connecting') THEN 'closed' ELSE status END, reason = COALESCE(reason, ?) WHERE id = ? AND ended_at IS NULL").run(Date.now(), "socket_closed", sessionId);
-        sessionId = null;
-      }
-    };
-
-    ws.on("close", cleanup);
-
-    ws.on("message", (data) => {
-      try {
-        const msg: any = SshMessageSchema.parse(JSON.parse(data.toString("utf8")));
-
-        if (msg.type === "connect") {
-          if (connected) return;
-          const row = opts.db
-            .prepare(
-              `SELECT
-                 id,
-                 name,
-                 ssh_host as sshHost,
-                 ssh_port as sshPort,
-                 ssh_user as sshUser,
-                 ssh_auth_type as sshAuthType,
-                 ssh_password_enc as sshPasswordEnc,
-                 ssh_key_enc as sshKeyEnc
-               FROM machines
-               WHERE id = ? AND deleted_at IS NULL`
-            )
-            .get(msg.machineId) as
-            | {
-                id: number;
-                name: string;
-                sshHost: string;
-                sshPort: number;
-                sshUser: string;
-                sshAuthType: string;
-                sshPasswordEnc: string;
-                sshKeyEnc: string;
-              }
-            | undefined;
-          if (!row) {
-            safeSend({ type: "error", error: "not_found" });
-            return;
-          }
-
-        const host = (row.sshHost ?? "").trim();
-        const port = Number(row.sshPort ?? 22);
-        const username = (row.sshUser ?? "").trim();
-        const authType = (row.sshAuthType ?? "password").trim();
-          if (!host || !username || !Number.isFinite(port) || port <= 0 || port > 65535) {
-            safeSend({ type: "error", error: "ssh_not_configured" });
-            return;
-          }
-
-          sessionId = randomUUID();
-          sshSessions.set(sessionId, ws);
-          opts.db.prepare("INSERT INTO ssh_sessions (id, machine_id, machine_name, operator, destination, started_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-            sessionId, row.id, row.name, String(user.username ?? user.id), `${host}:${port}`, Date.now(), "connecting"
-          );
-
-        const cols = Number(msg.cols ?? 120);
-        const rows = Number(msg.rows ?? 30);
-
-          ssh = new SshClient();
-          connected = true;
-
-          ssh.on("ready", () => {
-            if (sessionId) opts.db.prepare("UPDATE ssh_sessions SET status = ? WHERE id = ?").run("connected", sessionId);
-            safeSend({ type: "ready" });
-            ssh!.shell(
-              {
-                term: "xterm-256color",
-                cols: Math.max(20, Math.min(500, cols)),
-                rows: Math.max(5, Math.min(200, rows)),
-              },
-              (err: any, s: any) => {
-                if (err) {
-                  safeSend({ type: "error", error: "shell_failed" });
-                  try {
-                    ws.close(1011, "shell_failed");
-                  } catch {
-                    // ignore
-                  }
-                  cleanup();
-                  return;
-                }
-                stream = s;
-                stream.on("data", (chunk: Buffer) => {
-                  safeSend({ type: "output", dataB64: chunk.toString("base64") });
-                });
-                stream.on("close", () => {
-                  safeSend({ type: "exit" });
-                  try {
-                    ws.close(1000, "exit");
-                  } catch {
-                    // ignore
-                  }
-                  cleanup();
-                });
-              }
-            );
-          });
-
-          ssh.on("error", (e: any) => {
-            if (sessionId) opts.db.prepare("UPDATE ssh_sessions SET status = ?, reason = ? WHERE id = ? AND ended_at IS NULL").run("error", e?.level ? String(e.level) : "ssh_error", sessionId);
-            safeSend({ type: "error", error: e?.level ? `ssh_${e.level}` : "ssh_error" });
-            try {
-              ws.close(1011, "ssh_error");
-            } catch {
-              // ignore
-            }
-            cleanup();
-          });
-
-          try {
-            const common: any = {
-              host,
-              port,
-              username,
-              readyTimeout: 15_000,
-              keepaliveInterval: 10_000,
-              keepaliveCountMax: 3,
-              hostVerifier: () => true,
-            };
-            if (authType === "key") {
-              if (!row.sshKeyEnc) {
-                safeSend({ type: "error", error: "ssh_key_missing" });
-                cleanup();
-                return;
-              }
-              const key = decryptText(row.sshKeyEnc, opts.agentKeySecret);
-              ssh.connect({ ...common, privateKey: key });
-            } else {
-              if (!row.sshPasswordEnc) {
-                safeSend({ type: "error", error: "ssh_password_missing" });
-                cleanup();
-                return;
-              }
-              const password = decryptText(row.sshPasswordEnc, opts.agentKeySecret);
-              ssh.connect({ ...common, password });
-            }
-          } catch {
-            safeSend({ type: "error", error: "ssh_connect_failed" });
-            cleanup();
-          }
-          return;
-        }
-
-        if (msg.type === "input") {
-          if (!stream) return;
-          try {
-            const buf = Buffer.from(msg.dataB64, "base64");
-            stream.write(buf);
-          } catch {
-            // ignore
-          }
-          return;
-        }
-
-        if (msg.type === "resize") {
-          if (!stream?.setWindow) return;
-          const cols = Math.max(20, Math.min(500, Number(msg.cols)));
-          const rows = Math.max(5, Math.min(200, Number(msg.rows)));
-          try {
-            stream.setWindow(rows, cols, 0, 0);
-          } catch {
-            // ignore
-          }
-          return;
-        }
-      } catch {
-        safeSend({ type: "error", error: "bad_message" });
-      }
-    });
+  function handleSsh(ws: WebSocket, req: IncomingMessage, _url: URL) {
+    try { terminalSocket(ws, opts.db, opts.agentKeySecret, currentUser(opts.db, browserToken(req), opts.jwtSecret), sshSessions); }
+    catch { ws.close(1008, "invalid_token"); }
   }
 
   function handleUi(ws: WebSocket, _req: IncomingMessage, url: URL) {
-    const token = url.searchParams.get("token") ?? "";
+    const token = browserToken(_req);
     let user: ReturnType<typeof verifyToken>;
     try {
-      user = verifyToken(token, opts.jwtSecret);
+      user = currentUser(opts.db, token, opts.jwtSecret);
     } catch {
       ws.close(1008, "invalid token");
       return;
@@ -328,6 +152,7 @@ export function attachWebSockets(opts: {
   function handleAgent(ws: WebSocket, _req: IncomingMessage, _url: URL) {
     let machineId: number | null = null;
     let authenticating = false;
+    let lastMetricAt = 0;
     const authTimeout = setTimeout(() => {
       if (machineId == null) ws.close(1008, "hello timeout");
     }, 10_000);
@@ -397,7 +222,7 @@ export function attachWebSockets(opts: {
           authenticating = false;
           clearTimeout(authTimeout);
           const previous = agents.get(machineId);
-          agents.set(machineId, { ws, machineId });
+          agents.set(machineId, { ws, machineId, capabilities: msg.capabilities ?? [] });
           if (previous && previous.ws !== ws) previous.ws.close(1000, "replaced");
 
           broadcastUi({
@@ -410,13 +235,24 @@ export function attachWebSockets(opts: {
           return;
         }
 
+        if (msg.type === "ping_result") {
+          if (machineId == null || agents.get(machineId)?.ws !== ws) return;
+          const pending = pendingPings.get(msg.requestId);
+          if (pending?.ws === ws) pending.finish({ at: Date.now(), latencyMs: msg.error ? null : msg.latencyMs,
+            error: msg.error || (msg.latencyMs == null ? "timeout_or_unreachable" : null) });
+          return;
+        }
+
         if (msg.type === "metrics") {
           if (machineId == null) {
             ws.send(JSON.stringify({ type: "error", error: "not_helloed" }));
             return;
           }
 
-          const at = msg.at ?? Date.now();
+          if (agents.get(machineId)?.ws !== ws) return;
+          const at = Date.now();
+          if (at - lastMetricAt < 1000) return;
+          lastMetricAt = at;
           const netRx = msg.net?.rxBytes ?? 0;
           const netTx = msg.net?.txBytes ?? 0;
           const tcpConn = msg.conn?.tcp ?? 0;
@@ -484,10 +320,12 @@ export function attachWebSockets(opts: {
 
     ws.on("close", () => {
       clearTimeout(authTimeout);
+      for (const pending of pendingPings.values()) if (pending.ws === ws) pending.finish({ at: Date.now(), latencyMs: null, error: "agent_offline" });
       if (machineId == null) return;
       const agent = agents.get(machineId);
       if (agent?.ws !== ws) return;
       agents.delete(machineId);
+      if (!opts.db.open) return;
       opts.db.prepare("UPDATE machines SET online = 0 WHERE id = ? AND deleted_at IS NULL").run(machineId);
       broadcastUi({ type: "machine_status", machineId, online: false, lastSeenAt: Date.now() });
     });
@@ -501,11 +339,13 @@ export function attachWebSockets(opts: {
         const machineId = (message as any).machineId as number;
         if (client.subscribedMachineIds && !client.subscribedMachineIds.has(machineId)) continue;
       }
+      if (client.ws.bufferedAmount > 1024 * 1024) { client.ws.terminate(); continue; }
       client.ws.send(payload);
     }
   }
 
   function closeAgent(machineId: number, code = 1001, reason = "machine_deleted") {
+    for (const session of sshSessions.values()) if (session.machineId === machineId) session.close(reason);
     const agent = agents.get(machineId);
     if (!agent) return;
     try {
@@ -516,13 +356,27 @@ export function attachWebSockets(opts: {
   }
 
   function closeSshSession(id: string) {
-    const socket = sshSessions.get(id);
-    if (!socket) return false;
-    try { socket.close(1000, "closed_by_operator"); } catch { /* ignore */ }
+    const session = sshSessions.get(id);
+    if (!session) return false;
+    session.close("closed_by_operator");
     return true;
   }
 
-  return { closeAgent, closeSshSession };
+  function closeUser(userId: number) {
+    for (const session of sshSessions.values()) if (session.userId === userId) session.close("credentials_changed");
+    for (const [ws, id] of browserUsers) if (id === userId) ws.close(1008, "credentials_changed");
+  }
+  const alive = new WeakSet<WebSocket>();
+  wss.on("connection", (ws) => { alive.add(ws); ws.on("pong", () => alive.add(ws)); });
+  const heartbeat = setInterval(() => { for (const ws of wss.clients) {
+    if (!opts.db.open) { ws.terminate(); continue; }
+    const token = browserTokens.get(ws);
+    if (token) { try { const user = currentUser(opts.db, token, opts.jwtSecret); if (user.role !== "admin") throw new Error("forbidden"); } catch { ws.close(1008, "invalid_token"); continue; } }
+    if (!alive.has(ws)) { ws.terminate(); continue; } alive.delete(ws); ws.ping();
+  } }, 30000);
+  heartbeat.unref();
+  opts.server.on("close", () => { clearInterval(heartbeat); for (const ws of wss.clients) ws.terminate(); wss.close(); });
+  return { closeAgent, closeSshSession, probeMachine, closeUser };
 }
 
 function daysInMonthUtc(year: number, month0: number) {
@@ -769,6 +623,7 @@ const SshMessageSchema = z.discriminatedUnion("type", [
 ]);
 
 const AgentMessageSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("ping_result"), requestId: z.string().uuid(), latencyMs: z.number().min(0).max(60000).nullable(), error: z.enum(["bad_target", "ping_unavailable", "timeout_or_unreachable", "invalid_result", "agent_busy"]).optional() }),
   z.object({
     type: z.literal("hello"),
     machineId: z.number().int().positive(),
@@ -780,6 +635,7 @@ const AgentMessageSchema = z.discriminatedUnion("type", [
     kernelVersion: z.string().max(255).optional(),
     cpuModel: z.string().max(512).optional(),
     cpuCores: z.number().int().nonnegative().optional(),
+    capabilities: z.array(z.string().max(32)).max(16).optional(),
   }),
   z.object({
     type: z.literal("metrics"),
