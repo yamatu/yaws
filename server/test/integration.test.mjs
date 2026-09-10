@@ -20,6 +20,16 @@ test(
       return { status: response.status, body: await response.json() };
     };
     try {
+      f.db.prepare("INSERT INTO machines(id,name,agent_key_hash,created_at,updated_at) VALUES (4,'Existing without SSH','hash',0,0)").run();
+      f.db.prepare("INSERT INTO machines(id,name,agent_key_hash,created_at,updated_at,deleted_at) VALUES (5,'Deleted source','hash',0,0,1)").run();
+      const sources=await request('/api/ping/machines');
+      assert.equal(sources.status,200);
+      assert.equal(sources.body.machines.find(m=>m.id===1).capability,'ready');
+      assert.equal(sources.body.machines.find(m=>m.id===3).capability,'upgrade_required');
+      assert.equal(sources.body.machines.find(m=>m.id===4).capability,'offline');
+      assert.equal(sources.body.machines.find(m=>m.id===4).address,'');
+      assert.equal(sources.body.machines.some(m=>m.id===5),false);
+      assert.equal((await request('/api/ping/machines','GET',undefined,f.viewerToken)).status,403);
       assert.equal(
         (await request("/api/ping/monitors", "GET", undefined, f.viewerToken))
           .status,
@@ -45,6 +55,10 @@ test(
         target: "google.com",
       });
       assert.equal(monitor.status, 201);
+      const series=await request(`/api/ping/monitors/${monitor.body.monitor.id}/series?rangeMin=1440`);
+      assert.equal(series.status,200);
+      assert.ok(series.body.points.length<=241);
+      assert.equal((await request(`/api/ping/monitors/${monitor.body.monitor.id}/series?rangeMin=NaN`)).status,400);
       assert.equal(
         (
           await request("/api/ping/monitors", "POST", {

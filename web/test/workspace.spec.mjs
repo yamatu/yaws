@@ -78,13 +78,11 @@ browserTest(
       .fill('{"enabled":false,"browser":true}\n');
     await page.getByRole("button", { name: "保存文件", exact: true }).click();
     await expect(page.locator(".workspace-notice")).toContainText("已保存");
-    await page
-      .locator("input[type=file]")
-      .setInputFiles({
-        name: "browser-upload.txt",
-        mimeType: "text/plain",
-        buffer: Buffer.from("browser upload"),
-      });
+    await page.locator("input[type=file]").setInputFiles({
+      name: "browser-upload.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("browser upload"),
+    });
     await expect(page.locator(".file-list")).toContainText(
       "browser-upload.txt",
     );
@@ -116,9 +114,10 @@ browserTest(
     ).toBeDisabled();
     await page.getByRole("link", { name: "返回堡垒机" }).click();
     await page.getByRole("link", { name: "延迟监控", exact: true }).click();
-    await page.getByLabel("来源机器").selectOption("2");
+    await page.getByRole("button", { name: "来源机器", exact: true }).click();
+    await page.getByRole("option").filter({ hasText: "Fixture 2" }).click();
     await page.getByRole("button", { name: "添加监控" }).click();
-    await expect(page.locator(".monitor-list")).toContainText("Fixture 2");
+    await expect(page.locator(".eg-monitors")).toContainText("Fixture 2");
     await expect(page.locator(".latency-stats")).toContainText("20.0", {
       timeout: 15000,
     });
@@ -162,5 +161,122 @@ browserTest(
       path: "test-results/terminal-mobile.png",
       fullPage: true,
     });
+  },
+);
+
+browserTest(
+  "existing inventory selection, refresh, range and interactive chart",
+  async ({ page }) => {
+    const failures = [];
+    page.on("pageerror", (e) => failures.push(e.message));
+    f.db
+      .prepare(
+        "INSERT INTO machines(id,name,hostname,agent_key_hash,created_at,updated_at) VALUES (9,'Agent-only server','edge-no-ssh','hash',0,0)",
+      )
+      .run();
+    await page.goto(f.url + "/login");
+    await page.getByPlaceholder("请输入用户名").fill("fixture");
+    await page.getByPlaceholder("请输入密码").fill(f.password);
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    await page.getByRole("link", { name: "延迟监控", exact: true }).click();
+    await page.getByRole("button", { name: "新建监控", exact: true }).click();
+    await page.getByRole("button", { name: "来源机器", exact: true }).click();
+    await expect(
+      page.getByRole("option").filter({ hasText: "Fixture 3" }),
+    ).toContainText("需升级 Agent");
+    await page.getByLabel("搜索已有服务器").fill("Agent-only");
+    await page
+      .getByRole("option")
+      .filter({ hasText: "Agent-only server" })
+      .click();
+    await expect(page.locator(".eg-source-hint")).toContainText("离线");
+    await page.getByRole("button", { name: "添加监控", exact: true }).click();
+    await expect(page.locator(".eg-detail-header h2")).toContainText(
+      "Agent-only server",
+    );
+    const monitor = f.db
+      .prepare("SELECT id FROM ping_monitors WHERE machine_id=9")
+      .get();
+    const insert = f.db.prepare(
+      "INSERT INTO ping_samples(monitor_id,at,latency_ms,error) VALUES (?,?,?,?)",
+    );
+    const now = Date.now();
+    for (let i = 0; i < 160; i++)
+      insert.run(
+        monitor.id,
+        now - (160 - i) * 5000,
+        i === 70
+          ? 180
+          : i >= 90 && i < 94
+            ? null
+            : 28 + Math.sin(i / 10) * 7 + (i % 5),
+        i === 91
+          ? "agent_offline"
+          : i >= 90 && i < 94
+            ? "timeout_or_unreachable"
+            : null,
+      );
+    await page.getByRole("button", { name: "刷新", exact: true }).click();
+    await expect(page.locator(".eg-stats")).toContainText("180.0");
+    const chart = page.getByRole("img", {
+      name: "出口延迟图，使用左右方向键查看采样详情",
+    });
+    await chart.focus();
+    await chart.press("End");
+    await expect(page.locator(".eg-tooltip")).toContainText("延迟");
+    await page.screenshot({
+      path: "test-results/egress-chart-desktop.png",
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "24 小时", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "24 小时", exact: true }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator(".eg-chart-legend")).toContainText("360 秒 / 点");
+    f.db
+      .prepare(
+        "INSERT INTO machines(id,name,agent_key_hash,created_at,updated_at) VALUES (10,'Added after page load','hash',0,0)",
+      )
+      .run();
+    await page.getByRole("button", { name: "刷新", exact: true }).click();
+    await page.getByRole("button", { name: "新建监控", exact: true }).click();
+    await page.getByRole("button", { name: "来源机器", exact: true }).click();
+    await expect(
+      page.getByRole("option").filter({ hasText: "Added after page load" }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "关闭新建监控", exact: true })
+      .click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("button", { name: "15 分钟", exact: true }).click();
+    await expect(page.locator(".eg-stats")).toContainText("180.0");
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: "test-results/egress-chart-mobile.png",
+      fullPage: true,
+    });
+    const mobileChart = await chart.boundingBox();
+    expect(mobileChart.width).toBeLessThan(391);
+    await chart.focus(); await chart.press('End');
+    const tooltip = await page.locator('.eg-tooltip').boundingBox();
+    expect(tooltip.x + tooltip.width).toBeLessThan(391);
+    await page.goto(f.url + '/app/ping?machineId=3');
+    await expect(page.getByRole('button',{name:'来源机器',exact:true})).toContainText('Fixture 3');
+    await expect(page.locator('.eg-source-hint')).toContainText('v0.2.0');
+    let sourceAttempts=0;
+    await page.route('**/api/ping/machines', async route=>{
+      if(sourceAttempts++===0)await route.fulfill({status:503,contentType:'application/json',body:'{"error":"temporary_unavailable"}'});
+      else await route.continue();
+    });
+    await page.reload();
+    await expect(page.getByRole('alert')).toContainText('temporary_unavailable');
+    await page.getByRole('button',{name:'重试加载',exact:true}).click();
+    await expect(page.getByRole('button',{name:'来源机器',exact:true})).toContainText('Fixture 3');
+    await expect(page.locator('.eg-inline-error')).toHaveCount(0);
+    expect(failures).toEqual([]);
   },
 );

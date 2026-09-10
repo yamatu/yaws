@@ -287,7 +287,7 @@ export async function harness(port = 0) {
     jwtSecret: secret,
     agentKeySecret: secret,
   });
-  const ping = createPingService(db, () => true, hub.probeMachine);
+  const ping = createPingService(db, () => true, hub.probeMachine, hub.pingCapability);
   const auth = authMiddleware(secret, db);
   const admin = (req, res, next) =>
     req.user.role === "admin"

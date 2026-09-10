@@ -291,6 +291,7 @@ export function MachinePage() {
             <span className={machine.online ? "yaws-dot-online" : "yaws-dot-offline"} />
             {machine.online ? "在线" : "离线"}
           </span>
+          <Link className="yaws-btn" to={`/app/ping?machineId=${machine.id}`}>出口监控</Link>
           {sshOk ? (
             <Link
               className="yaws-btn"

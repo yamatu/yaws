@@ -3,6 +3,7 @@ import { domainToASCII } from "node:url";
 import { Router } from "express";
 import { z } from "zod";
 import type { Db } from "./db.js";
+import { pingSeries } from "./ping-series.js";
 
 export function normalizeTarget(raw: string): string | null {
   const value = raw.trim();
@@ -51,6 +52,9 @@ export function createPingService(
   db: Db,
   available: () => boolean,
   runProbe: MachineProbe,
+  capability: (
+    machineId: number,
+  ) => "ready" | "offline" | "upgrade_required" = () => "offline",
 ) {
   const router = Router();
   const active = new Map<number, AbortController>();
@@ -116,6 +120,23 @@ export function createPingService(
   };
   const timer = setInterval(tick, 1000);
   timer.unref();
+
+  // Monitoring sources come from the machine inventory; SSH credentials are not required.
+  router.get("/machines", (_req, res) => {
+    const machines = db
+      .prepare(
+        `SELECT id, name, group_name as groupName, hostname,
+      ssh_host as address, last_seen_at as lastSeenAt FROM machines
+      WHERE deleted_at IS NULL ORDER BY sort_order, id`,
+      )
+      .all() as Array<{ id: number }>;
+    res.json({
+      machines: machines.map((machine) => ({
+        ...machine,
+        capability: capability(machine.id),
+      })),
+    });
+  });
 
   router.post("/", async (req, res, next) => {
     const body = CreateSchema.safeParse(req.body);
@@ -246,6 +267,19 @@ export function createPingService(
         .all(id, limit.data)
         .reverse(),
     });
+  });
+  router.get("/monitors/:id/series", (req, res) => {
+    const id = Number(req.params.id);
+    const monitor = Number.isSafeInteger(id)
+      ? (getMonitor.get(id) as Monitor | undefined)
+      : undefined;
+    if (!monitor) return res.status(404).json({ error: "not_found" });
+    const range = z.coerce
+      .number()
+      .refine((value) => [5, 15, 60, 360, 1440].includes(value))
+      .safeParse(req.query.rangeMin ?? 15);
+    if (!range.success) return res.status(400).json({ error: "bad_range" });
+    return res.json(pingSeries(db, id, range.data, monitor.intervalSec));
   });
   return {
     router,

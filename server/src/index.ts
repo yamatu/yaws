@@ -631,7 +631,9 @@ function requireAdmin(req: Request, res: express.Response, next: express.NextFun
   return next();
 }
 
-const pingService = createPingService(db, () => !isRestoring, (machineId, target, signal) => wsHub.probeMachine(machineId, target, signal));
+const pingService = createPingService(db, () => !isRestoring,
+  (machineId, target, signal) => wsHub.probeMachine(machineId, target, signal),
+  (machineId) => wsHub.pingCapability(machineId));
 app.use("/api/ping", requireAuth, requireAdmin, pingService.router);
 app.use("/api/machines", requireAuth, requireAdmin);
 app.use("/api/machines/:id/workspace", workspaceRouter(db, agentKeySecret));

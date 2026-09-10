@@ -100,6 +100,8 @@ curl -X POST http://localhost:3001/api/auth/bootstrap \
 
 - 主控与 Agent 都需要升级到 v0.2.0。旧 Agent 会显示“请升级被控端”；系统不会退回主控 Ping。
 - 在“机器出口延迟”选择来源机器（名称/IP/ID），目标默认 `google.com`，也可填写固定 IP。Agent 必须安装系统 `ping`（Debian/Ubuntu: `apt install iputils-ping`；Alpine: `apk add iputils`）。结果表示 ICMP RTT，不包含 HTTPS 请求耗时。
+- 来源机器直接从后台已有服务器中选择，支持名称/IP/分组/ID 搜索，不依赖 SSH 配置；列表显示 Agent 在线与版本能力，支持刷新和加载失败重试。机器详情的“出口监控”可直接预选该机器。
+- 曲线支持 5 分钟、15 分钟、1 小时、6 小时、24 小时范围，鼠标悬浮/触屏/方向键可查看采样详情。长时间范围聚合为最多约 240 个点，保留最小/最大延迟区间；统计值使用完整时间段样本。Agent 离线、版本不支持等归为“未探测”，不计入丢包率。
 - v0.1.3 的旧主控监控将保留历史并暂停；请删除旧项后，按机器重新添加，避免混合不同来源的数据。
 - 每台机器进入 SSH 工作区前须核对并保存 SSH 主机指纹。可在服务器运行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256`（以服务端实际使用的主机密钥为准）。连接地址或指纹变化后需重新核实。
 - “快捷指令”按机器保存；可插入终端或确认后执行。“文件”通过同一 SSH 用户的 SFTP 权限访问，识别 Nginx、Apache、Caddy、Docker、宝塔、1Panel 等常见目录，同时支持手动路径。

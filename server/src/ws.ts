@@ -376,7 +376,12 @@ export function attachWebSockets(opts: {
   } }, 30000);
   heartbeat.unref();
   opts.server.on("close", () => { clearInterval(heartbeat); for (const ws of wss.clients) ws.terminate(); wss.close(); });
-  return { closeAgent, closeSshSession, probeMachine, closeUser };
+  function pingCapability(machineId: number): "ready" | "offline" | "upgrade_required" {
+    const agent = agents.get(machineId);
+    if (!agent || agent.ws.readyState !== WebSocket.OPEN) return "offline";
+    return agent.capabilities.includes("ping-v1") ? "ready" : "upgrade_required";
+  }
+  return { closeAgent, closeSshSession, probeMachine, closeUser, pingCapability };
 }
 
 function daysInMonthUtc(year: number, month0: number) {
