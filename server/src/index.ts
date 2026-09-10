@@ -14,6 +14,7 @@ import { hashAgentKey, hashPassword, signToken, verifyPassword } from "./auth.js
 import { attachWebSockets } from "./ws.js";
 import { z } from "zod";
 import { decryptText, encryptText } from "./crypto.js";
+import { createPingService } from "./ping.js";
 
 const env = loadEnv();
 const db = openDb(env.DATABASE_PATH);
@@ -599,6 +600,9 @@ function requireAdmin(req: Request, res: express.Response, next: express.NextFun
   if (user.role !== "admin") return res.status(403).json({ error: "forbidden" });
   return next();
 }
+
+const pingService = createPingService(db, () => !isRestoring);
+app.use("/api/ping", requireAuth, requireAdmin, pingService.router);
 
 app.get("/api/me", requireAuth, (req, res) => {
   return res.json({ user: (req as any).user });
@@ -1660,12 +1664,6 @@ app.use((err: any, _req: Request, res: express.Response, _next: express.NextFunc
   res.status(500).json({ error: "internal_error" });
 });
 
-const webDist = path.resolve(process.cwd(), "../web/dist");
-if (fs.existsSync(webDist)) {
-  app.use(express.static(webDist));
-  app.get("*", (req, res) => res.sendFile(path.join(webDist, "index.html")));
-}
-
 const server = http.createServer(app);
 const wsHub = attachWebSockets({
   server,
@@ -1674,6 +1672,27 @@ const wsHub = attachWebSockets({
   agentKeySecret,
   previousAgentKeySecret,
 });
+
+app.get("/api/ssh/sessions", requireAuth, requireAdmin, (_req, res) => {
+  const sessions = db.prepare(`SELECT id, machine_id as machineId, machine_name as machineName,
+    operator, destination, started_at as startedAt, ended_at as endedAt, status, reason
+    FROM ssh_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 100`).all();
+  res.json({ sessions });
+});
+
+app.delete("/api/ssh/sessions/:id", requireAuth, requireAdmin, (req, res) => {
+  const id = String(req.params.id ?? "");
+  if (!id || id.length > 64) return res.status(400).json({ error: "bad_id" });
+  if (!wsHub.closeSshSession(id)) return res.status(404).json({ error: "not_found" });
+  db.prepare("UPDATE ssh_sessions SET ended_at = ?, status = 'closed', reason = ? WHERE id = ? AND ended_at IS NULL").run(Date.now(), "closed_by_operator", id);
+  res.json({ ok: true });
+});
+
+const webDist = path.resolve(process.cwd(), "../web/dist");
+if (fs.existsSync(webDist)) {
+  app.use(express.static(webDist, { maxAge: env.NODE_ENV === "production" ? "1h" : 0, etag: true }));
+  app.get("*", (req, res) => res.sendFile(path.join(webDist, "index.html")));
+}
 
 server.listen(env.PORT, () => {
   // eslint-disable-next-line no-console

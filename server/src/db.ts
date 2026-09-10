@@ -33,6 +33,36 @@ function migrate(db: Db) {
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS ping_monitors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      target TEXT NOT NULL UNIQUE,
+      interval_sec INTEGER NOT NULL DEFAULT 5,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS ping_samples (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      monitor_id INTEGER NOT NULL REFERENCES ping_monitors(id) ON DELETE CASCADE,
+      at INTEGER NOT NULL,
+      latency_ms REAL,
+      error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ping_monitor_at ON ping_samples(monitor_id, at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ping_at ON ping_samples(at);
+
+    CREATE TABLE IF NOT EXISTS ssh_sessions (
+      id TEXT PRIMARY KEY,
+      machine_id INTEGER NOT NULL,
+      machine_name TEXT NOT NULL,
+      operator TEXT NOT NULL,
+      destination TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      status TEXT NOT NULL,
+      reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ssh_sessions_started ON ssh_sessions(started_at DESC);
+
     CREATE TABLE IF NOT EXISTS machines (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,

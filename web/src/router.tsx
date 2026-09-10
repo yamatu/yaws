@@ -10,6 +10,8 @@ import { SettingsPage } from "./ui/SettingsPage";
 import { PublicMachinePage } from "./ui/PublicMachinePage";
 import { SshPage } from "./ui/SshPage";
 import { getToken } from "./ui/auth";
+import { PingPage } from "./ui/PingPage";
+import { BastionPage } from "./ui/BastionPage";
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = getToken();
@@ -41,6 +43,8 @@ export const router = createBrowserRouter([
       { path: "machines/new", element: <MachineNewPage /> },
       { path: "machines/:id", element: <MachinePage /> },
       { path: "settings", element: <SettingsPage /> },
+      { path: "ping", element: <PingPage /> },
+      { path: "bastion", element: <BastionPage /> },
     ],
   },
   { path: "*", element: <Navigate to="/" replace /> },

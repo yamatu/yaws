@@ -4,13 +4,14 @@ export const API_BASE = "";
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
+  const headers: HeadersInit = {
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...(init?.body ? { "content-type": "application/json" } : {}),
+    ...(init?.headers ?? {}),
+  };
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: {
-      "content-type": "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers ?? {}),
-    },
+    headers,
   });
   if (!res.ok) {
     let body: any = null;

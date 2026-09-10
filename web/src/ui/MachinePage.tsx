@@ -680,6 +680,8 @@ export function MachinePage() {
 
               <div className="yaws-panel">
                 <div className="mb-2 text-sm font-semibold">SSH（Web）</div>
+                <input aria-hidden="true" tabIndex={-1} className="sr-only" autoComplete="username" name="ssh-autofill-username" data-lpignore="true" />
+                <input aria-hidden="true" tabIndex={-1} className="sr-only" type="password" autoComplete="current-password" name="ssh-autofill-password" data-lpignore="true" />
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <div>
                     <div className="mb-1 text-xs text-white/40">Host</div>
@@ -705,6 +707,9 @@ export function MachinePage() {
                     <div className="mb-1 text-xs text-white/40">用户名</div>
                     <input
                       className="yaws-input"
+                      autoComplete="off"
+                      name="ssh-user-id"
+                      data-lpignore="true"
                       value={editSshUser}
                       onChange={(e) => setEditSshUser(e.target.value)}
                       placeholder="例如：root"
@@ -732,6 +737,9 @@ export function MachinePage() {
                     <input
                       className="yaws-input"
                       type="password"
+                      autoComplete="new-password"
+                      name="ssh-secret"
+                      data-lpignore="true"
                       value={editSshPassword}
                       onChange={(e) => {
                         setEditSshPassword(e.target.value);
@@ -759,6 +767,9 @@ export function MachinePage() {
                     </div>
                     <textarea
                       className="yaws-input font-mono text-xs"
+                      autoComplete="off"
+                      name="ssh-private-key"
+                      data-lpignore="true"
                       style={{ minHeight: 120, resize: "vertical" }}
                       value={editSshPrivateKey}
                       onChange={(e) => {

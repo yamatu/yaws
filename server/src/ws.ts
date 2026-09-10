@@ -5,6 +5,7 @@ import type { Db } from "./db.js";
 import { verifyAgentKey, verifyToken } from "./auth.js";
 import { Client as SshClient } from "ssh2";
 import { decryptText } from "./crypto.js";
+import { randomUUID } from "node:crypto";
 
 type UiClient = {
   ws: WebSocket;
@@ -27,6 +28,7 @@ export function attachWebSockets(opts: {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
   const uiClients = new Set<UiClient>();
   const agents = new Map<number, AgentClient>();
+  const sshSessions = new Map<string, WebSocket>();
 
   opts.server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
@@ -101,6 +103,7 @@ export function attachWebSockets(opts: {
     let ssh: SshClient | null = null;
     let stream: any = null;
     let connected = false;
+    let sessionId: string | null = null;
 
     const cleanup = () => {
       try {
@@ -116,6 +119,11 @@ export function attachWebSockets(opts: {
       stream = null;
       ssh = null;
       connected = false;
+      if (sessionId) {
+        sshSessions.delete(sessionId);
+        opts.db.prepare("UPDATE ssh_sessions SET ended_at = ?, status = CASE WHEN status IN ('connected', 'connecting') THEN 'closed' ELSE status END, reason = COALESCE(reason, ?) WHERE id = ? AND ended_at IS NULL").run(Date.now(), "socket_closed", sessionId);
+        sessionId = null;
+      }
     };
 
     ws.on("close", cleanup);
@@ -130,6 +138,7 @@ export function attachWebSockets(opts: {
             .prepare(
               `SELECT
                  id,
+                 name,
                  ssh_host as sshHost,
                  ssh_port as sshPort,
                  ssh_user as sshUser,
@@ -142,6 +151,7 @@ export function attachWebSockets(opts: {
             .get(msg.machineId) as
             | {
                 id: number;
+                name: string;
                 sshHost: string;
                 sshPort: number;
                 sshUser: string;
@@ -164,6 +174,12 @@ export function attachWebSockets(opts: {
             return;
           }
 
+          sessionId = randomUUID();
+          sshSessions.set(sessionId, ws);
+          opts.db.prepare("INSERT INTO ssh_sessions (id, machine_id, machine_name, operator, destination, started_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+            sessionId, row.id, row.name, String(user.username ?? user.id), `${host}:${port}`, Date.now(), "connecting"
+          );
+
         const cols = Number(msg.cols ?? 120);
         const rows = Number(msg.rows ?? 30);
 
@@ -171,6 +187,7 @@ export function attachWebSockets(opts: {
           connected = true;
 
           ssh.on("ready", () => {
+            if (sessionId) opts.db.prepare("UPDATE ssh_sessions SET status = ? WHERE id = ?").run("connected", sessionId);
             safeSend({ type: "ready" });
             ssh!.shell(
               {
@@ -207,6 +224,7 @@ export function attachWebSockets(opts: {
           });
 
           ssh.on("error", (e: any) => {
+            if (sessionId) opts.db.prepare("UPDATE ssh_sessions SET status = ?, reason = ? WHERE id = ? AND ended_at IS NULL").run("error", e?.level ? String(e.level) : "ssh_error", sessionId);
             safeSend({ type: "error", error: e?.level ? `ssh_${e.level}` : "ssh_error" });
             try {
               ws.close(1011, "ssh_error");
@@ -497,7 +515,14 @@ export function attachWebSockets(opts: {
     }
   }
 
-  return { closeAgent };
+  function closeSshSession(id: string) {
+    const socket = sshSessions.get(id);
+    if (!socket) return false;
+    try { socket.close(1000, "closed_by_operator"); } catch { /* ignore */ }
+    return true;
+  }
+
+  return { closeAgent, closeSshSession };
 }
 
 function daysInMonthUtc(year: number, month0: number) {

@@ -25,6 +25,7 @@ export function SshPage() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "connecting" | "connected" | "closed">("idle");
   const [termReady, setTermReady] = useState(false);
+  const [connectNonce, setConnectNonce] = useState(0);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -39,10 +40,9 @@ export function SshPage() {
     const ac = new AbortController();
     (async () => {
       try {
-        const res = await apiFetch<{ machines: Machine[] }>("/api/machines", { signal: ac.signal });
+        const res = await apiFetch<{ machine: Machine }>(`/api/machines/${machineId}`, { signal: ac.signal });
         if (!alive) return;
-        const m = res.machines.find((x) => x.id === machineId) ?? null;
-        setMachine(m);
+        setMachine(res.machine);
       } catch (e: any) {
         if (!alive) return;
         setError(e?.message ?? "加载失败");
@@ -181,10 +181,11 @@ export function SshPage() {
     };
 
     ws.onclose = () => {
-      setStatus((s) => (s === "connected" ? "closed" : s));
+      if (wsRef.current === ws) setStatus("closed");
     };
     ws.onerror = () => {
       setError("ws_error");
+      if (wsRef.current === ws) setStatus("closed");
     };
 
     return () => {
@@ -202,7 +203,7 @@ export function SshPage() {
       }
       wsRef.current = null;
     };
-  }, [isBadId, machineId, termReady]);
+  }, [isBadId, machineId, termReady, connectNonce]);
 
   if (isBadId) {
     return <div className="yaws-card p-4">bad machine id</div>;
@@ -225,6 +226,8 @@ export function SshPage() {
             {status === "connected" ? "已连接" : status === "connecting" ? "连接中..." : status === "closed" ? "已断开" : ""}
           </div>
         </div>
+        <button className="yaws-btn" disabled={status === "connecting"} onClick={() => { try { wsRef.current?.close(); } catch {} setStatus("closed"); setConnectNonce((n) => n + 1); }}>重新连接</button>
+        <button className="yaws-btn" disabled={status === "closed" || status === "idle"} onClick={() => { try { wsRef.current?.close(); } catch {} setStatus("closed"); }}>断开</button>
       </div>
 
       {error ? (
