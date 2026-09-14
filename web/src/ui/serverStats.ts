@@ -2,12 +2,13 @@
 
 export type UsageLevel = "ok" | "warn" | "high" | "unknown";
 
-/** Thresholds are shared by the cpu/memory/disk bars so colours stay consistent. */
+/** Thresholds are shared by the cpu/memory/disk bars so colours stay consistent:
+ *  green below 50%, yellow from 50%, red from 70%. */
 export function usageLevel(percent: number | null | undefined): UsageLevel {
   if (percent === null || percent === undefined || !Number.isFinite(percent))
     return "unknown";
-  if (percent >= 90) return "high";
-  if (percent >= 75) return "warn";
+  if (percent >= 70) return "high";
+  if (percent >= 50) return "warn";
   return "ok";
 }
 
@@ -20,7 +21,7 @@ export function meterValue(fraction: number | null | undefined): number | null {
 
 /** `usageLevel` for a 0…1 fraction, so every meter shares the same thresholds. The
  *  level is derived from the rounded percentage that is displayed next to the bar,
- *  so a value never reads "75%" in green. */
+ *  so a value never reads "50%" in green. */
 export function fractionLevel(fraction: number | null | undefined): UsageLevel {
   const percent = meterValue(fraction);
   return percent === null ? "unknown" : usageLevel(percent);

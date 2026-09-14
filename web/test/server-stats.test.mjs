@@ -15,12 +15,12 @@ test("uptime is rendered in chinese units", () => {
   assert.equal(formatUptime(-5), "—");
 });
 
-test("usage levels flag full and nearly full resources", () => {
+test("usage levels flag half-full and nearly full resources", () => {
   assert.equal(usageLevel(0), "ok");
-  assert.equal(usageLevel(74.9), "ok");
-  assert.equal(usageLevel(75), "warn");
-  assert.equal(usageLevel(89.9), "warn");
-  assert.equal(usageLevel(90), "high");
+  assert.equal(usageLevel(49.9), "ok");
+  assert.equal(usageLevel(50), "warn");
+  assert.equal(usageLevel(69.9), "warn");
+  assert.equal(usageLevel(70), "high");
   assert.equal(usageLevel(100), "high");
   assert.equal(usageLevel(null), "unknown");
   assert.equal(usageLevel(undefined), "unknown");
@@ -43,14 +43,14 @@ test("meter values turn 0..1 fractions into percentages", () => {
 
 test("meter levels use the same thresholds as percentage meters", () => {
   // The level follows the *displayed* percentage, so the number and the colour
-  // never disagree (74.6% renders as 75% and therefore turns yellow).
+  // never disagree (49.6% renders as 50% and therefore turns yellow).
   assert.equal(fractionLevel(0.1), "ok");
-  assert.equal(fractionLevel(0.74), "ok");
-  assert.equal(fractionLevel(0.746), "warn");
-  assert.equal(fractionLevel(0.75), "warn");
-  assert.equal(fractionLevel(0.89), "warn");
-  assert.equal(fractionLevel(0.896), "high");
-  assert.equal(fractionLevel(0.9), "high");
+  assert.equal(fractionLevel(0.49), "ok");
+  assert.equal(fractionLevel(0.496), "warn");
+  assert.equal(fractionLevel(0.5), "warn");
+  assert.equal(fractionLevel(0.69), "warn");
+  assert.equal(fractionLevel(0.696), "high");
+  assert.equal(fractionLevel(0.7), "high");
   assert.equal(fractionLevel(1), "high");
   assert.equal(fractionLevel(null), "unknown");
   assert.equal(fractionLevel(undefined), "unknown");

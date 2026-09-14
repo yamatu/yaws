@@ -50,9 +50,7 @@
 .stat-detail { margin-top: 4px; font-size: 11px; color: #8d97a2; overflow-wrap: anywhere; }
 .stat-hint { padding: 10px 12px; font-size: 12px; color: #8d97a2; }
 .stat-bar { height: 7px; margin-top: 5px; border-radius: 999px; background: #2c3238; box-shadow: inset 0 1px 2px rgba(0, 0, 0, .35); overflow: hidden; }
-.stat-bar-fill { display: block; height: 100%; border-radius: 999px; background-image: linear-gradient(180deg, rgba(255, 255, 255, .5) 0%, rgba(255, 255, 255, .12) 45%, rgba(255, 255, 255, 0) 100%), linear-gradient(90deg, var(--meter-from) 0%, var(--meter-to) 100%); box-shadow: 0 0 10px var(--meter-glow), inset 0 1px 0 rgba(255, 255, 255, .45); backdrop-filter: blur(6px) saturate(1.35); -webkit-backdrop-filter: blur(6px) saturate(1.35); transition: width .3s ease, box-shadow .3s ease; }
-.stat-bar-fill.level-unknown { --meter-from: #8b95a1; --meter-to: #6b7280; --meter-glow: rgba(148, 163, 184, .18); --meter-text: #9aa4af; }
-.stat-bar-fill.level-ok { --meter-from: #34d399; --meter-to: #22c55e; --meter-glow: rgba(52, 211, 153, .35); --meter-text: #6ee7b7; }
+.stat-bar-fill { display: block; height: 100%; border-radius: 999px; background-image: linear-gradient(180deg, rgba(255, 255, 255, .5) 0%, rgba(255, 255, 255, .12) 45%, rgba(255, 255, 255, 0) 100%), linear-gradient(90deg, var(--meter-from) 0%, var(--meter-mid) 50%, var(--meter-to) 100%); box-shadow: 0 0 10px var(--meter-glow), inset 0 1px 0 rgba(255, 255, 255, .45); backdrop-filter: blur(6px) saturate(1.35); -webkit-backdrop-filter: blur(6px) saturate(1.35); transition: width .3s ease, box-shadow .3s ease; }
 .stat-processes { width: 100%; border-collapse: collapse; font-size: 12px; }
 .stat-processes td { padding: 3px 0; color: #cdd5dd; font-variant-numeric: tabular-nums; }
 .mono-break { overflow-wrap: anywhere; }
@@ -381,14 +379,17 @@ body.resizing { user-select: none; cursor: nwse-resize; }
   }
 
   /* Usage meters (home page, machine cards, workspace panel): one hue per level —
-     green = low, yellow = medium, red = high — instead of a fixed rainbow, with a
-     frosted-glass sheen on the fill and the track. The half-transparent white
-     gradient over the fill is what makes the bar look like etched glass. */
+     green below 50%, yellow from 50%, red from 70% — instead of a fixed rainbow.
+     Each level is a three stop gradient (light → base → deep) so the bar keeps a
+     visible gradient in the middle while a translucent white sheen over it makes
+     it look like etched glass. */
   .yaws-meter,
+  .stat-bar-fill,
   .stat-value,
   .yaws-meter-value {
-    --meter-from: #34d399;
-    --meter-to: #22c55e;
+    --meter-from: #86efac;
+    --meter-mid: #34d399;
+    --meter-to: #059669;
     --meter-glow: rgba(52, 211, 153, 0.35);
     --meter-text: #6ee7b7;
   }
@@ -397,8 +398,9 @@ body.resizing { user-select: none; cursor: nwse-resize; }
   .stat-bar-fill.level-warn,
   .stat-value.level-warn,
   .yaws-meter-value.level-warn {
-    --meter-from: #fbbf24;
-    --meter-to: #f59e0b;
+    --meter-from: #fde68a;
+    --meter-mid: #fbbf24;
+    --meter-to: #d97706;
     --meter-glow: rgba(251, 191, 36, 0.35);
     --meter-text: #fcd34d;
   }
@@ -407,8 +409,9 @@ body.resizing { user-select: none; cursor: nwse-resize; }
   .stat-bar-fill.level-high,
   .stat-value.level-high,
   .yaws-meter-value.level-high {
-    --meter-from: #fb7185;
-    --meter-to: #ef4444;
+    --meter-from: #fecdd3;
+    --meter-mid: #fb7185;
+    --meter-to: #dc2626;
     --meter-glow: rgba(248, 113, 113, 0.42);
     --meter-text: #fca5a5;
   }
@@ -417,8 +420,9 @@ body.resizing { user-select: none; cursor: nwse-resize; }
   .stat-bar-fill.level-unknown,
   .stat-value.level-unknown,
   .yaws-meter-value.level-unknown {
-    --meter-from: #8b95a1;
-    --meter-to: #6b7280;
+    --meter-from: #b6bdc7;
+    --meter-mid: #8b95a1;
+    --meter-to: #5b6470;
     --meter-glow: rgba(148, 163, 184, 0.18);
     --meter-text: #9aa4af;
   }
@@ -451,7 +455,12 @@ body.resizing { user-select: none; cursor: nwse-resize; }
         rgba(255, 255, 255, 0.14) 45%,
         rgba(255, 255, 255, 0) 100%
       ),
-      linear-gradient(90deg, var(--meter-from) 0%, var(--meter-to) 100%);
+      linear-gradient(
+        90deg,
+        var(--meter-from) 0%,
+        var(--meter-mid) 50%,
+        var(--meter-to) 100%
+      );
     box-shadow: 0 0 10px var(--meter-glow), inset 0 1px 0 rgba(255, 255, 255, 0.45),
       inset 0 -1px 0 rgba(0, 0, 0, 0.12);
     backdrop-filter: blur(6px) saturate(1.35);

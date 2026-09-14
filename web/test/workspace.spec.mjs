@@ -46,23 +46,24 @@ browserTest(
     const failures = [];
     page.on("pageerror", (error) => failures.push(error.message));
     // Seed one metric per fixture machine so the home page has something to draw:
-    // idle (green), nearly full (yellow) and full (red). The fixture inserts no
-    // metrics of its own, and they are removed again below so the other specs
-    // still see the untouched database.
+    // idle (green), half full (yellow) and nearly full (red). Every value of a
+    // machine has to land in the same band — the bands start at 50% and 70%. The
+    // fixture inserts no metrics of its own, and they are removed again below so
+    // the other specs still see the untouched database.
     const insertMetric = f.db.prepare(
       "INSERT INTO metrics(machine_id,at,cpu_usage,mem_used,mem_total,disk_used,disk_total,load_1,load_5,load_15) VALUES (?,?,?,?,?,?,?,0,0,0)",
     );
     const metricAt = Date.now();
     insertMetric.run(1, metricAt, 0.42, 1_500_000_000, 4_000_000_000, 8_000_000_000, 40_000_000_000);
-    insertMetric.run(2, metricAt, 0.76, 3_000_000_000, 4_000_000_000, 30_000_000_000, 40_000_000_000);
-    insertMetric.run(3, metricAt, 0.95, 3_800_000_000, 4_000_000_000, 39_000_000_000, 40_000_000_000);
+    insertMetric.run(2, metricAt, 0.58, 2_200_000_000, 4_000_000_000, 24_000_000_000, 40_000_000_000);
+    insertMetric.run(3, metricAt, 0.71, 2_900_000_000, 4_000_000_000, 39_000_000_000, 40_000_000_000);
     await page.goto(f.url + "/login");
     await page.getByPlaceholder("请输入用户名").fill("fixture");
     await page.getByPlaceholder("请输入密码").fill(f.password);
     await page.getByRole("button", { name: "登录", exact: true }).click();
     // The home page meters must pick their colour from the load (green → yellow
-    // → red) and look like frosted glass, instead of painting every bar with the
-    // same fixed rainbow gradient.
+    // → red, i.e. yellow from 50% and red from 70%) and look like frosted glass,
+    // instead of painting every bar with the same fixed rainbow gradient.
     const metersOf = (id) =>
       page
         .locator(".yaws-card")
@@ -81,6 +82,7 @@ browserTest(
         const fill = getComputedStyle(el.firstElementChild);
         return {
           from: track.getPropertyValue("--meter-from").trim(),
+          mid: track.getPropertyValue("--meter-mid").trim(),
           to: track.getPropertyValue("--meter-to").trim(),
           track: track.backgroundColor,
           trackBlur: track.backdropFilter,
@@ -96,19 +98,31 @@ browserTest(
       await readMeter(metersOf(3).nth(2)),
     ];
     // One hue per level, named by CSS variables so tests never depend on how the
-    // gradient itself is serialised.
-    expect(low.from).toBe("#34d399");
-    expect(low.to).toBe("#22c55e");
-    expect(mid.from).toBe("#fbbf24");
-    expect(high.from).toBe("#fb7185");
-    // The fill is one hue with a translucent white sheen over it: green must not
-    // contain the amber/cyan stops of the old rainbow.
-    expect(low.fillImage).toContain("rgb(52, 211, 153)");
+    // gradient itself is serialised. Yellow starts at 50%, red at 70%.
+    expect(low.from).toBe("#86efac");
+    expect(low.mid).toBe("#34d399");
+    expect(low.to).toBe("#059669");
+    expect(mid.from).toBe("#fde68a");
+    expect(mid.mid).toBe("#fbbf24");
+    expect(mid.to).toBe("#d97706");
+    expect(high.from).toBe("#fecdd3");
+    expect(high.mid).toBe("#fb7185");
+    expect(high.to).toBe("#dc2626");
+    // Each fill is a translucent white sheen over a light→base→deep gradient of
+    // one hue, so the colour still changes in the middle of the bar. Green must
+    // not contain the amber/cyan stops of the old rainbow.
     expect(low.fillImage).toContain("rgba(255, 255, 255");
+    expect(low.fillImage).toContain("rgb(134, 239, 172)");
+    expect(low.fillImage).toContain("rgb(52, 211, 153)");
+    expect(low.fillImage).toContain("rgb(5, 150, 105)");
     expect(low.fillImage).not.toContain("56, 189, 248");
     expect(low.fillImage).not.toContain("251, 191, 36");
+    expect(mid.fillImage).toContain("rgb(253, 230, 138)");
     expect(mid.fillImage).toContain("rgb(251, 191, 36)");
+    expect(mid.fillImage).toContain("rgb(217, 119, 6)");
+    expect(high.fillImage).toContain("rgb(254, 205, 211)");
     expect(high.fillImage).toContain("rgb(251, 113, 133)");
+    expect(high.fillImage).toContain("rgb(220, 38, 38)");
     // Frosted glass on both the track and the fill.
     expect(low.trackBlur).toContain("blur(");
     expect(high.fillBlur).toContain("blur(");
@@ -195,20 +209,27 @@ browserTest(
     await expect(stats).toContainText("fixture-ssh");
     await expect(stats).toContainText("node");
     await expect(stats.locator(".stat-bar-fill.level-warn")).toHaveCount(1);
-    await expect(stats.locator(".stat-bar-fill.level-high")).toHaveCount(1);
-    // cpu, memory and swap are all below the warn threshold.
-    await expect(stats.locator(".stat-bar-fill.level-ok")).toHaveCount(3);
+    // Both mount points (/ at 78% and /data at 94%) are past the 70% mark.
+    await expect(stats.locator(".stat-bar-fill.level-high")).toHaveCount(2);
+    // cpu (33%) and swap stay below the 50% mark, memory (69%) does not.
+    await expect(stats.locator(".stat-bar-fill.level-ok")).toHaveCount(2);
+    await expect(stats.locator(".stat-value.level-warn").first()).toHaveCSS(
+      "color",
+      "rgb(252, 211, 77)",
+    );
     // The workspace panel shares the meter palette: green / yellow / red with the
-    // same frosted glass fill as the home page.
+    // same frosted glass fill and light→base→deep gradient as the home page.
     expect(
       await stats.locator(".stat-bar-fill.level-ok").first().evaluate((el) => ({
         from: getComputedStyle(el).getPropertyValue("--meter-from").trim(),
+        mid: getComputedStyle(el).getPropertyValue("--meter-mid").trim(),
         image: getComputedStyle(el).backgroundImage,
         blur: getComputedStyle(el).backdropFilter,
       })),
     ).toEqual({
-      from: "#34d399",
-      image: expect.stringContaining("rgba(255, 255, 255"),
+      from: "#86efac",
+      mid: "#34d399",
+      image: expect.stringContaining("rgb(52, 211, 153)"),
       blur: expect.stringContaining("blur("),
     });
     await expect(
