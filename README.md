@@ -248,7 +248,7 @@ npm run dev
 1. 配置 `CF_Token`（建议）或 `CF_Key` + `CF_Email`，注册邮箱默认 `yamatu@qq.com`。API Token 只需要对应 Zone 的 `DNS:Edit` 权限。若你一直是用 `./acme.sh --issue --dns dns_cf -d 域名` 手动续期的，勾选“使用服务器上 acme.sh 已保存的凭据”，程序就不会传 `CF_*`，完全等同于手动命令的行为。
 2. 页面会直接列出所有已配置 SSH 的机器，可以单台扫描，也可以点“扫描全部”批量扫描。只有已完成 SSH 主机指纹信任的机器可以扫描。
 3. 扫描时先执行 `nginx -T` 读取正在生效的 `ssl_certificate` / `ssl_certificate_key` 指令，因此宝塔等面板写入自定义路径的证书也能被发现；同时会搜索 Nginx、Let’s Encrypt、Apache、OpenSSL、宝塔/1Panel、`/etc/pki`、`/root/.acme.sh` 等常见目录。SSH 用户不是 root 时会自动尝试免密 `sudo -n`。
-4. 证书域名优先取 SAN，没有 SAN 时回退到证书 CN；匹配的私钥按同目录 `privkey.pem` / `key.pem`、同名 `.key` / `.pem` 顺序查找，并排除“把证书本身当成私钥”的情况。扫描结果会显示候选文件数、可解析证书数、openssl 与 nginx 是否存在，便于排查权限问题。
+4. 证书域名优先取 SAN，没有 SAN 时回退到证书 CN；匹配的私钥按同目录 `privkey.pem` / `key.pem`、带版本号的 `privkeyN.pem`（Let's Encrypt 的 `archive/fullchain1.pem` == `privkey1.pem`）、同名 `.key` / `.pem` 顺序查找，并排除“把证书本身当成私钥”的情况。同一张证书常能通过多个路径访问（`live/fullchain.pem`、`archive/fullchain1.pem`、面板里的副本），扫描会用 SHA-256 指纹合并为一条记录，并保留有私钥、且不在 `archive/` 下的那个路径，避免同一证书出现两条记录或续期按钮变灰。扫描结果会显示候选文件数、可解析证书数、未配对私钥数、openssl 与 nginx 是否存在，便于排查权限问题。
 5. 点击证书对应的“申请/更新”前，服务器需要安装 `acme.sh`（`PATH`、`~/.acme.sh/acme.sh`、`/root/.acme.sh/acme.sh` 任一位置），且 SSH 用户需要能够执行 `nginx -t` 并 reload Nginx。非 root 用户在有免密 sudo 时会通过 `sudo -n` 执行。更新会先备份当前证书/私钥，申请成功后执行 `nginx -t`，校验失败自动恢复备份，并回写新的到期时间。
 6. 开启“到期前自动续期”后，主控每 6 小时检查一次，默认在到期前 30 天处理。只处理扫描到且存在私钥路径的证书；因进程重启而中断的续期会在下次启动时恢复为可重试状态。
 7. 没有可扫描到的证书时，可以在“手动申请证书”里直接输入域名（每行一个，也可用空格/逗号分隔，支持 `*.example.com` 通配符），选择服务器后点“申请证书”。系统会执行 `acme.sh --issue --dns dns_cf -d ...` 申请，并把 `fullchain` / `key` 安装到你指定（或默认 `/etc/nginx/ssl/<域名>.pem|.key`）的路径，签发完成后重新读取证书真实域名与到期时间写入清单，因此手动申请的证书同样会被自动续期。已扫描到的同域名证书路径会被自动沿用。

@@ -3,11 +3,11 @@ import { apiFetch } from "./api";
 import { fmtTime, daysLeft } from "./format";
 
 type Cert = { id:number; certPath:string; keyPath:string; domains:string[]; expiresAt:number|null; issuer:string; lastScanAt:number; lastRenewAt:number|null; status:string; lastError:string };
-type ScanInfo = { user?:string; uid?:string; openssl?:string; nginx?:string; sudo?:string; nginxConfig?:string; candidates?:string; certificates?:string; skipped?:string };
+type ScanInfo = { user?:string; uid?:string; openssl?:string; nginx?:string; sudo?:string; nginxConfig?:string; candidates?:string; certificates?:string; keyless?:string; skipped?:string };
 type Machine = { id:number; name:string; sshHost:string; sshPort:number; sshUser:string; sshAuthType:string; sshTrusted:number; credentials?:"ok"|"missing"|"undecryptable" };
 type MachineStat = { machineId:number; certificates:number; expired:number; expiring:number; nextExpiry:number|null };
 type Config = { email:string; cfTokenMasked:string; cfAccountId:string; cfKeyMasked:string; cfEmail:string; caServer:string; useServerCreds:boolean; autoRenew:boolean; autoRenewDays:number; configured:boolean };
-type ScanResult = { found:number; added:number; updated:number; pruned:number; warning?:string; info?:ScanInfo };
+type ScanResult = { found:number; added:number; updated:number; pruned:number; duplicates?:number; warning?:string; info?:ScanInfo };
 type Notice = { kind:"ok"|"err"; text:string };
 type CertFilter = "all"|"ok"|"expiring"|"expired"|"error";
 
@@ -145,7 +145,7 @@ export function CertificatesPage() {
     await Promise.all([refreshCerts(id).catch(e=>{refreshError=friendlyError(e)}),loadSummary()]);
     if (!opts.silent) setNotice(refreshError
       ? {kind:"err",text:`扫描已完成（发现 ${r.found} 个证书），但刷新列表失败：${refreshError}`}
-      : {kind:"ok",text:r.warning??`扫描完成：发现 ${r.found} 个证书（新增 ${r.added} · 更新 ${r.updated}${r.pruned?` · 清理 ${r.pruned}`:""}）`});
+      : {kind:"ok",text:r.warning??`扫描完成：发现 ${r.found} 个证书（新增 ${r.added} · 更新 ${r.updated}${r.pruned?` · 清理 ${r.pruned}`:""}${r.duplicates?` · 合并重复 ${r.duplicates}`:""}）`});
     return r;
   }
   // A machine with unusable credentials would only fail server-side; say why.
@@ -245,7 +245,8 @@ export function CertificatesPage() {
             <button className="yaws-btn" disabled={!canScan(m)||busy} title={credWarning(m)||(!m.sshTrusted?"需要先信任 SSH 指纹":"")} onClick={()=>void scan(m)}>{scanningId===m.id?"扫描中…":"扫描证书"}</button>
             <button className="yaws-btn" disabled={busy} onClick={()=>setSelected(m.id)}>查看</button>
           </div>
-          {selected===m.id&&scanInfoById[m.id]?<div className="mt-3 text-xs text-white/50">扫描身份：{scanInfoById[m.id].user||"—"}（uid {scanInfoById[m.id].uid||"—"}） · openssl：{scanInfoById[m.id].openssl||"未找到"} · nginx：{scanInfoById[m.id].nginx||"未找到"} · 配置：{scanInfoById[m.id].nginxConfig||"—"} · 候选文件：{scanInfoById[m.id].candidates||"0"} · 可解析证书：{scanInfoById[m.id].certificates||"0"} · 跳过 CA/信任库：{scanInfoById[m.id].skipped||"0"}</div>:null}
+          {selected===m.id&&scanInfoById[m.id]?<div className="mt-3 text-xs text-white/50">扫描身份：{scanInfoById[m.id].user||"—"}（uid {scanInfoById[m.id].uid||"—"}） · openssl：{scanInfoById[m.id].openssl||"未找到"} · nginx：{scanInfoById[m.id].nginx||"未找到"} · 配置：{scanInfoById[m.id].nginxConfig||"—"} · 候选文件：{scanInfoById[m.id].candidates||"0"} · 可解析证书：{scanInfoById[m.id].certificates||"0"} · 未配对私钥：{scanInfoById[m.id].keyless||"0"} · 跳过 CA/信任库：{scanInfoById[m.id].skipped||"0"}</div>:null}
+          {selected===m.id&&scanInfoById[m.id]?.keyless&&scanInfoById[m.id].keyless!=="0"?<div className="mt-1 text-xs text-amber-300">有 {scanInfoById[m.id].keyless} 个证书文件没找到配对的私钥。它们是同一证书的多个副本时已自动合并；列表中仍标红“未找到私钥”的条目才需要手动处理（常见原因：私钥在同一目录但文件名不同，或当前账号无权读取）。</div>:null}
         </div>;
       }):<div className="rounded-lg border border-dashed border-white/10 p-5 text-sm text-white/40">没有配置 SSH 的服务器，请先到机器详情中配置 SSH。</div>}</div>
       {notice?<div className={notice.kind==="err"?"mt-3 yaws-alert-error":"mt-3 yaws-alert-success"}>{notice.text}</div>:null}
@@ -289,10 +290,10 @@ export function CertificatesPage() {
         const st=certState(c); const d=daysLeft(c.expiresAt);
         return <tr key={c.id} className="border-t border-white/[.06]">
           <td className="p-2 text-white/85">{c.domains.join(", ")}{c.issuer?<div className="mt-0.5 max-w-xs truncate text-xs text-white/35" title={c.issuer}>{c.issuer}</div>:null}</td>
-          <td className="max-w-xs truncate p-2 font-mono text-xs text-white/50" title={c.certPath}>{c.certPath}</td>
+          <td className="max-w-xs p-2 font-mono text-xs text-white/50" title={c.certPath}><div className="truncate">{c.certPath}</div>{c.keyPath?<div className="truncate text-[11px] text-white/30" title={c.keyPath}>{c.keyPath}</div>:<div className="text-[11px] text-amber-300">未找到私钥，无法续期</div>}</td>
           <td className="p-2">{fmtTime(c.expiresAt)}{d!==null&&d>0?<span className={`ml-2 text-xs ${d<=EXPIRING_DAYS?"text-amber-300":"text-white/40"}`}>剩 {d} 天</span>:null}</td>
           <td className="p-2"><span className={`yaws-badge ${st.cls}`}>{st.label}</span>{c.lastError?<div className="mt-1 max-w-xs truncate text-xs text-rose-300/80" title={c.lastError}>{c.lastError}</div>:null}</td>
-          <td className="whitespace-nowrap p-2"><button className="yaws-btn-primary text-xs" disabled={busy||!config?.configured||!c.keyPath} title={!c.keyPath?"未找到私钥文件，无法续期":!config?.configured?"请先配置 Cloudflare":""} onClick={()=>renew(c)}>申请/更新</button><button className="yaws-btn ml-1 text-xs text-rose-300" disabled={busy} title={`从清单中删除该记录（不会删除服务器上的 ${c.certPath}）`} onClick={()=>removeCert(c)}>删除</button></td>
+          <td className="whitespace-nowrap p-2"><button className="yaws-btn-primary text-xs" disabled={busy||!config?.configured||!c.keyPath} title={!c.keyPath?`未在服务器上找到与 ${c.certPath} 配对的私钥文件，无法续期；请检查该目录或重新扫描`:!config?.configured?"请先配置 Cloudflare":""} onClick={()=>renew(c)}>申请/更新</button><button className="yaws-btn ml-1 text-xs text-rose-300" disabled={busy} title={`从清单中删除该记录（不会删除服务器上的 ${c.certPath}）`} onClick={()=>removeCert(c)}>删除</button></td>
         </tr>;})}</tbody></table>
         {!certs.length?<div className="p-8 text-center text-sm text-white/40">{selectedMachine?"暂无记录，点击「扫描证书」开始扫描":"请先选择一台服务器"}</div>:null}
         {certs.length&&!visible.length?<div className="p-8 text-center text-sm text-white/40">当前筛选下没有证书</div>:null}</div>

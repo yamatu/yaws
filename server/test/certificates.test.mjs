@@ -15,7 +15,7 @@ import { openDb } from "../dist/db.js";
 import { hashPassword, signToken } from "../dist/auth.js";
 import { authMiddleware } from "../dist/http.js";
 import { encryptText } from "../dist/crypto.js";
-import { acmeScript, certificateRouter, startCertificateScheduler } from "../dist/certificates.js";
+import { acmeScript, certificateRouter, SCAN_SCRIPT, startCertificateScheduler } from "../dist/certificates.js";
 import { fingerprint } from "../dist/ssh.js";
 
 const secret = "certificate-test-secret-0123456789";
@@ -708,4 +708,98 @@ test("certificate records can be deleted, and expired/error rows purged", async 
     assert.equal((await api("/purge", { method: "POST", body: JSON.stringify({ scope: "everything" }) })).status, 400);
     assert.equal((await api("/purge", { method: "POST", body: JSON.stringify({ scope: "expired" }) })).body.deleted, 1);
   } finally { close(); }
+});
+
+// The reported symptom: one scanned certificate showed up twice, and only one of
+// the two entries had a private key so the other one's 申请/更新 button was dead.
+// Cause: the same certificate is reachable through several paths (Let's Encrypt
+// serves live/fullchain.pem while archive/fullchain1.pem is the real file), and
+// name-based key pairing could not connect the numbered archive copies.
+test("a certificate discovered at several paths is listed once, with a usable key", async () => {
+  const row = (path, subject, sans, key, fpr) =>
+    `__YAWS_CERT__\t${b64(path)}\t${b64("Jan 01 00:00:00 2030 GMT")}\t${b64("CN=R3")}\t${b64(subject)}\t${b64(sans)}\t${b64(key)}\t${b64(fpr)}`;
+  const output = [
+    "__YAWS_INFO__\tcertificates\t" + b64("4"),
+    // live/ is what nginx -T reports; the file itself lives in archive/.
+    row("/etc/letsencrypt/live/a.example.com/fullchain.pem", "CN=a.example.com", "DNS:a.example.com", "", "FPR-A"),
+    row("/etc/letsencrypt/archive/a.example.com/fullchain1.pem", "CN=a.example.com", "DNS:a.example.com,DNS:www.a.example.com", "/etc/letsencrypt/archive/a.example.com/privkey1.pem", "FPR-A"),
+    // same certificate again under the leaf-only name
+    row("/etc/letsencrypt/archive/a.example.com/cert1.pem", "CN=a.example.com", "DNS:a.example.com", "", "FPR-A"),
+    // a second, genuinely different certificate
+    row("/etc/nginx/ssl/b.example.com.pem", "CN=b.example.com", "DNS:b.example.com", "/etc/nginx/ssl/b.example.com.key", ""),
+  ].join("\n");
+
+  const { ssh, port, fp } = await startSsh({
+    onExec: (accept) => { const s = accept(); s.write(output); s.exit(0); s.end(); },
+  });
+  const { api, close, db } = await startApi({ ssh, port, fp, certEnv: cfEnv });
+  try {
+    const res = await api("/machine/1/scan", { method: "POST", body: "{}" });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.found, 2);
+    assert.equal(res.body.duplicates, 2);
+
+    const certs = (await api("/machine/1")).body.certificates;
+    assert.equal(certs.length, 2);
+    const a = certs.find((c) => c.domains.includes("a.example.com"));
+    // The entry kept is a renewable one, and it merges the SANs of its duplicates.
+    assert.equal(a.keyPath, "/etc/letsencrypt/archive/a.example.com/privkey1.pem");
+    assert.deepEqual(a.domains.sort(), ["a.example.com", "www.a.example.com"]);
+    assert.ok(certs.every((c) => c.keyPath), "every listed certificate must be renewable");
+    // Nothing points at the pathless duplicates any more.
+    assert.equal(db.prepare("SELECT COUNT(*) as n FROM certificate_inventory").get().n, 2);
+  } finally { close(); }
+});
+
+test("a scan that cannot see the private key keeps the key path already known", async () => {
+  const { ssh, port, fp } = await startSsh({
+    onExec: (accept) => {
+      const s = accept();
+      s.write(`__YAWS_CERT__\t${b64("/etc/nginx/ssl/a.example.com.pem")}\t${b64("Jan 01 00:00:00 2030 GMT")}\t${b64("CN=R3")}\t${b64("CN=a.example.com")}\t${b64("DNS:a.example.com")}\t${b64("")}\t${b64("FPR-X")}`);
+      s.exit(0);
+      s.end();
+    },
+  });
+  const { api, close, db } = await startApi({ ssh, port, fp, certEnv: cfEnv });
+  try {
+    db.prepare("INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(1,'/etc/nginx/ssl/a.example.com.pem','/etc/nginx/ssl/a.example.com.key','[\"a.example.com\"]',0,'',0,'ok','')").run();
+    await api("/machine/1/scan", { method: "POST", body: "{}" });
+    const cert = (await api("/machine/1")).body.certificates[0];
+    // Erasing it would grey out 申请/更新 for a certificate that is fine.
+    assert.equal(cert.keyPath, "/etc/nginx/ssl/a.example.com.key");
+  } finally { close(); }
+});
+
+// The other half of the duplicate bug lives in the remote script: without
+// pairing the numbered Let's Encrypt archive copies, archive/fullchain1.pem is
+// reported without a private key, which is what greyed out its renew button.
+test("the remote scan pairs a numbered archive certificate with its key", async (t) => {
+  if (spawnSync("dash", ["-c", "true"]).error) return t.skip("dash not installed");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yaws-scan-")).split("\\").join("/");
+  try {
+    const archive = `${dir}/letsencrypt/archive/a.example.com`;
+    fs.mkdirSync(archive, { recursive: true });
+    const gen = spawnSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", `${archive}/privkey1.pem`, "-out", `${archive}/cert1.pem`, "-days", "3650", "-subj", "/CN=a.example.com", "-addext", "subjectAltName=DNS:a.example.com"], { encoding: "utf8" });
+    if (gen.error || gen.status !== 0) return t.skip("openssl req unavailable");
+    fs.copyFileSync(`${archive}/cert1.pem`, `${archive}/fullchain1.pem`);
+
+    // Only the directory list is rewritten; everything else is the shipped script.
+    const script = SCAN_SCRIPT.replace(/^for dir in .*; do$/m, `for dir in ${dir}/letsencrypt; do`);
+    assert.notEqual(script, SCAN_SCRIPT, "the directory list must have been rewritten");
+    const run = spawnSync("dash", [], { input: script, encoding: "utf8", env: { ...process.env } });
+    assert.equal(run.status, 0, `scan script failed: ${run.stderr}`);
+    assert.doesNotMatch(run.stderr, /not found|bad substitution/);
+
+    const rows = run.stdout.split("\n").filter((l) => l.startsWith("__YAWS_CERT__\t")).map((l) => l.split("\t").slice(1).map((f) => Buffer.from(f, "base64").toString("utf8")));
+    assert.equal(rows.length, 2);
+    for (const [certPath, , , , , keyPath, fingerprint] of rows) {
+      // This is the regression: fullchain1.pem must find privkey1.pem.
+      assert.equal(keyPath, `${archive}/privkey1.pem`, `${certPath} was not paired with its key`);
+      assert.match(fingerprint, /^[0-9A-F]{64}$/, "a SHA-256 fingerprint must be reported for de-duplication");
+    }
+    assert.equal(rows[0][6], rows[1][6], "both copies must share one fingerprint");
+    assert.match(run.stdout, /__YAWS_INFO__\tkeyless\t/, "the keyless count must be reported for diagnostics");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

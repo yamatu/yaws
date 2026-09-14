@@ -173,6 +173,32 @@ function certDomains(subject: string, sans: string) {
   return [...domains];
 }
 
+// One physical certificate can be reachable through several paths (Let's
+// Encrypt keeps both live/ and archive/, panels copy the same pair around, a
+// .crt sits next to a .pem). Listing each of them produced a certificate list
+// where only one entry per certificate could be renewed, so merge by SHA-256
+// fingerprint and keep the renewable, canonical path — borrowing the private
+// key from whichever duplicate happened to discover one.
+function dedupeScanRows<T extends { path: string; keyPath: string; fingerprint: string; domains: string[] }>(rows: T[]) {
+  const best = new Map<string, T>();
+  const order: string[] = [];
+  // Lower is better: a usable key first, then a path outside archive/.
+  const rank = (r: T) => (r.keyPath ? 0 : 2) + (/\/archive\//.test(r.path) ? 1 : 0);
+  for (const row of rows) {
+    // Rows whose fingerprint could not be computed are never merged with each
+    // other, so a broken openssl cannot silently hide distinct certificates.
+    const id = row.fingerprint || `path:${row.path}`;
+    const seen = best.get(id);
+    if (!seen) { best.set(id, row); order.push(id); continue; }
+    const winner = rank(row) < rank(seen) ? row : seen;
+    const loser = winner === row ? seen : row;
+    if (!winner.keyPath) winner.keyPath = loser.keyPath;
+    winner.domains = [...new Set([...winner.domains, ...loser.domains])];
+    best.set(id, winner);
+  }
+  return { rows: order.map((id) => best.get(id)!), duplicates: rows.length - order.length };
+}
+
 function parseScan(text: string) {
   const rows: any[] = [];
   const info: Record<string, string> = {};
@@ -187,12 +213,13 @@ function parseScan(text: string) {
     // A channel that closes mid-record leaves a short line; skipping it keeps
     // one truncated row from failing the entire scan with a TypeError.
     if (fields.length < 5) continue;
-    const [path = "", end = "", issuer = "", subject = "", sans = "", keyPath = ""] = fields.map(decodeRemoteField);
+    const [path = "", end = "", issuer = "", subject = "", sans = "", keyPath = "", fingerprint = ""] = fields.map(decodeRemoteField);
     const domains = new Set(certDomains(subject, sans));
     const expiresAt = Date.parse(end.replace(/^notAfter=/, "").trim());
-    if (path && domains.size) rows.push({ path, keyPath, domains: [...domains], expiresAt: Number.isFinite(expiresAt) ? expiresAt : null, issuer: issuer.replace(/^issuer=/, "").trim() });
+    if (path && domains.size) rows.push({ path, keyPath, fingerprint, domains: [...domains], expiresAt: Number.isFinite(expiresAt) ? expiresAt : null, issuer: issuer.replace(/^issuer=/, "").trim() });
   }
-  return { rows, info };
+  const merged = dedupeScanRows(rows);
+  return { rows: merged.rows, duplicates: merged.duplicates, info };
 }
 
 // Do not rely only on a few directories: many panels store certificates in a
@@ -200,7 +227,7 @@ function parseScan(text: string) {
 // reads nginx's active configuration, then searches common panel/system paths.
 // Every field is base64 encoded so paths and OpenSSL output cannot break the
 // protocol between the remote shell and the controller.
-const SCAN_SCRIPT = `
+export const SCAN_SCRIPT = `
 set +e
 if [ "$(id -u 2>/dev/null)" = "0" ]; then RUN_ROOT=""; elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then RUN_ROOT="sudo -n"; else RUN_ROOT=""; fi
 run() { if [ -n "$RUN_ROOT" ]; then sudo -n "$@"; else "$@"; fi; }
@@ -244,6 +271,7 @@ done
 
 certCount=0
 skipped=0
+keyless=0
 while IFS= read -r f; do
   [ -f "$f" ] || continue
   # Trust-store bundles are not site certificates; skip them by name before the
@@ -265,19 +293,30 @@ while IFS= read -r f; do
     if [ "$ca" != "0" ] && [ -n "$ca" ]; then skipped=$((skipped + 1)); continue; fi
   fi
   key=""
-  for k in "$(dirname "$f")/privkey.pem" "$(dirname "$f")/key.pem" "\${f%.*}.key" "\${f%.*}.pem"; do
+  dir=$(dirname "$f")
+  # Let's Encrypt keeps numbered copies in archive/: fullchain1.pem belongs to
+  # privkey1.pem. Pairing by that suffix is what turns those entries into
+  # renewable certificates instead of a duplicate without a private key.
+  ver=$(basename "$f" | sed -n 's/^[A-Za-z]*\\([0-9][0-9]*\\)\\.pem$/\\1/p')
+  for k in "$dir/privkey$ver.pem" "$dir/privkey.pem" "$dir/key.pem" "$dir/key$ver.pem" "\${f%.*}.key" "\${f%.*}.pem"; do
     # The ".pem" fallback resolves to the certificate itself for a .pem file;
     # never treat a certificate as its own private key.
     [ "$k" = "$f" ] && continue
     run test -f "$k" >/dev/null 2>&1 && key="$k" && break
   done
-  printf '__YAWS_CERT__\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$(b64 "$f")" "$(b64 "$end")" "$(b64 "$issuer")" "$(b64 "$subject")" "$(b64 "$sans")" "$(b64 "$key")"
+  # SHA-256 fingerprint: the controller merges paths that resolve to the same
+  # certificate (live/ vs archive/ vs a panel copy) so one certificate is listed
+  # once, on the copy that still has a usable private key.
+  fpr=$(run openssl x509 -in "$f" -noout -fingerprint -sha256 2>/dev/null | sed -n 's/^[^=]*=//p' | tr -d ':\\r')
+  [ -n "$key" ] || keyless=$((keyless + 1))
+  printf '__YAWS_CERT__\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$(b64 "$f")" "$(b64 "$end")" "$(b64 "$issuer")" "$(b64 "$subject")" "$(b64 "$sans")" "$(b64 "$key")" "$(b64 "$fpr")"
   certCount=$((certCount + 1))
 done <<EOF
 $(sort -u "$list")
 EOF
 info candidates "$(wc -l < "$list" 2>/dev/null | tr -d ' ' )"
 info certificates "$certCount"
+info keyless "$keyless"
 info skipped "$skipped"
 `;
 const SCAN = `sh -c ${shellQuote(SCAN_SCRIPT)}`;
@@ -388,7 +427,10 @@ export function acmeScript(t: AcmeTarget) {
 }
 
 function storeCertificate(db: Db, machineId: number, row: { path: string; keyPath: string; domains: string[]; expiresAt: number | null; issuer: string }) {
-  db.prepare(`INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(machine_id,cert_path) DO UPDATE SET key_path=excluded.key_path,domains=excluded.domains,expires_at=excluded.expires_at,issuer=excluded.issuer,last_scan_at=excluded.last_scan_at,status=excluded.status,last_error=''`)
+  // A scan that cannot see the private key (permissions, or the discovery
+  // heuristics came up empty) must not erase a path we already know works:
+  // that would disable the renew button for a certificate that was fine.
+  db.prepare(`INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(machine_id,cert_path) DO UPDATE SET key_path=CASE WHEN excluded.key_path != '' THEN excluded.key_path ELSE COALESCE(certificate_inventory.key_path,'') END,domains=excluded.domains,expires_at=excluded.expires_at,issuer=excluded.issuer,last_scan_at=excluded.last_scan_at,status=excluded.status,last_error=''`)
     .run(machineId, row.path, row.keyPath, JSON.stringify(row.domains), row.expiresAt, row.issuer, Date.now(), row.expiresAt && row.expiresAt < Date.now() ? "expired" : "ok", "");
 }
 
@@ -493,7 +535,7 @@ export function certificateRouter(db: Db, secret: string, env: CertSettings) {
       });
       tx();
       res.json({
-        ok: true, found: rows.length, added, updated, pruned,
+        ok: true, found: rows.length, added, updated, pruned, duplicates: parsed.duplicates,
         certificates: rows, info: parsed.info,
         warning: rows.length === 0 ? "未发现可解析证书。请确认 SSH 用户可读取证书目录，且服务器安装 openssl；如果 Nginx 使用自定义路径，请检查 nginx -T 权限。" : undefined,
       });
