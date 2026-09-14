@@ -112,7 +112,41 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 /* …and the header stays opaque above it so the form scrolls behind it. */
 .ai-chat.compact .ai-chat-head { background: #181b1f; }
 .ai-settings label,.ai-chat-composer label,.monitor-form label { display: grid; gap: 6px; font-size: 12px; color: #b5bec8; }
-.ai-answer { white-space: pre-wrap; line-height: 1.7; font-size: 14px; overflow-wrap: anywhere; max-width: 92%; }
+.ai-answer { line-height: 1.7; font-size: 14px; overflow-wrap: anywhere; max-width: 92%; min-width: 0; }
+/* Markdown answers (see Markdown.tsx): block spacing inside one answer bubble. */
+.ai-answer > p, .ai-answer > h1, .ai-answer > h2, .ai-answer > h3, .ai-answer > h4, .ai-answer > ul, .ai-answer > ol, .ai-answer > .ai-md-quote, .ai-answer > .ai-code, .ai-answer > .ai-md-scroll { margin: 0; }
+.ai-answer > * + * { margin-top: 9px; }
+.ai-md-h { font-weight: 600; line-height: 1.4; }
+.ai-md-h1 { font-size: 17px; }
+.ai-md-h2 { font-size: 15.5px; }
+.ai-md-h3 { font-size: 14.5px; }
+.ai-md-h4 { font-size: 14px; color: #dbe3ea; }
+.ai-answer ul, .ai-answer ol { padding-left: 20px; }
+.ai-answer li > ul, .ai-answer li > ol { margin-top: 5px; }
+.ai-answer li + li { margin-top: 4px; }
+.ai-answer ul { list-style: disc; }
+.ai-answer ul ul { list-style: circle; }
+.ai-answer ol { list-style: decimal; }
+.ai-answer li::marker { color: #7b848e; }
+.ai-md-tasks { list-style: none; padding-left: 4px; }
+.ai-md-task { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.ai-md-task::marker { content: none; }
+.ai-md-check { color: #6b747d; }
+.ai-md-check.on { color: #4ade80; }
+.ai-md-code { padding: 1px 5px; border: 1px solid #333a41; border-radius: 4px; background: #111417; font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.ai-md-quote { padding: 2px 0 2px 11px; border-left: 3px solid #3f4750; color: #a9b3bd; }
+.ai-md-rule { height: 0; border: 0; border-top: 1px solid #383f47; }
+.ai-md-scroll { max-width: 100%; overflow-x: auto; }
+.ai-answer table { border-collapse: collapse; font-size: 12.5px; }
+.ai-answer th, .ai-answer td { padding: 4px 9px; border: 1px solid #333a41; }
+.ai-answer th { background: #1d2229; font-weight: 600; }
+.ai-answer a { color: #7dd3fc; text-decoration: underline; overflow-wrap: anywhere; }
+.ai-code { border: 1px solid #333a41; border-radius: 6px; background: #111417; overflow: hidden; }
+.ai-code-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 6px 3px 10px; border-bottom: 1px solid #333a41; background: #161a1f; font-size: 11px; color: #8d97a2; }
+.ai-code-lang:empty { visibility: hidden; }
+.ai-code-copy { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border: 0; border-radius: 4px; background: none; color: #8d97a2; font-size: 11px; font-family: inherit; cursor: pointer; }
+.ai-code-copy:hover { background: #22282e; color: #7dd3fc; }
+.ai-code pre { margin: 0; padding: 9px 11px; overflow: auto; font-size: 12.5px; line-height: 1.6; tab-size: 2; }
 .ai-proposal .workspace-toolbar { flex-wrap: wrap; }
 .ai-proposal { margin-top: 4px; border: 1px solid #40464d; border-radius: 6px; overflow: hidden; }
 .ai-proposal.muted { opacity: .55; }

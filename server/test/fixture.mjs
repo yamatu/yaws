@@ -41,6 +41,36 @@ import { z } from "zod";
   "",
 ].join("\n");
 
+/** `[md]` returns a Markdown answer so the chat rendering can be asserted. */
+const MD_ANSWER = [
+  "## 磁盘排查结论",
+  "",
+  "根分区 `/` 已用到 **78%**，`/data` 已到 ~~90%~~ **94%**，建议先清理日志。",
+  "",
+  "处理步骤：",
+  "",
+  "1. 确认服务正常",
+  "2. 清理日志",
+  "",
+  "- [x] 已检查磁盘",
+  "- [ ] 待清理日志",
+  "",
+  "> 删除前请先备份。",
+  "",
+  "```sh",
+  "df -h /",
+  "journalctl --vacuum-size=200M",
+  "```",
+  "",
+  "| 分区 | 用量 |",
+  "| --- | ---: |",
+  "| / | 78% |",
+  "| /data | 94% |",
+  "",
+  "详见 [官方文档](https://example.com/disk)。",
+  "",
+].join("\n");
+
 const MARKER_TOOLS = {
   run: { name: "run_command", args: { command: "df -h /", purpose: "检查磁盘" } },
   write: {
@@ -306,7 +336,9 @@ export async function harness(port = 0) {
     ).length;
     let calls = [];
     const marker = lastUserText(history, chat);
-    if (/\[(run|write|danger|file|list|stats|log|secret|many)\]/.test(marker))
+    const markdown = marker.includes("[md]");
+    if (markdown) calls = [];
+    else if (/\[(run|write|danger|file|list|stats|log|secret|many)\]/.test(marker))
       calls = markerCalls(marker, count);
     else if (count === 0)
       calls = [{ name: "read_file", args: { path: "/srv/app/config.json" } }];
@@ -323,6 +355,7 @@ export async function harness(port = 0) {
       type: "function",
       function: { name: call.name, arguments: JSON.stringify(call.args) },
     }));
+    const answer = markdown ? MD_ANSWER : "已生成配置修改与验证命令。";
     res.setHeader("content-type", "application/json");
     res.end(
       JSON.stringify(
@@ -331,7 +364,7 @@ export async function harness(port = 0) {
               choices: [
                 {
                   message: {
-                    content: calls.length ? null : "已生成配置修改与验证命令。",
+                    content: calls.length ? null : answer,
                     ...(calls.length ? { tool_calls: toolCalls } : {}),
                   },
                 },
@@ -352,7 +385,7 @@ export async function harness(port = 0) {
                       content: [
                         {
                           type: "output_text",
-                          text: "已生成配置修改与验证命令。",
+                          text: answer,
                         },
                       ],
                     },

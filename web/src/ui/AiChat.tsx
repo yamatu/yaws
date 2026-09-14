@@ -25,6 +25,7 @@ import { apiFetch } from "./api";
 import { getToken } from "./auth";
 import { workspaceError } from "./workspaceErrors";
 import { ConversationPicker } from "./ConversationPicker";
+import { Markdown } from "./MarkdownView";
 import type { Conversation } from "./conversations";
 
 type Profile = {
@@ -925,7 +926,9 @@ export function AiChat({
           if (entry.kind === "assistant")
             return (
               <div key={entry.key} className="ai-row">
-                <div className="ai-answer">{entry.text}</div>
+                <div className="ai-answer">
+                  <Markdown text={entry.text} />
+                </div>
               </div>
             );
           if (entry.kind === "error")

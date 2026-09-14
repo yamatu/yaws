@@ -301,6 +301,47 @@ browserTest(
     await expect(page.locator(".ai-conv-pop")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.locator(".ai-conv-pop")).toHaveCount(0);
+    // Answers render as Markdown: headings, emphasis, lists, quotes, code, tables, links.
+    await page.getByLabel("问题").fill("[md] 用 markdown 总结磁盘");
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    const answer = page.locator(".ai-answer").last();
+    await expect(answer.locator("h2")).toHaveText("磁盘排查结论");
+    await expect(answer.locator("strong").first()).toHaveText("78%");
+    await expect(answer.locator("del")).toHaveText("90%");
+    await expect(answer.locator(".ai-md-code").first()).toHaveText("/");
+    await expect(answer.locator("ol li")).toHaveCount(2);
+    await expect(answer.locator("ul.ai-md-tasks li")).toHaveCount(2);
+    await expect(answer.locator(".ai-md-check.on")).toHaveCount(1);
+    await expect(answer.locator("blockquote")).toContainText("删除前请先备份。");
+    await expect(answer.locator(".ai-code-lang")).toHaveText("Shell");
+    await expect(answer.locator(".ai-code pre code")).toContainText(
+      "journalctl --vacuum-size=200M",
+    );
+    const rows = answer.locator("table tbody tr");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(1).locator("td").nth(1)).toHaveText("94%");
+    expect(
+      await rows
+        .nth(1)
+        .locator("td")
+        .nth(1)
+        .evaluate((cell) => getComputedStyle(cell).textAlign),
+    ).toBe("right");
+    await expect(answer.locator("table thead th").first()).toHaveText("分区");
+    const mdLink = answer.locator("a");
+    await expect(mdLink).toHaveAttribute("href", "https://example.com/disk");
+    await expect(mdLink).toHaveAttribute("rel", /noreferrer/);
+    expect(await mdLink.evaluate((node) => node.target)).toBe("_blank");
+    // Copying a block works without clipboard permissions (textarea fallback).
+    const copy = answer.locator(".ai-code-copy");
+    await copy.click();
+    await expect(copy).toContainText("已复制");
+    await expectNoSqueezedMessages(page);
+    // Raw HTML inside an answer is text, never markup.
+    expect(
+      await answer.evaluate((node) => node.querySelector("script,img") === null),
+    ).toBe(true);
+    await page.screenshot({ path: "test-results/ai-markdown.png", fullPage: true });
     // The same assistant floats over the terminal as an add-on panel.
     await page.getByRole("tab", { name: "终端", exact: true }).click();
     await page.getByRole("button", { name: "AI 助手", exact: true }).click();
@@ -308,7 +349,21 @@ browserTest(
     await expect(page.locator(".ai-dock .ai-chat-transcript")).toContainText(
       "看一下磁盘",
     );
+    await expect(page.locator(".ai-dock .ai-answer").last()).toContainText(
+      "磁盘排查结论",
+    );
     await expectNoSqueezedMessages(page, ".ai-dock .ai-chat-transcript");
+    // A wide table or code block scrolls inside the narrow panel instead of
+    // stretching it — no page-level horizontal overflow.
+    const dockOverflow = await page.evaluate(() => {
+      const el = document.querySelector(".ai-dock .ai-chat-transcript");
+      return {
+        panel: el.scrollWidth - el.clientWidth,
+        page: document.documentElement.scrollWidth - innerWidth,
+      };
+    });
+    expect(dockOverflow.panel).toBeLessThanOrEqual(1);
+    expect(dockOverflow.page).toBeLessThanOrEqual(1);
     // The floating panel can be dragged anywhere and resized from its corner.
     const dock = page.locator(".ai-dock");
     const home = await dock.boundingBox();
