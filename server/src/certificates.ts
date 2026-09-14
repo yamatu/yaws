@@ -49,27 +49,102 @@ function machineId(req: any) {
   if (!Number.isInteger(id) || id < 1) throw new WorkspaceError(400, "bad_machine_id");
   return id;
 }
+function decodeRemoteField(value: string) {
+  try { return Buffer.from(value, "base64").toString("utf8"); } catch { return ""; }
+}
+
 function parseScan(text: string) {
   const rows: any[] = [];
-  let cur: string[] | null = null;
+  const info: Record<string, string> = {};
   for (const line of text.split("\n")) {
-    if (line === "__YAWS_CERT__") { cur = []; continue; }
-    if (line === "__YAWS_END__" && cur) {
-      const [path, end, issuer, subject, sans, keyPath] = cur;
-      const domains = new Set<string>();
-      const cn = subject?.match(/(?:^|,)CN=([^,]+)/)?.[1];
-      if (cn) domains.add(cn.trim());
-      for (const m of (sans || "").matchAll(/DNS:([^, ]+)/g)) domains.add(m[1].trim());
-      const date = end?.replace(/^notAfter=/, "").trim();
-      const expiresAt = Date.parse(date || "");
-      if (path && domains.size) rows.push({ path, keyPath: keyPath || "", domains: [...domains], expiresAt: Number.isFinite(expiresAt) ? expiresAt : null, issuer: (issuer || "").replace(/^issuer=/, "").trim() });
-      cur = null; continue;
+    if (line.startsWith("__YAWS_INFO__\t")) {
+      const [, key, value] = line.trim().split("\t");
+      if (key) info[key] = decodeRemoteField(value ?? "");
+      continue;
     }
-    if (cur) cur.push(line);
+    if (!line.startsWith("__YAWS_CERT__\t")) continue;
+    const [, ...fields] = line.trim().split("\t");
+    const [path, end, issuer, subject, sans, keyPath] = fields.map(decodeRemoteField);
+    const domains = new Set<string>();
+    const cn = subject.match(/(?:^|,)CN=([^,]+)/)?.[1];
+    if (cn) domains.add(cn.trim());
+    for (const m of sans.matchAll(/DNS:([^,\s]+)/g)) domains.add(m[1].trim());
+    const expiresAt = Date.parse(end.replace(/^notAfter=/, "").trim());
+    if (path && domains.size) rows.push({ path, keyPath, domains: [...domains], expiresAt: Number.isFinite(expiresAt) ? expiresAt : null, issuer: issuer.replace(/^issuer=/, "").trim() });
   }
-  return rows;
+  return { rows, info };
 }
-const SCAN = `find /etc/nginx /etc/ssl /etc/letsencrypt /www/server/panel/vhost/cert /www/server/panel/vhost/ssl -type f \\( -name '*.pem' -o -name '*.cer' -o -name '*.crt' \\) -print0 2>/dev/null | while IFS= read -r -d '' f; do end=\$(openssl x509 -in "\$f" -noout -enddate 2>/dev/null | cut -d= -f2-); issuer=\$(openssl x509 -in "\$f" -noout -issuer -nameopt RFC2253 2>/dev/null); subject=\$(openssl x509 -in "\$f" -noout -subject -nameopt RFC2253 2>/dev/null); sans=\$(openssl x509 -in "\$f" -noout -ext subjectAltName 2>/dev/null | grep -o 'DNS:[^, ]*' | paste -sd, -); [ -n "\$sans" ] || continue; key=''; for k in "\${f%.*}.key" "\${f%/*}/privkey.pem" "\${f%.*}.pem"; do [ -f "\$k" ] && key="\$k" && break; done; printf '__YAWS_CERT__\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n__YAWS_END__\\n' "\$f" "\$end" "\$issuer" "\$subject" "\$sans" "\$key"; done`;
+
+// Do not rely only on a few directories: many panels store certificates in a
+// custom path and nginx often points directly to that path. The script first
+// reads nginx's active configuration, then searches common panel/system paths.
+// Every field is base64 encoded so paths and OpenSSL output cannot break the
+// protocol between the remote shell and the controller.
+const SCAN_SCRIPT = `
+set +e
+if [ "$(id -u 2>/dev/null)" = "0" ]; then RUN_ROOT=""; elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then RUN_ROOT="sudo -n"; else RUN_ROOT=""; fi
+run() { if [ -n "$RUN_ROOT" ]; then sudo -n "$@"; else "$@"; fi; }
+b64() { if command -v base64 >/dev/null 2>&1; then printf '%s' "$1" | base64 2>/dev/null | tr -d '\\r\\n'; else printf '%s' "$1" | openssl base64 -A 2>/dev/null; fi; }
+info() { printf '__YAWS_INFO__\\t%s\\t%s\\n' "$1" "$(b64 "$2")"; }
+list=$(mktemp "\${TMPDIR:-/tmp}/yaws-cert.XXXXXX" 2>/dev/null)
+[ -n "$list" ] || list="/tmp/yaws-cert.$$"
+trap 'rm -f "$list"' EXIT
+: > "$list"
+
+info user "$(id -un 2>/dev/null)"
+info uid "$(id -u 2>/dev/null)"
+info openssl "$(command -v openssl 2>/dev/null || true)"
+info nginx "$(command -v nginx 2>/dev/null || true)"
+info sudo "$(command -v sudo 2>/dev/null || true)"
+
+# nginx -T is the authoritative source: it catches custom certificate paths.
+if command -v nginx >/dev/null 2>&1; then
+  nginxDump=$(run nginx -T 2>/dev/null)
+  if [ -n "$nginxDump" ]; then
+    info nginxConfig "active"
+    printf '%s\\n' "$nginxDump" | awk '$1 == "ssl_certificate" || $1 == "ssl_certificate_key" { gsub(";", "", $2); gsub("\\\"", "", $2); print $2 }' >> "$list"
+  else
+    info nginxConfig "unreadable"
+  fi
+else
+  info nginxConfig "not-found"
+fi
+
+# Also inspect config files directly. This works when nginx -T is blocked or
+# nginx is not in PATH but its config is still present.
+for conf in /etc/nginx/nginx.conf /etc/nginx/conf.d/*.conf /etc/nginx/sites-enabled/* /usr/local/nginx/conf/*.conf /www/server/panel/vhost/nginx/*.conf /www/server/panel/vhost/nginx/*/*.conf /www/server/panel/vhost/apache/*.conf /www/server/panel/vhost/apache/*/*.conf; do
+  [ -f "$conf" ] || continue
+  grep -hE '^[[:space:]]*ssl_certificate(_key)?[[:space:]]+' "$conf" 2>/dev/null | awk '{ gsub(";", "", $2); gsub("\\\"", "", $2); print $2 }' >> "$list"
+done
+
+for dir in /etc/nginx /etc/ssl /etc/letsencrypt /etc/apache2 /etc/httpd /usr/local/nginx /usr/local/lsws /www/server/panel/vhost/cert /www/server/panel/vhost/ssl /www/server/panel/vhost/letsencrypt /www/server/panel/ssl /opt/1panel /root/.acme.sh /home; do
+  [ -d "$dir" ] || continue
+  run find "$dir" -xdev -type f \\( -iname '*.pem' -o -iname '*.crt' -o -iname '*.cer' \\) -print 2>/dev/null >> "$list"
+done
+
+certCount=0
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  meta=$(run openssl x509 -in "$f" -noout -enddate -issuer -subject -nameopt RFC2253 -ext subjectAltName 2>/dev/null)
+  [ -n "$meta" ] || continue
+  end=$(printf '%s\\n' "$meta" | sed -n 's/^notAfter=//p' | head -1)
+  issuer=$(printf '%s\\n' "$meta" | sed -n 's/^issuer=//p' | head -1)
+  subject=$(printf '%s\\n' "$meta" | sed -n 's/^subject=//p' | head -1)
+  sans=$(printf '%s\\n' "$meta" | grep -o 'DNS:[^, ]*' | paste -sd, -)
+  [ -n "$sans" ] || continue
+  key=""
+  for k in "$(dirname "$f")/privkey.pem" "$(dirname "$f")/key.pem" "\${f%.*}.key" "\${f%.*}.pem"; do
+    run test -f "$k" >/dev/null 2>&1 && key="$k" && break
+  done
+  printf '__YAWS_CERT__\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$(b64 "$f")" "$(b64 "$end")" "$(b64 "$issuer")" "$(b64 "$subject")" "$(b64 "$sans")" "$(b64 "$key")"
+  certCount=$((certCount + 1))
+done <<EOF
+$(sort -u "$list")
+EOF
+info candidates "$(wc -l < "$list" 2>/dev/null | tr -d ' ' )"
+info certificates "$certCount"
+`;
+const SCAN = `if command -v timeout >/dev/null 2>&1; then timeout 120s sh -c ${shellQuote(SCAN_SCRIPT)}; else sh -c ${shellQuote(SCAN_SCRIPT)}; fi`;
 
 async function renewStoredCertificate(db: Db, secret: string, env: { CERT_EMAIL?: string; CF_Token?: string; CF_Account_ID?: string }, id: number, row: any) {
   const c = cfg(db, secret, env);
@@ -112,15 +187,16 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
     const id = machineId(req); let client: any;
     try {
       client = await connectMachine(db, id, secret);
-      const result = await exec(client, SCAN);
+      const result = await exec(client, `timeout 120s ${SCAN}`);
       client.end();
-      if (result.code !== 0 && !result.stdout) throw new WorkspaceError(502, "certificate_scan_failed");
-      const rows = parseScan(result.stdout);
+      if (result.code !== 0 && !result.stdout) throw new WorkspaceError(502, `certificate_scan_failed:${(result.stderr || "remote scan failed").slice(-1000)}`);
+      const parsed = parseScan(result.stdout);
+      const rows = parsed.rows;
       const tx = db.transaction(() => {
         const up = db.prepare(`INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(machine_id,cert_path) DO UPDATE SET key_path=excluded.key_path,domains=excluded.domains,expires_at=excluded.expires_at,issuer=excluded.issuer,last_scan_at=excluded.last_scan_at,status=excluded.status,last_error=''`);
         for (const r of rows) up.run(id, r.path, r.keyPath, JSON.stringify(r.domains), r.expiresAt, r.issuer, Date.now(), r.expiresAt && r.expiresAt < Date.now() ? "expired" : "ok", "");
       });
-      tx(); res.json({ ok: true, found: rows.length, certificates: rows });
+      tx(); res.json({ ok: true, found: rows.length, certificates: rows, info: parsed.info, warning: rows.length === 0 ? "未发现可解析证书。请确认 SSH 用户可读取证书目录，且服务器安装 openssl；如果 Nginx 使用自定义路径，请检查 nginx -T 权限。" : undefined });
     } catch (e) { try { client?.end(); } catch {} next(e); }
   });
   router.post("/machine/:machineId/renew", async (req, res, next) => {
