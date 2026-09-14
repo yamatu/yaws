@@ -495,6 +495,7 @@ export function SshPage() {
           <SshShortcuts
             machineId={machineId}
             connected={status === "connected"}
+            trusted={trusted}
             send={(command) => {
               if (command.endsWith("\r")) {
                 wsRef.current?.send(

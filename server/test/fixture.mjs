@@ -17,6 +17,31 @@ import { createPingService } from "../dist/ping.js";
 import { WorkspaceError } from "../dist/ssh.js";
 import { z } from "zod";
 
+/** Reply for the workspace resource probe (see server/src/system-stats.ts). */
+const STATS_OUTPUT = [
+  "K host fixture-ssh",
+  "K kernel Linux 6.1.0-fixture",
+  "K uptime 86400.5",
+  "K load 0.42 0.30 0.20",
+  "K cpus 2",
+  "C a cpu  500 10 200 20000 30 0 20 5 0 0",
+  "C b cpu  560 10 240 20200 34 0 22 5 0 0",
+  "M MemTotal:        3866624 kB",
+  "M MemFree:          200000 kB",
+  "M MemAvailable:    1200000 kB",
+  "M Buffers:           50000 kB",
+  "M Cached:           900000 kB",
+  "M SwapTotal:        524284 kB",
+  "M SwapFree:         400000 kB",
+  "D /dev/vda1 20511312 15998823 4512489 78% /",
+  "D /dev/vdb1 20511312 19280633 1230679 94% /data",
+  "D tmpfs 100000 0 100000 0% /run",
+  "P 1111 nginx 8.0 1.0 40000",
+  "P 2222 node 30.0 12.0 500000",
+  "K net 1000000 2000000",
+  "",
+].join("\n");
+
 export async function harness(port = 0) {
   const secret = "fixture-only-secret-123456789";
   const db = openDb(":memory:");
@@ -96,7 +121,11 @@ export async function harness(port = 0) {
         session.on("exec", (accept, _reject, info) => {
           commands.push(info.command);
           const stream = accept();
-          stream.write("fixture command complete\n");
+          stream.write(
+            info.command.includes("MemAvailable")
+              ? STATS_OUTPUT
+              : "fixture command complete\n",
+          );
           stream.exit(0);
           stream.end();
         });

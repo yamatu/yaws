@@ -45,6 +45,10 @@ browserTest(
       .getByRole("button", { name: "读取主机指纹", exact: true })
       .click();
     await expect(page.locator(".host-key-prompt")).toContainText("SHA256:");
+    // The resource probe is refused until the host key is trusted.
+    await expect(page.locator(".stats-panel")).toContainText(
+      "确认主机指纹后可查看实时占用情况",
+    );
     await page.getByRole("button", { name: "确认并信任此指纹" }).click();
     await expect(page.locator(".workspace-header")).toContainText("已连接");
     await page.getByRole("button", { name: "添加指令", exact: true }).click();
@@ -59,6 +63,33 @@ browserTest(
     await page
       .getByRole("button", { name: "执行 健康检查", exact: true })
       .click();
+    // Resource usage sits below the shortcut list in the same sidebar.
+    const stats = page.locator(".stats-panel");
+    await expect(stats).toContainText("服务器占用");
+    await expect(stats).toContainText("33%");
+    await expect(stats).toContainText("69%");
+    await expect(stats).toContainText("2.5 GB / 3.7 GB");
+    await expect(stats).toContainText("78%");
+    await expect(stats).toContainText("94%");
+    await expect(stats).toContainText("/data");
+    await expect(stats).toContainText("fixture-ssh");
+    await expect(stats).toContainText("node");
+    await expect(stats.locator(".stat-bar-fill.level-warn")).toHaveCount(1);
+    await expect(stats.locator(".stat-bar-fill.level-high")).toHaveCount(1);
+    // cpu, memory and swap are all below the warn threshold.
+    await expect(stats.locator(".stat-bar-fill.level-ok")).toHaveCount(3);
+    await expect(stats).toContainText("Swap");
+    const sidebarOrder = await page.evaluate(() => {
+      const box = (sel) =>
+        document.querySelector(sel)?.getBoundingClientRect().top;
+      return {
+        item: box(".shortcut-item"),
+        stats: box(".stats-panel"),
+        pane: box(".shortcut-panel"),
+      };
+    });
+    expect(sidebarOrder.stats).toBeGreaterThan(sidebarOrder.item);
+    expect(sidebarOrder.stats).toBeGreaterThan(sidebarOrder.pane);
     await page.screenshot({
       path: "test-results/terminal-desktop.png",
       fullPage: true,

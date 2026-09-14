@@ -2,14 +2,17 @@ import { useEffect, useState } from "react";
 import { Plus, Play, Pencil, Trash2, CornerDownLeft, Save } from "lucide-react";
 import { apiFetch } from "./api";
 import { workspaceError } from "./workspaceErrors";
+import { ServerStatsPanel } from "./ServerStatsPanel";
 type Shortcut = { id: number; name: string; command: string };
 export function SshShortcuts({
   machineId,
   connected,
+  trusted,
   send,
 }: {
   machineId: number;
   connected: boolean;
+  trusted: boolean;
   send: (command: string) => void;
 }) {
   const base = `/api/machines/${machineId}/workspace/shortcuts`;
@@ -156,6 +159,7 @@ export function SshShortcuts({
           </div>
         </div>
       ))}
+      <ServerStatsPanel machineId={machineId} enabled={trusted} />
     </aside>
   );
 }

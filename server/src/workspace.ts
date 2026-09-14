@@ -15,6 +15,7 @@ import {
   FILE_LIMIT,
   remotePath,
 } from "./files.js";
+import { collectSystemStats } from "./system-stats.js";
 
 export function route(fn: (req: Request, res: Response) => Promise<unknown>) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -170,6 +171,18 @@ export function workspaceRouter(db: Db, secret: string) {
     );
     res.json({ ok: true });
   });
+  router.get(
+    "/system",
+    route(async (req, res) => {
+      const { stats, cached } = await collectSystemStats(
+        db,
+        id(req),
+        secret,
+        requestSignal(res),
+      );
+      res.json({ stats, cached });
+    }),
+  );
   router.get(
     "/products",
     route(async (req, res) =>
