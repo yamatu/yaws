@@ -643,6 +643,10 @@ app.use("/api/certificates", requireAuth, requireAdmin, certificateRouter(db, ag
   CERT_EMAIL: process.env.CERT_EMAIL,
   CF_Token: process.env.CF_Token,
   CF_Account_ID: process.env.CF_Account_ID,
+  CF_Key: process.env.CF_Key,
+  CF_Email: process.env.CF_Email,
+  CERT_CA_SERVER: process.env.CERT_CA_SERVER,
+  CERT_USE_SERVER_CREDS: process.env.CERT_USE_SERVER_CREDS,
 }));
 
 app.get("/api/me", requireAuth, (req, res) => {
@@ -1766,6 +1770,10 @@ startCertificateScheduler(db, agentKeySecret, {
   CERT_EMAIL: process.env.CERT_EMAIL,
   CF_Token: process.env.CF_Token,
   CF_Account_ID: process.env.CF_Account_ID,
+  CF_Key: process.env.CF_Key,
+  CF_Email: process.env.CF_Email,
+  CERT_CA_SERVER: process.env.CERT_CA_SERVER,
+  CERT_USE_SERVER_CREDS: process.env.CERT_USE_SERVER_CREDS,
 });
 
 const NewPasswordSchema = z

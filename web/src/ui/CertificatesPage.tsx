@@ -6,7 +6,7 @@ type Cert = { id:number; certPath:string; keyPath:string; domains:string[]; expi
 type ScanInfo = { user?:string; uid?:string; openssl?:string; nginx?:string; sudo?:string; nginxConfig?:string; candidates?:string; certificates?:string; skipped?:string };
 type Machine = { id:number; name:string; sshHost:string; sshPort:number; sshUser:string; sshAuthType:string; sshTrusted:number; credentials?:"ok"|"missing"|"undecryptable" };
 type MachineStat = { machineId:number; certificates:number; expired:number; expiring:number; nextExpiry:number|null };
-type Config = { email:string; cfTokenMasked:string; cfAccountId:string; autoRenew:boolean; autoRenewDays:number; configured:boolean };
+type Config = { email:string; cfTokenMasked:string; cfAccountId:string; cfKeyMasked:string; cfEmail:string; caServer:string; useServerCreds:boolean; autoRenew:boolean; autoRenewDays:number; configured:boolean };
 type ScanResult = { found:number; added:number; updated:number; pruned:number; warning?:string; info?:ScanInfo };
 type Notice = { kind:"ok"|"err"; text:string };
 type CertFilter = "all"|"ok"|"expiring"|"expired"|"error";
@@ -41,11 +41,11 @@ function friendlyError(error: unknown): string {
     "ssh_client-authentication": "SSH 认证失败，请检查用户名、密码或私钥",
     "ssh_client-timeout": "SSH 连接超时，请检查网络与端口",
     ssh_timeout: "SSH 连接超时",
-    cloudflare_not_configured: "请先在上方配置 Cloudflare API Token 和 Account ID",
+    cloudflare_not_configured: "请先在上方配置 Cloudflare API Token（或 CF_Key + CF_Email），或者勾选“使用服务器上 acme.sh 已保存的凭据”",
     certificate_key_not_found: "没有找到匹配的私钥文件，无法续期",
     certificate_renew_failed: "证书续期失败",
     certificate_issue_failed: "证书签发失败",
-    acme_issue_failed: "acme.sh 申请证书失败：常见原因是域名未解析、Cloudflare Token 没有该域名的 DNS:Edit 权限，或 Let's Encrypt 速率限制",
+    acme_issue_failed: "acme.sh 申请证书失败（DNS 验证未通过）。若括号里没有具体原因，通常是 Token 缺少该域名所在 Zone 的 DNS:Edit 权限，或域名不在同一个 Cloudflare 账号下",
     acme_install_failed: "acme.sh 已申请成功但安装证书失败：请确认 SSH 账户可用 root 或免密 sudo 写入证书路径",
     "acme.sh_not_found": "服务器上未安装 acme.sh，请先在服务器执行 curl https://get.acme.sh | sh -s email=你的邮箱",
     nginx_config_test_failed: "nginx -t 配置检查失败：已回滚到原证书，请先修复 Nginx 配置",
@@ -63,7 +63,11 @@ function friendlyError(error: unknown): string {
     cancelled: "操作已取消",
   };
   const text = texts[code] ?? raw;
-  return detail ? `${text}（${detail.slice(-260)}）` : text;
+  if (!detail) return text;
+  // Remote output is kept front-and-back: a slice of the tail alone used to cut
+  // "Error add txt for domain:..." down to just the record name.
+  const shown = detail.length > 700 ? `${detail.slice(0, 460)} … ${detail.slice(-200)}` : detail;
+  return `${text}（${shown}）`;
 }
 
 function certState(c: Cert): { key:CertFilter; label:string; cls:string } {
@@ -102,6 +106,7 @@ function parseDomainInput(text:string):string[] {
 export function CertificatesPage() {
   const [config,setConfig]=useState<Config|null>(null); const [email,setEmail]=useState("yamatu@qq.com");
   const [token,setToken]=useState(""); const [account,setAccount]=useState(""); const [autoRenew,setAutoRenew]=useState(true); const [autoRenewDays,setAutoRenewDays]=useState(30);
+  const [globalKey,setGlobalKey]=useState(""); const [cfEmail,setCfEmail]=useState(""); const [caServer,setCaServer]=useState("letsencrypt"); const [useServerCreds,setUseServerCreds]=useState(false);
   const [machines,setMachines]=useState<Machine[]>([]); const [stats,setStats]=useState<Record<number,MachineStat>>({});
   const [selected,setSelected]=useState<number>(0); const [certs,setCerts]=useState<Cert[]>([]); const [filter,setFilter]=useState<CertFilter>("all");
   const [scanInfoById,setScanInfoById]=useState<Record<number,ScanInfo>>({});
@@ -110,7 +115,7 @@ export function CertificatesPage() {
   const [issueCertPath,setIssueCertPath]=useState(""); const [issueKeyPath,setIssueKeyPath]=useState("");
   const [issueForce,setIssueForce]=useState(true); const [issueReload,setIssueReload]=useState(true);
   const [issuing,setIssuing]=useState(false); const [issueResult,setIssueResult]=useState<IssueResult|null>(null);
-  const loadConfig=()=>apiFetch<Config>("/api/certificates/config").then(c=>{setConfig(c);setEmail(c.email||"yamatu@qq.com");setAccount(c.cfAccountId||"");setAutoRenew(c.autoRenew);setAutoRenewDays(c.autoRenewDays||30);}).catch(e=>setNotice({kind:"err",text:`配置加载失败：${friendlyError(e)}`}));
+  const loadConfig=()=>apiFetch<Config>("/api/certificates/config").then(c=>{setConfig(c);setEmail(c.email||"yamatu@qq.com");setAccount(c.cfAccountId||"");setCfEmail(c.cfEmail||"");setCaServer(c.caServer||"letsencrypt");setUseServerCreds(!!c.useServerCreds);setAutoRenew(c.autoRenew);setAutoRenewDays(c.autoRenewDays||30);}).catch(e=>setNotice({kind:"err",text:`配置加载失败：${friendlyError(e)}`}));
   const loadSummary=()=>apiFetch<{summary:MachineStat[]}>("/api/certificates/summary").then(r=>setStats(Object.fromEntries(r.summary.map(s=>[s.machineId,s])))).catch(()=>{});
   const loadMachines=()=>apiFetch<{machines:Machine[]}>("/api/certificates/machines").then(r=>setMachines(r.machines));
   useEffect(()=>{ void Promise.all([loadConfig(),loadMachines(),loadSummary()]); },[]);
@@ -119,7 +124,7 @@ export function CertificatesPage() {
   // Jump straight into the first configured machine instead of an empty table.
   useEffect(()=>{ if(!selected&&machines.length) setSelected(machines[0].id); },[machines,selected]);
 
-  async function save(){setBusy(true);setNotice(null);try{await apiFetch("/api/certificates/config",{method:"PUT",body:JSON.stringify({email,cfToken:token||undefined,cfAccountId:account,autoRenew,autoRenewDays})});setToken("");await loadConfig();setNotice({kind:"ok",text:"Cloudflare 配置已保存"});}catch(e){setNotice({kind:"err",text:`保存失败：${friendlyError(e)}`});}finally{setBusy(false)}}
+  async function save(){setBusy(true);setNotice(null);try{await apiFetch("/api/certificates/config",{method:"PUT",body:JSON.stringify({email,cfToken:token||undefined,cfAccountId:account,cfKey:globalKey||undefined,cfEmail,caServer,useServerCreds,autoRenew,autoRenewDays})});setToken("");setGlobalKey("");await loadConfig();setNotice({kind:"ok",text:"配置已保存"});}catch(e){setNotice({kind:"err",text:`保存失败：${friendlyError(e)}`});}finally{setBusy(false)}}
 
   // Runs one scan and refreshes everything it touches; throws so batch scanning
   // can collect per-machine failures. When silent, errors skip the notice area.
@@ -190,8 +195,17 @@ export function CertificatesPage() {
 
   return <div className="grid gap-4">
     <div className="yaws-card p-5"><div className="mb-1 text-lg font-extrabold">证书自动管理</div><div className="mb-4 text-xs text-white/45">通过已配置 SSH 扫描服务器上的证书，也可在下方手填域名直接申请；续期前会执行 nginx -t，失败不会重载。</div>
-      <div className="grid gap-3 md:grid-cols-3"><div><div className="mb-1 text-xs text-white/50">注册邮箱</div><input className="yaws-input" value={email} onChange={e=>setEmail(e.target.value)} /></div><div><div className="mb-1 text-xs text-white/50">CF_Token {config?.cfTokenMasked?`(${config.cfTokenMasked})`:""}</div><input className="yaws-input" type="password" placeholder="留空表示不修改" value={token} onChange={e=>setToken(e.target.value)} /></div><div><div className="mb-1 text-xs text-white/50">CF_Account_ID</div><input className="yaws-input" value={account} onChange={e=>setAccount(e.target.value)} /></div></div>
-      <div className="mt-3 flex flex-wrap items-center gap-4"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={autoRenew} onChange={e=>setAutoRenew(e.target.checked)}/> 启用到期前自动续期</label><label className="text-xs text-white/50">提前 <input className="yaws-input inline-block w-20" type="number" min={1} max={90} value={autoRenewDays} onChange={e=>setAutoRenewDays(Number(e.target.value))}/> 天</label><button className="yaws-btn-primary" disabled={busy} onClick={save}>保存配置</button><span className={`text-xs ${config?.configured?"text-emerald-300":"text-amber-300"}`}>{config?.configured?"Cloudflare DNS 已配置":"尚未配置 CF_Token / CF_Account_ID"}</span></div>
+      <div className="grid gap-3 md:grid-cols-3"><div><div className="mb-1 text-xs text-white/50">注册邮箱</div><input className="yaws-input" value={email} onChange={e=>setEmail(e.target.value)} /></div><div><div className="mb-1 text-xs text-white/50">CF_Token {config?.cfTokenMasked?`(${config.cfTokenMasked})`:""}</div><input className="yaws-input" type="password" placeholder="留空表示不修改" value={token} onChange={e=>setToken(e.target.value)} disabled={useServerCreds} /><div className="mt-1 text-xs text-white/35">Cloudflare API Token（40 位左右）</div></div><div><div className="mb-1 text-xs text-white/50">CF_Account_ID</div><input className="yaws-input" value={account} onChange={e=>setAccount(e.target.value)} disabled={useServerCreds} /></div></div>
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <div><div className="mb-1 text-xs text-white/50">CF_Key（可选，Global API Key）{config?.cfKeyMasked?`(${config.cfKeyMasked})`:""}</div><input className="yaws-input" type="password" placeholder="37 位十六进制，留空表示不修改" value={globalKey} onChange={e=>setGlobalKey(e.target.value)} disabled={useServerCreds} /></div>
+        <div><div className="mb-1 text-xs text-white/50">CF_Email（配合 CF_Key）</div><input className="yaws-input" placeholder="Cloudflare 登录邮箱" value={cfEmail} onChange={e=>setCfEmail(e.target.value)} disabled={useServerCreds} /></div>
+        <div><div className="mb-1 text-xs text-white/50">签发机构（--server）</div><input className="yaws-input" placeholder="letsencrypt" value={caServer} onChange={e=>setCaServer(e.target.value)} /></div>
+      </div>
+      <label className="mt-3 flex items-start gap-2 text-sm" title="勾选后不再向远程传任何 CF_* 变量，acme.sh 会使用服务器上 ~/.acme.sh/account.conf 里已保存的凭据">
+        <input type="checkbox" className="mt-1" checked={useServerCreds} onChange={e=>setUseServerCreds(e.target.checked)} />
+        <span>使用服务器上 acme.sh 已保存的凭据（等同于手动执行 <span className="font-mono text-xs">./acme.sh --issue --dns dns_cf -d 域名</span>，不再传上面的 Token）</span>
+      </label>
+      <div className="mt-3 flex flex-wrap items-center gap-4"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={autoRenew} onChange={e=>setAutoRenew(e.target.checked)}/> 启用到期前自动续期</label><label className="text-xs text-white/50">提前 <input className="yaws-input inline-block w-20" type="number" min={1} max={90} value={autoRenewDays} onChange={e=>setAutoRenewDays(Number(e.target.value))}/> 天</label><button className="yaws-btn-primary" disabled={busy} onClick={save}>保存配置</button><span className={`text-xs ${config?.configured?"text-emerald-300":"text-amber-300"}`}>{config?.configured?`已配置（${useServerCreds?"使用服务器凭据":config?.cfTokenMasked?"API Token":"Global API Key"}）`:"尚未配置 CF_Token / CF_Key，也未选择使用服务器凭据"}</span></div>
     </div>
 
     <div className="yaws-card p-5">
@@ -237,8 +251,9 @@ export function CertificatesPage() {
         <label className="flex items-center gap-2 text-sm" title="acme.sh --force：即使证书未到期也重新签发"><input type="checkbox" checked={issueForce} onChange={e=>setIssueForce(e.target.checked)}/> 强制重新签发（--force）</label>
         <label className="flex items-center gap-2 text-sm" title="签发后执行 nginx -t 校验配置，失败会回滚证书；若服务器上没有 nginx 可取消勾选"><input type="checkbox" checked={issueReload} onChange={e=>setIssueReload(e.target.checked)}/> 校验 Nginx 配置并重载</label>
         <button className="yaws-btn-primary" disabled={issuing||!config?.configured||!issueTarget||!parsedDomains.length} title={!config?.configured?"请先在上方配置 Cloudflare":!issueTarget?"请先选择服务器":""} onClick={issue}>{issuing?"申请中…（DNS 验证约需 1-2 分钟）":"申请证书"}</button>
-        <span className="text-xs text-white/40">同一域名重复申请会触发 Let&apos;s Encrypt 速率限制（每周 5 次），不需要时可取消强制签发</span>
+        <span className="text-xs text-white/40">签发机构：{config?.caServer||"letsencrypt"} · 凭据：{config?.useServerCreds?"服务器上 acme.sh 已保存的":config?.cfTokenMasked?"CF_Token":"CF_Key"}</span>
       </div>
+      <div className="mt-2 text-xs text-white/40">同一域名重复申请会触发 Let&apos;s Encrypt 速率限制（每周 5 次），不需要时可取消强制签发。失败时页面会显示 acme.sh 与 Cloudflare API 的真实报错。</div>
       {issueResult?<div className={`mt-3 whitespace-pre-line text-xs ${issueResult.ok?"yaws-alert-success":"yaws-alert-error"}`}>{issueResult.text}</div>:null}
     </div>
 

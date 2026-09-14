@@ -532,3 +532,122 @@ test("manual issuance rejects bad domains, identical paths and missing Cloudflar
     assert.equal(noCf.body.error, "cloudflare_not_configured");
   } finally { close(); }
 });
+
+// The complaint that started this: "证书续期失败（main: _acme-challenge.www...）"
+// — a DNS-01 failure whose real cause (the Cloudflare API response) never
+// reached the operator, because only the last 1000 chars of remote output were
+// kept and acme.sh hides the API response behind --debug.
+test("a failing DNS challenge reports the acme.sh/Cloudflare cause, not a truncated tail", async () => {
+  const token = "CfApiToken0123456789abcdefghijklmnopqrstuv";
+  const acmeOutput = [
+    `[Mon Sep 14 04:28:41 AM BST 2026] Using CA: https://acme-v02.api.letsencrypt.org/directory`,
+    `[Mon Sep 14 04:28:41 AM BST 2026] Single domain='www.kindanddivine.com'`,
+    `[Mon Sep 14 04:28:42 AM BST 2026] response='{"success":false,"errors":[{"code":9109,"message":"Invalid access token"}]}'`,
+    `[Mon Sep 14 04:28:42 AM BST 2026] Error add txt for domain:_acme-challenge.www.kindanddivine.com`,
+    `[Mon Sep 14 04:28:42 AM BST 2026] Please add '--debug' or '--log' to see more information.`,
+    `[Mon Sep 14 04:28:42 AM BST 2026] See: https://github.com/acmesh-official/acme.sh/wiki/How-to-debug-acme.sh`,
+    ...Array.from({ length: 60 }, (_, i) => `[Mon Sep 14 04:28:43 AM BST 2026] padding line ${i} bearer ${token}`),
+    "acme_issue_failed",
+  ].join("\n");
+  const commands = [];
+  const { ssh, port, fp } = await startSsh({
+    onExec: (accept, _reject, info) => {
+      commands.push(info.command);
+      const stream = accept();
+      stream.write(acmeOutput);
+      stream.stderr.write(acmeOutput);
+      stream.exit(1);
+      stream.end();
+    },
+  });
+  const { api, close } = await startApi({ ssh, port, fp, certEnv: { ...cfEnv, CF_Token: token } });
+  try {
+    const res = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: ["www.kindanddivine.com"] }) });
+    assert.equal(res.status, 502);
+    const command = commands.find((c) => c.includes("--issue"));
+    // The Cloudflare API error must survive...
+    assert.match(res.body.error, /9109|Invalid access token/);
+    assert.match(res.body.error, /Error add txt for domain:_acme-challenge\.www\.kindanddivine\.com/);
+    // ...the useless hint must not...
+    assert.doesNotMatch(res.body.error, /How-to-debug/);
+    // ...and the token must never appear in the message or the database.
+    assert.doesNotMatch(res.body.error, /CfApiToken0123456789/);
+    // --debug 2 is what makes dns_cf print "response=...", and the CA is explicit.
+    assert.match(command, /--debug 2 --issue --dns dns_cf/);
+    assert.match(command, /--server/);
+    assert.match(command, /letsencrypt/);
+  } finally { close(); }
+});
+
+test("the server's own acme.sh credentials can be used instead of the stored token", async () => {
+  const commands = [];
+  const { ssh, port, fp } = await startSsh({
+    onExec: (accept, _reject, info) => {
+      commands.push(info.command);
+      const stream = accept();
+      if (info.command.includes("openssl x509")) stream.write("subject=CN=mail.vcocncspare.com\nnotAfter=Jan 01 00:00:00 2030 GMT\n");
+      stream.exit(0);
+      stream.end();
+    },
+  });
+  // No CF_Token anywhere: this is the "I renew by hand with ./acme.sh" setup.
+  const { api, close, db } = await startApi({ ssh, port, fp, certEnv: {} });
+  try {
+    const off = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: ["mail.vcocncspare.com"] }) });
+    assert.equal(off.status, 409);
+    assert.equal(off.body.error, "cloudflare_not_configured");
+
+    const saved = await api("/config", { method: "PUT", body: JSON.stringify({ useServerCreds: true }) });
+    assert.equal(saved.status, 200);
+    const conf = await api("/config");
+    assert.equal(conf.body.useServerCreds, true);
+    assert.equal(conf.body.configured, true);
+
+    const res = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: ["mail.vcocncspare.com"] }) });
+    assert.equal(res.status, 200);
+    const command = commands.find((c) => c.includes("--issue"));
+    assert.match(command, /--issue --dns dns_cf/);
+    // acme.sh must fall back to ~/.acme.sh/account.conf, so no CF_* may be passed.
+    assert.doesNotMatch(command, /CF_Token=|CF_Account_ID=|CF_Key=|CF_Email=/);
+    // ...and no empty assignment either, which would blank out its saved config.
+    assert.match(command, /then sh -c /);
+    // The token/Global-Key fields stay empty while this mode is on.
+    const conf2 = await api("/config");
+    assert.equal(conf2.body.cfTokenMasked, "");
+    assert.doesNotMatch(JSON.stringify(conf2.body), /cf-token-fixture/);
+    assert.ok(db.prepare("SELECT 1 FROM certificate_inventory WHERE machine_id=1").get());
+  } finally { close(); }
+});
+
+test("a stored Global API Key and a custom CA server are used as configured", async () => {
+  const commands = [];
+  const { ssh, port, fp } = await startSsh({
+    onExec: (accept, _reject, info) => {
+      commands.push(info.command);
+      const stream = accept();
+      if (info.command.includes("openssl x509")) stream.write("subject=CN=a.example.com\nnotAfter=Jan 01 00:00:00 2030 GMT\n");
+      stream.exit(0);
+      stream.end();
+    },
+  });
+  const { api, close } = await startApi({ ssh, port, fp, certEnv: {} });
+  try {
+    const cfgRes = await api("/config", { method: "PUT", body: JSON.stringify({ cfKey: "0123456789abcdef0123456789abcdef01234", cfEmail: "ops@example.com", caServer: "zerossl" }) });
+    assert.equal(cfgRes.status, 200);
+    const conf = await api("/config");
+    assert.equal(conf.body.configured, true);
+    assert.equal(conf.body.caServer, "zerossl");
+    assert.match(conf.body.cfKeyMasked, /^0123\.\.\./);
+    // The key itself must never come back out.
+    assert.doesNotMatch(JSON.stringify(conf.body), /0123456789abcdef0123456789abcdef01234/);
+
+    const res = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: ["a.example.com"] }) });
+    assert.equal(res.status, 200);
+    const command = commands.find((c) => c.includes("--issue"));
+    assert.match(command, /CF_Key=/);
+    assert.match(command, /CF_Email=/);
+    assert.match(command, /--server/);
+    assert.match(command, /zerossl/);
+    assert.doesNotMatch(command, /CF_Token=/);
+  } finally { close(); }
+});

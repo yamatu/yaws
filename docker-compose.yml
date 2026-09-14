@@ -23,6 +23,10 @@ services:
       CERT_EMAIL: "${CERT_EMAIL:-yamatu@qq.com}"
       CF_Token: "${CF_Token:-}"
       CF_Account_ID: "${CF_Account_ID:-}"
+      CF_Key: "${CF_Key:-}"
+      CF_Email: "${CF_Email:-}"
+      CERT_CA_SERVER: "${CERT_CA_SERVER:-letsencrypt}"
+      CERT_USE_SERVER_CREDS: "${CERT_USE_SERVER_CREDS:-}"
     volumes:
       - ./data:/app/data
     restart: unless-stopped

@@ -237,12 +237,15 @@ npm run dev
 - `AGENT_RELEASE_BASE_URL`：Release 下载前缀（可选，默认 `releases/latest/download`）
 - `CERT_EMAIL`：ACME 注册邮箱，默认 `yamatu@qq.com`
 - `CF_Token` / `CF_Account_ID`：Cloudflare DNS API 凭据（也可以在后台“证书管理”中配置；数据库配置会加密保存）
+- `CF_Key` / `CF_Email`：旧的 Global API Key 方式（可选，与 `CF_Token` 二选一）
+- `CERT_CA_SERVER`：传给 `acme.sh --server` 的签发机构，默认 `letsencrypt`（acme.sh 3.x 自带默认是 ZeroSSL，会额外要求 EAB 注册，因此这里显式指定）
+- `CERT_USE_SERVER_CREDS`：设为 `server` 时完全不向远程传 `CF_*`，由服务器上 acme.sh 自己的 `~/.acme.sh/account.conf` 提供凭据
 
 ## 证书自动管理
 
 登录后台后打开“证书管理”：
 
-1. 配置 `CF_Token` 和 `CF_Account_ID`，注册邮箱默认 `yamatu@qq.com`。Token 只需要 Zone DNS 编辑权限，建议使用 Cloudflare API Token，不要使用 Global API Key。
+1. 配置 `CF_Token`（建议）或 `CF_Key` + `CF_Email`，注册邮箱默认 `yamatu@qq.com`。API Token 只需要对应 Zone 的 `DNS:Edit` 权限。若你一直是用 `./acme.sh --issue --dns dns_cf -d 域名` 手动续期的，勾选“使用服务器上 acme.sh 已保存的凭据”，程序就不会传 `CF_*`，完全等同于手动命令的行为。
 2. 页面会直接列出所有已配置 SSH 的机器，可以单台扫描，也可以点“扫描全部”批量扫描。只有已完成 SSH 主机指纹信任的机器可以扫描。
 3. 扫描时先执行 `nginx -T` 读取正在生效的 `ssl_certificate` / `ssl_certificate_key` 指令，因此宝塔等面板写入自定义路径的证书也能被发现；同时会搜索 Nginx、Let’s Encrypt、Apache、OpenSSL、宝塔/1Panel、`/etc/pki`、`/root/.acme.sh` 等常见目录。SSH 用户不是 root 时会自动尝试免密 `sudo -n`。
 4. 证书域名优先取 SAN，没有 SAN 时回退到证书 CN；匹配的私钥按同目录 `privkey.pem` / `key.pem`、同名 `.key` / `.pem` 顺序查找，并排除“把证书本身当成私钥”的情况。扫描结果会显示候选文件数、可解析证书数、openssl 与 nginx 是否存在，便于排查权限问题。
@@ -250,6 +253,15 @@ npm run dev
 6. 开启“到期前自动续期”后，主控每 6 小时检查一次，默认在到期前 30 天处理。只处理扫描到且存在私钥路径的证书；因进程重启而中断的续期会在下次启动时恢复为可重试状态。
 7. 没有可扫描到的证书时，可以在“手动申请证书”里直接输入域名（每行一个，也可用空格/逗号分隔，支持 `*.example.com` 通配符），选择服务器后点“申请证书”。系统会执行 `acme.sh --issue --dns dns_cf -d ...` 申请，并把 `fullchain` / `key` 安装到你指定（或默认 `/etc/nginx/ssl/<域名>.pem|.key`）的路径，签发完成后重新读取证书真实域名与到期时间写入清单，因此手动申请的证书同样会被自动续期。已扫描到的同域名证书路径会被自动沿用。
 8. 手动申请默认勾选“强制重新签发（--force）”和“校验 Nginx 配置并重载”。同一域名重复申请会触发 Let’s Encrypt 速率限制（每周 5 次），仅需安装到新路径时可取消强制签发。若 Nginx 站点尚未指向新路径，签发成功后会给出提醒——程序不会自动改写站点配置。
+
+申请/续期失败会返回 acme.sh 的**真实原因**：命令带 `--debug 2` 执行，因此 `dns_cf` 会把 Cloudflare API 的返回（如 `{"code":9109,"message":"Invalid access token"}`）打进输出，程序只保留 `Error add txt for domain:...`、`response=...` 这类关键行，去掉 “Please add '--debug'” 之类的无用提示，并在写回错误信息前把 `CF_Token` / `CF_Key` 全部替换成 `***`。所以页面括号里的内容可以直接照抄到手动命令里复现。
+
+DNS 验证失败（`acme_issue_failed`）常见原因：
+
+- 目标域名的 Zone 不在当前 Token 所属账号下，或 Token 只授权了别的域名。Token 需要在**目标域名所在 Zone** 上拥有 `DNS:Edit`。
+- 误把 Global API Key（37 位十六进制）填进了 `CF_Token`：Cloudflare 会返回 `9109 Invalid access token`。请改填到 `CF_Key` 并补上 `CF_Email`。
+- 手动 `./acme.sh` 能成功而本程序失败：说明凭据来源不同。手动命令读取的是 `~/.acme.sh/account.conf`，本程序默认传后台保存的 `CF_Token`（环境变量优先于 account.conf）。此时勾选“使用服务器上 acme.sh 已保存的凭据”即可。
+- 解析商不是 Cloudflare，或域名有多级子域需要 `_acme-challenge` CNAME 委派。
 
 远程脚本兼容性：续期/申请脚本会被登录 shell 解析，Debian/Ubuntu（`dash`）与 Alpine（`busybox ash`）不支持 bash 专用的 `trap ... ERR`，所以脚本不再依赖 ERR trap，而是每一步用 `|| fail <code>` 自行处理并在失败时调用 `restore` 回滚备份；`acme.sh` 的 `--install-cert` 会先按默认方式尝试，失败后用 `--ecc` 重试，以兼容 ECC/RSA 两种证书目录。
 
@@ -260,8 +272,8 @@ npm run dev
 - `ssh_auth_failed`：用户名或密码/私钥不正确（密码能解密但服务器拒绝登录）。
 - `ssh_host_untrusted` / `ssh_host_key_changed`：需要先在机器详情完成或重新做指纹信任。
 - `ssh_exec_failed`：该账户不允许远程命令（可能被限制为仅 SFTP），或连接在握手后立即断开。
-- `certificate_scan_failed` / `certificate_renew_failed` / `certificate_issue_failed`：括号内是远程命令的 stderr 末尾，可直接用来定位（例如 `acme.sh` 未安装、DNS API 报错）。
-- `acme_issue_failed`：域名未解析、Cloudflare Token 缺少该域名的 Zone `DNS:Edit` 权限、或触发 Let’s Encrypt 速率限制。
+- `certificate_scan_failed` / `certificate_renew_failed` / `certificate_issue_failed`：括号内是远程命令的关键报错行（已截断为前后各一段，不会再从中间截断），可直接用来定位。
+- `acme_issue_failed`：DNS-01 验证未通过。括号里会带上 Cloudflare API 的原始返回，例如 `9109 Invalid access token`（Token 无效或权限不足）、`record already exists`、`81044`（记录已存在）等。
 - `acme_install_failed`：证书已签发但写入目标路径失败，通常是 SSH 用户既不是 root 也无法免密 `sudo -n`；`cert_dir_failed` / `backup_failed` 同理。
 - `nginx_config_test_failed`：`nginx -t` 未通过，此时已自动回滚到原证书，请先修复配置。
 - `bad_domain` / `bad_cert_path` / `bad_key_path` / `cert_and_key_same_path`：请求参数校验失败，不会执行任何远程命令。
@@ -273,6 +285,12 @@ npm run dev
 CERT_EMAIL=yamatu@qq.com
 CF_Token=your-cloudflare-api-token
 CF_Account_ID=your-cloudflare-account-id
+# 可选：旧的 Global API Key 方式
+CF_Key=
+CF_Email=
+CERT_CA_SERVER=letsencrypt
+# 可选：改为使用服务器上 acme.sh 已保存的凭据
+CERT_USE_SERVER_CREDS=
 ```
 
 Cloudflare API Token 至少需要对应 Zone 的 `DNS:Edit` 权限。不要把真实 Token 提交到 Git；后台保存的 Token 使用 `AGENT_KEY_SECRET` 加密。

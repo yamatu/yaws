@@ -6,10 +6,17 @@ import { connectMachine, credentialState, shellQuote, sshMachine, WorkspaceError
 import { decryptText, encryptText } from "./crypto.js";
 
 const DEFAULT_EMAIL = "yamatu@qq.com";
+// acme.sh 3.x defaults to ZeroSSL, which needs EAB registration and a separate
+// account; the product promises Let's Encrypt, so ask for it explicitly.
+const DEFAULT_CA_SERVER = "letsencrypt";
 const CertConfig = z.object({
   email: z.string().email().max(320).optional(),
   cfToken: z.string().max(512).optional(),
   cfAccountId: z.string().max(128).optional(),
+  cfKey: z.string().max(512).optional(),
+  cfEmail: z.string().email().max(320).optional(),
+  caServer: z.string().max(200).optional(),
+  useServerCreds: z.boolean().optional(),
   autoRenew: z.boolean().optional(),
   autoRenewDays: z.number().int().min(1).max(90).optional(),
 });
@@ -23,6 +30,29 @@ const IssueBody = z.object({
 });
 
 type ExecResult = { stdout: string; stderr: string; code: number };
+
+// acme.sh can only explain a DNS-01 failure in its `--debug 2` output, and the
+// real cause (the Cloudflare API response) sits between hundreds of log lines —
+// a plain tail used to cut the sentence that identified the problem in half.
+// Keep the lines that carry the cause, drop the "add --debug" boilerplate and
+// never leak the API token back to the UI.
+function acmeFailureDetail(result: ExecResult, secrets: Array<string | undefined>) {
+  const noise = /(?:Please add '--debug'|How-to-debug|acmesh-official\/acme\.sh\/wiki)/i;
+  const useful = /(?:success"\s*:\s*(?:false|true)|"errors"|"messages"|response=|Error |error:|_err |Error,|invalid|forbidden|unauthorized|not found|rate ?limit|too many|CNAME|DNS problem|challenge|timed? ?out|code\s*\d)/i;
+  const lines: string[] = [];
+  for (const raw of `${result.stdout}\n${result.stderr}`.split(/\r?\n/)) {
+    const line = raw.replace(/^\[[^\]]{8,70}\]\s*/, "").trim();
+    if (!line || noise.test(line)) continue;
+    if (useful.test(line) && !lines.includes(line)) lines.push(line);
+    if (lines.length >= 12) break;
+  }
+  let detail = lines.length ? lines.join(" | ") : `${result.stderr || result.stdout}`.replace(/\s+/g, " ").trim().slice(-400);
+  for (const secret of secrets) {
+    if (secret && secret.length >= 8) detail = detail.split(secret).join("***");
+  }
+  detail = detail.replace(/(Bearer\s+)[A-Za-z0-9_\-.]{10,}/gi, "$1***").replace(/(X-Auth-(?:Key|Email):\s*)\S+/gi, "$1***");
+  return detail.slice(0, 1500);
+}
 
 // Anything that is not a WorkspaceError reaches the global handler as a bare
 // "internal_error", which tells the operator nothing. Always carry the cause.
@@ -78,12 +108,29 @@ function save(db: Db, key: string, value: string) {
   db.prepare(`INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`).run(key, value, Date.now());
 }
 function del(db: Db, key: string) { db.prepare("DELETE FROM settings WHERE key=?").run(key); }
-function cfg(db: Db, secret: string, env: { CERT_EMAIL?: string; CF_Token?: string; CF_Account_ID?: string }) {
+type CertSettings = { CERT_EMAIL?: string; CF_Token?: string; CF_Account_ID?: string; CF_Key?: string; CF_Email?: string; CERT_CA_SERVER?: string; CERT_USE_SERVER_CREDS?: string };
+
+function cfg(db: Db, secret: string, env: CertSettings) {
   const tokenEnc = setting(db, "cert_cf_token_enc");
+  const keyEnc = setting(db, "cert_cf_key_enc");
+  // "server" means: pass no Cloudflare variables at all and let acme.sh use the
+  // credentials an operator already stored in its own account.conf, which is how
+  // a manual `./acme.sh --issue --dns dns_cf -d ...` run behaves.
+  const credSource = setting(db, "cert_cf_cred_source") || env.CERT_USE_SERVER_CREDS || "ui";
+  const cfToken = tokenEnc ? tryDecrypt(tokenEnc, secret) || env.CF_Token || "" : env.CF_Token || "";
+  const cfKey = keyEnc ? tryDecrypt(keyEnc, secret) || env.CF_Key || "" : env.CF_Key || "";
+  const useServerCreds = credSource === "server";
   return {
     email: setting(db, "cert_email") || env.CERT_EMAIL || DEFAULT_EMAIL,
-    cfToken: tokenEnc ? tryDecrypt(tokenEnc, secret) || env.CF_Token || "" : env.CF_Token || "",
-    cfAccountId: setting(db, "cert_cf_account_id") || env.CF_Account_ID || "",
+    cfToken: useServerCreds ? "" : cfToken,
+    cfAccountId: useServerCreds ? "" : setting(db, "cert_cf_account_id") || env.CF_Account_ID || "",
+    cfKey: useServerCreds ? "" : cfKey,
+    cfEmail: useServerCreds ? "" : setting(db, "cert_cf_email") || env.CF_Email || "",
+    caServer: setting(db, "cert_ca_server") || env.CERT_CA_SERVER || DEFAULT_CA_SERVER,
+    useServerCreds,
+    hasToken: !!cfToken,
+    hasKey: !!cfKey,
+    configured: useServerCreds || !!(cfToken || cfKey),
     autoRenew: setting(db, "cert_auto_renew") !== "0",
     autoRenewDays: Math.max(1, Number(setting(db, "cert_auto_renew_days") || "30")),
   };
@@ -251,14 +298,30 @@ function normalizePath(value: string, kind: "cert" | "key") {
   return path;
 }
 
-type AcmeTarget = { domains: string[]; certPath: string; keyPath: string; email: string; force: boolean; reload: boolean };
+type AcmeTarget = { domains: string[]; certPath: string; keyPath: string; email: string; force: boolean; reload: boolean; caServer: string };
 
-// The renewal script must run as root, or through `sudo -n` when the SSH user is
-// not root but has passwordless sudo (the usual way to reach /etc/nginx). The
-// Cloudflare credentials are passed explicitly so acme.sh sees them either way.
-function withCredentials(script: string, c: { cfToken: string; cfAccountId: string }) {
-  const envPrefix = `CF_Token=${shellQuote(c.cfToken)} CF_Account_ID=${shellQuote(c.cfAccountId)}`;
-  return `if [ "$(id -u)" = "0" ]; then ${envPrefix} sh -c ${shellQuote(script)}; elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then sudo -n env ${envPrefix} sh -c ${shellQuote(script)}; else ${envPrefix} sh -c ${shellQuote(script)}; fi`;
+type Credentials = { cfToken: string; cfAccountId: string; cfKey: string; cfEmail: string };
+
+// Only the credentials the operator actually configured are exported; acme.sh
+// then falls back to whatever it stored in its own account.conf for the rest.
+function credentialVars(c: Credentials) {
+  const vars: string[] = [];
+  if (c.cfToken) vars.push(`CF_Token=${shellQuote(c.cfToken)}`);
+  if (c.cfAccountId) vars.push(`CF_Account_ID=${shellQuote(c.cfAccountId)}`);
+  // Legacy Global API Key authentication: acme.sh wants the key plus the address.
+  if (c.cfKey) vars.push(`CF_Key=${shellQuote(c.cfKey)}`);
+  if (c.cfEmail) vars.push(`CF_Email=${shellQuote(c.cfEmail)}`);
+  return vars;
+}
+
+// The script must run as root, or through `sudo -n` when the SSH user is not
+// root but has passwordless sudo (the usual way to reach /etc/nginx).
+function withCredentials(script: string, c: Credentials) {
+  const vars = credentialVars(c);
+  const prefix = vars.length ? `${vars.join(" ")} ` : "";
+  const direct = `${prefix}sh -c ${shellQuote(script)}`;
+  const viaSudo = vars.length ? `sudo -n env ${prefix}sh -c ${shellQuote(script)}` : `sudo -n sh -c ${shellQuote(script)}`;
+  return `if [ "$(id -u)" = "0" ]; then ${direct}; elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then ${viaSudo}; else ${direct}; fi`;
 }
 
 function asRoot(command: string) {
@@ -300,7 +363,9 @@ export function acmeScript(t: AcmeTarget) {
     'if [ -f "$KEY" ]; then cp -p "$KEY" "$KEY_BAK" || fail 1 backup_failed; fi',
     'ACME=""; for c in "$(command -v acme.sh 2>/dev/null || true)" "${HOME:-/root}/.acme.sh/acme.sh" /root/.acme.sh/acme.sh; do if [ -n "$c" ] && [ -x "$c" ]; then ACME="$c"; break; fi; done',
     '[ -n "$ACME" ] || fail 127 acme.sh_not_found',
-    `"$ACME" --issue --dns dns_cf ${args} --accountemail ${shellQuote(t.email)}${t.force ? " --force" : ""} || fail 1 acme_issue_failed`,
+    // `--debug 2` is what makes dns_cf print the Cloudflare API response, so a
+    // failed challenge can explain itself instead of only pointing at --debug.
+    `"$ACME" --debug 2 --issue --dns dns_cf ${args} --accountemail ${shellQuote(t.email)}${t.caServer ? ` --server ${shellQuote(t.caServer)}` : ""}${t.force ? " --force" : ""} || fail 1 acme_issue_failed`,
     // acme.sh stores ECC and RSA certificates in different directories and
     // --install-cert needs the matching flag, so retry once with --ecc.
     `"$ACME" ${install} || "$ACME" --ecc ${install} || fail 1 acme_install_failed`,
@@ -321,22 +386,22 @@ function storeCertificate(db: Db, machineId: number, row: { path: string; keyPat
 }
 
 // Shared by the renew endpoint, the scheduler and the manual issue form.
-async function runAcme(client: any, t: AcmeTarget, c: { cfToken: string; cfAccountId: string }, failureCode: string) {
+async function runAcme(client: any, t: AcmeTarget, c: Credentials, failureCode: string) {
   const result = await exec(client, withCredentials(acmeScript(t), c), 300_000);
   if (result.code !== 0)
-    throw new WorkspaceError(502, `${failureCode}:${(result.stderr || result.stdout).slice(-1000)}`);
+    throw new WorkspaceError(502, `${failureCode}:${acmeFailureDetail(result, [c.cfToken, c.cfKey])}`);
   const probe = await exec(client, certProbeCommand(t.certPath), 30_000);
   return parseCertText(probe.stdout);
 }
 
-async function renewStoredCertificate(db: Db, secret: string, env: { CERT_EMAIL?: string; CF_Token?: string; CF_Account_ID?: string }, id: number, row: any) {
+async function renewStoredCertificate(db: Db, secret: string, env: CertSettings, id: number, row: any) {
   const c = cfg(db, secret, env);
-  if (!c.cfToken || !c.cfAccountId) throw new WorkspaceError(409, "cloudflare_not_configured");
+  if (!c.configured) throw new WorkspaceError(409, "cloudflare_not_configured");
   const domains: string[] = parseDomains(row.domains);
   if (!domains.length || !row.key_path) throw new WorkspaceError(409, "certificate_key_not_found");
   const client = await connectMachine(db, id, secret);
   try {
-    const issued = await runAcme(client, { domains, certPath: row.cert_path, keyPath: row.key_path, email: c.email, force: false, reload: true }, c, "certificate_renew_failed");
+    const issued = await runAcme(client, { domains, certPath: row.cert_path, keyPath: row.key_path, email: c.email, force: false, reload: true, caServer: c.caServer }, c, "certificate_renew_failed");
     // acme.sh installed a new file, so the stored expiry is stale until the next
     // scan; re-read it now or the scheduler keeps re-renewing the same row.
     db.prepare("UPDATE certificate_inventory SET last_renew_at=?,last_error='',status='ok',expires_at=COALESCE(?,expires_at),domains=? WHERE id=?")
@@ -344,11 +409,22 @@ async function renewStoredCertificate(db: Db, secret: string, env: { CERT_EMAIL?
   } finally { client.end(); }
 }
 
-export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: string; CF_Token?: string; CF_Account_ID?: string }) {
+export function certificateRouter(db: Db, secret: string, env: CertSettings) {
   const router = Router();
   router.get("/config", (_req, res) => {
     const c = cfg(db, secret, env);
-    res.json({ email: c.email, cfTokenMasked: c.cfToken ? `${c.cfToken.slice(0, 4)}...${c.cfToken.slice(-4)}` : "", cfAccountId: c.cfAccountId, autoRenew: c.autoRenew, autoRenewDays: c.autoRenewDays, configured: !!(c.cfToken && c.cfAccountId) });
+    res.json({
+      email: c.email,
+      cfTokenMasked: c.cfToken ? `${c.cfToken.slice(0, 4)}...${c.cfToken.slice(-4)}` : "",
+      cfAccountId: c.cfAccountId,
+      cfKeyMasked: c.cfKey ? `${c.cfKey.slice(0, 4)}...${c.cfKey.slice(-4)}` : "",
+      cfEmail: c.cfEmail,
+      caServer: c.caServer,
+      useServerCreds: c.useServerCreds,
+      autoRenew: c.autoRenew,
+      autoRenewDays: c.autoRenewDays,
+      configured: c.configured,
+    });
   });
   router.put("/config", (req, res) => {
     const body = CertConfig.safeParse(req.body);
@@ -356,6 +432,10 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
     if (body.data.email !== undefined) save(db, "cert_email", body.data.email.trim() || DEFAULT_EMAIL);
     if (body.data.cfAccountId !== undefined) body.data.cfAccountId.trim() ? save(db, "cert_cf_account_id", body.data.cfAccountId.trim()) : del(db, "cert_cf_account_id");
     if (body.data.cfToken !== undefined) body.data.cfToken.trim() ? save(db, "cert_cf_token_enc", encryptText(body.data.cfToken.trim(), secret)) : del(db, "cert_cf_token_enc");
+    if (body.data.cfKey !== undefined) body.data.cfKey.trim() ? save(db, "cert_cf_key_enc", encryptText(body.data.cfKey.trim(), secret)) : del(db, "cert_cf_key_enc");
+    if (body.data.cfEmail !== undefined) body.data.cfEmail.trim() ? save(db, "cert_cf_email", body.data.cfEmail.trim()) : del(db, "cert_cf_email");
+    if (body.data.caServer !== undefined) body.data.caServer.trim() ? save(db, "cert_ca_server", body.data.caServer.trim()) : del(db, "cert_ca_server");
+    if (body.data.useServerCreds !== undefined) save(db, "cert_cf_cred_source", body.data.useServerCreds ? "server" : "ui");
     if (body.data.autoRenew !== undefined) save(db, "cert_auto_renew", body.data.autoRenew ? "1" : "0");
     if (body.data.autoRenewDays !== undefined) save(db, "cert_auto_renew_days", String(body.data.autoRenewDays));
     res.json({ ok: true });
@@ -438,12 +518,12 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
       const certPath = normalizePath(parsed.data.certPath || known?.cert_path || `/etc/nginx/ssl/${base}.pem`, "cert");
       const keyPath = normalizePath(parsed.data.keyPath || known?.key_path || `/etc/nginx/ssl/${base}.key`, "key");
       if (certPath === keyPath) throw new WorkspaceError(400, "cert_and_key_same_path");
-      // Validated before the Cloudflare check so bad input is reported as such
-      // even when the API token is not configured yet.
-      if (!c.cfToken || !c.cfAccountId) throw new WorkspaceError(409, "cloudflare_not_configured");
+      // Validated before the credential check so bad input is reported as such
+      // even when no API token is configured yet.
+      if (!c.configured) throw new WorkspaceError(409, "cloudflare_not_configured");
       const reload = parsed.data.reload !== false;
       client = await connectMachine(db, id, secret);
-      const issued = await runAcme(client, { domains, certPath, keyPath, email: c.email, force: parsed.data.force !== false, reload }, c, "certificate_issue_failed");
+      const issued = await runAcme(client, { domains, certPath, keyPath, email: c.email, force: parsed.data.force !== false, reload, caServer: c.caServer }, c, "certificate_issue_failed");
       const finalDomains = issued.domains.length ? issued.domains : domains;
       storeCertificate(db, id, { path: certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, issuer: "" });
       res.json({ ok: true, certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, reloaded: reload });
@@ -461,7 +541,7 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
   return router;
 }
 
-export function startCertificateScheduler(db: Db, secret: string, env: { CERT_EMAIL?: string; CF_Token?: string; CF_Account_ID?: string }) {
+export function startCertificateScheduler(db: Db, secret: string, env: CertSettings) {
   // Renewals only ever run inside this process, so a row still marked
   // 'renewing' at boot belongs to a previous run that was killed mid-flight.
   // Without reclaiming it the scheduler would skip that certificate forever.
@@ -470,6 +550,9 @@ export function startCertificateScheduler(db: Db, secret: string, env: { CERT_EM
     try {
       const c = cfg(db, secret, env);
       if (c.autoRenew === false) return;
+      // Without credentials every row would fail and be marked 'error'; skip the
+      // tick and let the operator finish configuring instead.
+      if (!c.configured) return;
       const days = c.autoRenewDays;
       const rows = db.prepare("SELECT id, machine_id as machineId, expires_at as expiresAt FROM certificate_inventory WHERE expires_at IS NOT NULL AND expires_at <= ? AND status != 'renewing'").all(Date.now() + days * 86400000) as Array<{id:number;machineId:number;expiresAt:number}>;
       for (const row of rows) {
