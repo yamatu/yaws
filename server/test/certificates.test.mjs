@@ -5,16 +5,21 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import ssh2 from "ssh2";
 import { openDb } from "../dist/db.js";
 import { hashPassword, signToken } from "../dist/auth.js";
 import { authMiddleware } from "../dist/http.js";
 import { encryptText } from "../dist/crypto.js";
-import { certificateRouter, startCertificateScheduler } from "../dist/certificates.js";
+import { acmeScript, certificateRouter, startCertificateScheduler } from "../dist/certificates.js";
 import { fingerprint } from "../dist/ssh.js";
 
 const secret = "certificate-test-secret-0123456789";
+const cfEnv = { CERT_EMAIL: "yamatu@qq.com", CF_Token: "cf-token-fixture", CF_Account_ID: "cf-account-fixture" };
 const password = "Certificate-Test-Password";
 
 const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
@@ -71,7 +76,7 @@ async function startSsh({ onExec }) {
   return { ssh, port, fp };
 }
 
-async function startApi({ ssh, port, fp, passwordEnc = encryptText(password, secret) }) {
+async function startApi({ ssh, port, fp, passwordEnc = encryptText(password, secret), certEnv = {} }) {
   const db = openDb(":memory:");
   db.prepare("INSERT INTO users(id,username,password_hash,role,created_at) VALUES (1,'admin',?,'admin',0)").run(await hashPassword(password));
   db.prepare(
@@ -84,7 +89,7 @@ async function startApi({ ssh, port, fp, passwordEnc = encryptText(password, sec
   app.use(express.json({ limit: "1mb" }));
   app.use("/api/certificates", authMiddleware(secret, db), (req, res, next) =>
     req.user?.role === "admin" ? next() : res.status(403).json({ error: "forbidden" }),
-    certificateRouter(db, secret, {}));
+    certificateRouter(db, secret, certEnv));
   // Mirror the production terminal handler: anything unnamed becomes 500.
   app.use((err, _req, res, _next) => {
     if (err?.status) return res.status(err.status).json({ error: err.message });
@@ -334,5 +339,196 @@ test("an unexpected exception names itself instead of returning internal_error",
     assert.match(res.body.error, /^certificate_scan_failed:/);
     assert.match(res.body.error, /no such table/i);
     assert.notEqual(res.body.error, "internal_error");
+  } finally { close(); }
+});
+
+// The renewal/issue script is executed by the remote login shell, which on
+// Debian/Ubuntu and Alpine is dash or busybox ash. `trap ... ERR` is a bash
+// extension there and aborts the script with "trap: ERR: bad trap" before
+// acme.sh ever runs, so every step must check its own status instead.
+function assertPortableScript(command) {
+  assert.doesNotMatch(command, /trap\s+[^;]*\bERR\b/, "script must not use a bash-only ERR trap");
+  assert.doesNotMatch(command, /\bset -e\b/, "script must not rely on set -e");
+  assert.match(command, /\|\| fail 1 /, "each step must report its own failure");
+}
+
+test("the renewal script is portable under a POSIX shell and has no bad trap", async (t) => {
+  const commands = [];
+  const { ssh, port, fp } = await startSsh({
+    onExec: (accept, _reject, info) => {
+      commands.push(info.command);
+      const stream = accept();
+      stream.write(scanOutput());
+      stream.exit(0);
+      stream.end();
+    },
+  });
+  const { api, db, close } = await startApi({ ssh, port, fp, certEnv: cfEnv });
+  try {
+    await api("/machine/1/scan", { method: "POST", body: "{}" });
+    const id = db.prepare("SELECT id FROM certificate_inventory LIMIT 1").get().id;
+    const res = await api("/machine/1/renew", { method: "POST", body: JSON.stringify({ id }) });
+    assert.equal(res.status, 200);
+    const issue = commands.find((c) => c.includes("--issue"));
+    assert.ok(issue, "the renewal must actually invoke acme.sh");
+    // This is the exact failure the operator hit: "证书续期失败（trap: ERR: bad trap）".
+    assert.doesNotMatch(issue, /bad trap/);
+    assertPortableScript(issue);
+    assert.match(issue, /restore\(\)\{/);
+    assert.match(issue, /fail\(\)\{ rc=\$1; shift; restore/);
+  } finally { close(); }
+
+  // Run the very script we ship through a real dash/ash. `trap x ERR` there dies
+  // with "bad trap" before acme.sh runs; that is what broke every renewal.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yaws-acme-")).split("\\").join("/");
+  try {
+    const cert = `${dir}/a.pem`;
+    const key = `${dir}/a.key`;
+    fs.writeFileSync(cert, "ORIGINAL-CERT");
+    fs.writeFileSync(key, "ORIGINAL-KEY");
+    const bin = `${dir}/bin`;
+    fs.mkdirSync(bin);
+    const marker = `${dir}/ran`;
+    // acme.sh stub: clobbers the installed pair, then fails the way a DNS-01
+    // validation error does. The original files must come back afterwards.
+    fs.writeFileSync(`${bin}/acme.sh`, `#!/bin/sh
+: > '${marker}'
+printf CLOBBERED > '${cert}'
+printf CLOBBERED > '${key}'
+exit 1
+`);
+    fs.chmodSync(`${bin}/acme.sh`, 0o755);
+    const script = acmeScript({ domains: ["a.example.com"], certPath: cert, keyPath: key, email: "yamatu@qq.com", force: true, reload: true });
+
+    const parsed = spawnSync("dash", ["-n"], { input: script, encoding: "utf8" });
+    if (parsed.error?.code === "ENOENT") return t.skip("dash not installed");
+    assert.equal(parsed.status, 0, `script must parse under dash: ${parsed.stderr}`);
+
+    // The old implementation, for contrast: this is the reported error verbatim.
+    const broken = spawnSync("dash", [], { input: ["restore(){ :; }", "trap restore ERR", "echo reached", ""].join(String.fromCharCode(10)), encoding: "utf8" });
+    assert.match(broken.stderr, /bad trap/);
+
+    const run = spawnSync("dash", [], {
+      input: script,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CF_Token: "token", CF_Account_ID: "account" },
+    });
+    assert.ok(fs.existsSync(marker), `the acme.sh stub never ran: ${run.stderr}`);
+    assert.notEqual(run.status, 0, "a failed issuance must fail");
+    assert.doesNotMatch(run.stderr, /bad trap/);
+    assert.match(run.stderr, /acme_issue_failed/);
+    assert.equal(fs.readFileSync(cert, "utf8"), "ORIGINAL-CERT", "the previous certificate must be restored");
+    assert.equal(fs.readFileSync(key, "utf8"), "ORIGINAL-KEY", "the previous key must be restored");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("manual issuance installs to the given paths and records the certificate", async () => {
+  const commands = [];
+  const { ssh, port, fp } = await startSsh({
+    onExec: (accept, _reject, info) => {
+      commands.push(info.command);
+      const stream = accept();
+      if (info.command.includes("openssl x509")) {
+        // Post-issue probe: report what acme.sh actually wrote.
+        stream.write([
+          "notAfter=Jan 01 00:00:00 2030 GMT",
+          "issuer=CN=R3,O=Let's Encrypt",
+          "subject=CN=shop.example.com",
+          "X509v3 Subject Alternative Name:",
+          "    DNS:shop.example.com, DNS:www.shop.example.com",
+          "",
+        ].join("\n"));
+      }
+      stream.exit(0);
+      stream.end();
+    },
+  });
+  const { api, db, close } = await startApi({ ssh, port, fp, certEnv: cfEnv });
+  try {
+    const res = await api("/machine/1/issue", {
+      method: "POST",
+      body: JSON.stringify({ domains: ["shop.example.com", "www.shop.example.com"], certPath: "/etc/nginx/ssl/shop.pem", keyPath: "/etc/nginx/ssl/shop.key" }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.certPath, "/etc/nginx/ssl/shop.pem");
+    assert.equal(res.body.reloaded, true);
+    assert.deepEqual(res.body.domains, ["shop.example.com", "www.shop.example.com"]);
+
+    const issue = commands.find((c) => c.includes("--issue"));
+    assertPortableScript(issue);
+    // The script is nested inside `sh -c '...'`, so match the payload not the quoting.
+    assert.match(issue, /--issue --dns dns_cf/);
+    assert.match(issue, /shop\.example\.com/);
+    assert.match(issue, /www\.shop\.example\.com/);
+    assert.match(issue, /--accountemail/);
+    assert.match(issue, /yamatu@qq\.com/);
+    assert.match(issue, /--force/);
+    assert.match(issue, /--fullchain-file "\$CERT"/);
+    assert.match(issue, /nginx -t \|\| fail 1 nginx_config_test_failed/);
+    assert.match(issue, /CF_Token=/);
+
+    // The issued certificate lands in the inventory so it also auto-renews.
+    const row = db.prepare("SELECT cert_path, key_path, domains, expires_at, status FROM certificate_inventory WHERE machine_id=1").get();
+    assert.equal(row.cert_path, "/etc/nginx/ssl/shop.pem");
+    assert.equal(row.key_path, "/etc/nginx/ssl/shop.key");
+    assert.deepEqual(JSON.parse(row.domains), ["shop.example.com", "www.shop.example.com"]);
+    assert.equal(row.expires_at, Date.parse("Jan 01 00:00:00 2030 GMT"));
+    assert.equal(row.status, "ok");
+
+    const list = await api("/machine/1");
+    assert.equal(list.body.certificates.length, 1);
+    assert.deepEqual(list.body.certificates[0].domains, ["shop.example.com", "www.shop.example.com"]);
+  } finally { close(); }
+});
+
+test("manual issuance defaults the path to /etc/nginx/ssl and skips nginx when reload is off", async () => {
+  const commands = [];
+  const { ssh, port, fp } = await startSsh({
+    onExec: (accept, _reject, info) => {
+      commands.push(info.command);
+      const stream = accept();
+      if (info.command.includes("openssl x509")) stream.write("subject=CN=*.wild.example.com\nnotAfter=Jan 01 00:00:00 2030 GMT\n");
+      stream.exit(0);
+      stream.end();
+    },
+  });
+  const { api, close } = await startApi({ ssh, port, fp, certEnv: cfEnv });
+  try {
+    const res = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: ["*.wild.example.com"], reload: false }) });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.certPath, "/etc/nginx/ssl/wild.example.com.pem");
+    assert.equal(res.body.keyPath, "/etc/nginx/ssl/wild.example.com.key");
+    assert.equal(res.body.reloaded, false);
+    const issue = commands.find((c) => c.includes("--issue"));
+    assert.doesNotMatch(issue, /nginx -t/);
+    assert.doesNotMatch(issue, /systemctl reload nginx/);
+  } finally { close(); }
+});
+
+test("manual issuance rejects bad domains, identical paths and missing Cloudflare config", async () => {
+  const { ssh, port, fp } = await startSsh({ onExec: (accept) => { const s = accept(); s.exit(0); s.end(); } });
+  const { api, close } = await startApi({ ssh, port, fp });
+  try {
+    // A shell metacharacter in a domain must never reach the remote command.
+    const bad = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: ["good.example.com; rm -rf /"] }) });
+    assert.equal(bad.status, 400);
+    assert.match(bad.body.error, /^bad_domain:/);
+
+    const empty = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: [] }) });
+    assert.equal(empty.status, 400);
+
+    const same = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: ["a.example.com"], certPath: "/etc/nginx/ssl/x.pem", keyPath: "/etc/nginx/ssl/x.pem" }) });
+    assert.equal(same.status, 400);
+    assert.equal(same.body.error, "cert_and_key_same_path");
+
+    const relative = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: ["a.example.com"], certPath: "relative.pem" }) });
+    assert.equal(relative.status, 400);
+    assert.equal(relative.body.error, "bad_cert_path");
+
+    const noCf = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: ["a.example.com"] }) });
+    assert.equal(noCf.status, 409);
+    assert.equal(noCf.body.error, "cloudflare_not_configured");
   } finally { close(); }
 });

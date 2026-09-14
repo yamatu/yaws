@@ -248,6 +248,10 @@ npm run dev
 4. 证书域名优先取 SAN，没有 SAN 时回退到证书 CN；匹配的私钥按同目录 `privkey.pem` / `key.pem`、同名 `.key` / `.pem` 顺序查找，并排除“把证书本身当成私钥”的情况。扫描结果会显示候选文件数、可解析证书数、openssl 与 nginx 是否存在，便于排查权限问题。
 5. 点击证书对应的“申请/更新”前，服务器需要安装 `acme.sh`（`PATH`、`~/.acme.sh/acme.sh`、`/root/.acme.sh/acme.sh` 任一位置），且 SSH 用户需要能够执行 `nginx -t` 并 reload Nginx。非 root 用户在有免密 sudo 时会通过 `sudo -n` 执行。更新会先备份当前证书/私钥，申请成功后执行 `nginx -t`，校验失败自动恢复备份，并回写新的到期时间。
 6. 开启“到期前自动续期”后，主控每 6 小时检查一次，默认在到期前 30 天处理。只处理扫描到且存在私钥路径的证书；因进程重启而中断的续期会在下次启动时恢复为可重试状态。
+7. 没有可扫描到的证书时，可以在“手动申请证书”里直接输入域名（每行一个，也可用空格/逗号分隔，支持 `*.example.com` 通配符），选择服务器后点“申请证书”。系统会执行 `acme.sh --issue --dns dns_cf -d ...` 申请，并把 `fullchain` / `key` 安装到你指定（或默认 `/etc/nginx/ssl/<域名>.pem|.key`）的路径，签发完成后重新读取证书真实域名与到期时间写入清单，因此手动申请的证书同样会被自动续期。已扫描到的同域名证书路径会被自动沿用。
+8. 手动申请默认勾选“强制重新签发（--force）”和“校验 Nginx 配置并重载”。同一域名重复申请会触发 Let’s Encrypt 速率限制（每周 5 次），仅需安装到新路径时可取消强制签发。若 Nginx 站点尚未指向新路径，签发成功后会给出提醒——程序不会自动改写站点配置。
+
+远程脚本兼容性：续期/申请脚本会被登录 shell 解析，Debian/Ubuntu（`dash`）与 Alpine（`busybox ash`）不支持 bash 专用的 `trap ... ERR`，所以脚本不再依赖 ERR trap，而是每一步用 `|| fail <code>` 自行处理并在失败时调用 `restore` 回滚备份；`acme.sh` 的 `--install-cert` 会先按默认方式尝试，失败后用 `--ecc` 重试，以兼容 ECC/RSA 两种证书目录。
 
 错误码与常见原因：
 
@@ -256,7 +260,11 @@ npm run dev
 - `ssh_auth_failed`：用户名或密码/私钥不正确（密码能解密但服务器拒绝登录）。
 - `ssh_host_untrusted` / `ssh_host_key_changed`：需要先在机器详情完成或重新做指纹信任。
 - `ssh_exec_failed`：该账户不允许远程命令（可能被限制为仅 SFTP），或连接在握手后立即断开。
-- `certificate_scan_failed` / `certificate_renew_failed`：括号内是远程命令的 stderr 末尾，可直接用来定位（例如 `acme.sh` 未安装、DNS API 报错）。
+- `certificate_scan_failed` / `certificate_renew_failed` / `certificate_issue_failed`：括号内是远程命令的 stderr 末尾，可直接用来定位（例如 `acme.sh` 未安装、DNS API 报错）。
+- `acme_issue_failed`：域名未解析、Cloudflare Token 缺少该域名的 Zone `DNS:Edit` 权限、或触发 Let’s Encrypt 速率限制。
+- `acme_install_failed`：证书已签发但写入目标路径失败，通常是 SSH 用户既不是 root 也无法免密 `sudo -n`；`cert_dir_failed` / `backup_failed` 同理。
+- `nginx_config_test_failed`：`nginx -t` 未通过，此时已自动回滚到原证书，请先修复配置。
+- `bad_domain` / `bad_cert_path` / `bad_key_path` / `cert_and_key_same_path`：请求参数校验失败，不会执行任何远程命令。
 - `certificate_internal_error`：本应不会出现；如果看到请把括号内容反馈，服务端日志同时会打印 `[certificates] ...` 的完整堆栈。
 
 环境变量示例：

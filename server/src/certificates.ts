@@ -14,6 +14,13 @@ const CertConfig = z.object({
   autoRenewDays: z.number().int().min(1).max(90).optional(),
 });
 const RenewBody = z.object({ id: z.number().int().positive() });
+const IssueBody = z.object({
+  domains: z.array(z.string().max(253)).min(1).max(30),
+  certPath: z.string().max(900).optional(),
+  keyPath: z.string().max(900).optional(),
+  force: z.boolean().optional(),
+  reload: z.boolean().optional(),
+});
 
 type ExecResult = { stdout: string; stderr: string; code: number };
 
@@ -103,6 +110,15 @@ function parseDomains(value: unknown): string[] {
   } catch { return []; }
 }
 
+// The CN/SAN extraction is shared by the scanner and by the post-issue probe.
+function certDomains(subject: string, sans: string) {
+  const domains = new Set<string>();
+  const cn = subject.replace(/^subject=/, "").match(/(?:^|,)CN=([^,]+)/)?.[1];
+  if (cn) domains.add(cn.trim());
+  for (const m of sans.matchAll(/DNS:([^,\s]+)/g)) domains.add(m[1].trim());
+  return [...domains];
+}
+
 function parseScan(text: string) {
   const rows: any[] = [];
   const info: Record<string, string> = {};
@@ -118,12 +134,7 @@ function parseScan(text: string) {
     // one truncated row from failing the entire scan with a TypeError.
     if (fields.length < 5) continue;
     const [path = "", end = "", issuer = "", subject = "", sans = "", keyPath = ""] = fields.map(decodeRemoteField);
-    const domains = new Set<string>();
-    // The scanner emits "subject=<RFC2253>", so the prefix must go before the
-    // CN search; without this a SAN-less certificate was silently dropped.
-    const cn = subject.replace(/^subject=/, "").match(/(?:^|,)CN=([^,]+)/)?.[1];
-    if (cn) domains.add(cn.trim());
-    for (const m of sans.matchAll(/DNS:([^,\s]+)/g)) domains.add(m[1].trim());
+    const domains = new Set(certDomains(subject, sans));
     const expiresAt = Date.parse(end.replace(/^notAfter=/, "").trim());
     if (path && domains.size) rows.push({ path, keyPath, domains: [...domains], expiresAt: Number.isFinite(expiresAt) ? expiresAt : null, issuer: issuer.replace(/^issuer=/, "").trim() });
   }
@@ -217,6 +228,107 @@ info skipped "$skipped"
 `;
 const SCAN = `sh -c ${shellQuote(SCAN_SCRIPT)}`;
 
+const DOMAIN_RE = /^(\*\.)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+
+function normalizeDomains(input: string[]): string[] {
+  const seen = new Set<string>();
+  for (const raw of input) {
+    const domain = raw.trim().toLowerCase().replace(/\.$/, "");
+    if (!domain) continue;
+    if (domain.length > 253 || !DOMAIN_RE.test(domain))
+      throw new WorkspaceError(400, `bad_domain:${raw.trim().slice(0, 80)}`);
+    seen.add(domain);
+  }
+  if (!seen.size) throw new WorkspaceError(400, "bad_domain:empty");
+  if (seen.size > 30) throw new WorkspaceError(400, "too_many_domains");
+  return [...seen];
+}
+
+function normalizePath(value: string, kind: "cert" | "key") {
+  const path = value.trim();
+  if (!path.startsWith("/") || path.length > 900 || /[\n\r\0]/.test(path) || path.endsWith("/"))
+    throw new WorkspaceError(400, `bad_${kind}_path`);
+  return path;
+}
+
+type AcmeTarget = { domains: string[]; certPath: string; keyPath: string; email: string; force: boolean; reload: boolean };
+
+// The renewal script must run as root, or through `sudo -n` when the SSH user is
+// not root but has passwordless sudo (the usual way to reach /etc/nginx). The
+// Cloudflare credentials are passed explicitly so acme.sh sees them either way.
+function withCredentials(script: string, c: { cfToken: string; cfAccountId: string }) {
+  const envPrefix = `CF_Token=${shellQuote(c.cfToken)} CF_Account_ID=${shellQuote(c.cfAccountId)}`;
+  return `if [ "$(id -u)" = "0" ]; then ${envPrefix} sh -c ${shellQuote(script)}; elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then sudo -n env ${envPrefix} sh -c ${shellQuote(script)}; else ${envPrefix} sh -c ${shellQuote(script)}; fi`;
+}
+
+function asRoot(command: string) {
+  return `if [ "$(id -u)" = "0" ]; then ${command}; elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then sudo -n ${command}; else ${command}; fi`;
+}
+
+// Read back what is actually on disk: the issued certificate decides the domains
+// and expiry, not the request body.
+function certProbeCommand(certPath: string) {
+  return asRoot(`openssl x509 -in ${shellQuote(certPath)} -noout -enddate -subject -nameopt RFC2253 -ext subjectAltName 2>/dev/null`);
+}
+
+function parseCertText(text: string) {
+  const end = /^notAfter=(.*)$/m.exec(text)?.[1]?.trim() ?? "";
+  const subject = /^subject=(.*)$/m.exec(text)?.[1]?.trim() ?? "";
+  const sans = [...text.matchAll(/DNS:[^,\s]+/g)].map((m) => m[0]).join(",");
+  const expiresAt = Date.parse(end);
+  return { domains: certDomains(subject, sans), expiresAt: Number.isFinite(expiresAt) ? expiresAt : null };
+}
+
+// `trap ... ERR` is a bash extension: on Debian/Ubuntu and Alpine `sh` is dash or
+// busybox ash, where it fails with "bad trap" before anything else runs. Every
+// step therefore checks its own exit status instead of relying on the trap.
+// Exported so the tests can parse/execute it with a real POSIX shell.
+export function acmeScript(t: AcmeTarget) {
+  const args = t.domains.map((d) => `-d ${shellQuote(d)}`).join(" ");
+  const install = `--install-cert -d ${shellQuote(t.domains[0])} --key-file "$KEY" --fullchain-file "$CERT" --reloadcmd "true"`;
+  const lines = [
+    `CERT=${shellQuote(t.certPath)}`,
+    `KEY=${shellQuote(t.keyPath)}`,
+    'CERT_BAK="$CERT.yaws-before-issue"',
+    'KEY_BAK="$KEY.yaws-before-issue"',
+    'restore(){ if [ -f "$CERT_BAK" ]; then cp -p "$CERT_BAK" "$CERT"; fi; if [ -f "$KEY_BAK" ]; then cp -p "$KEY_BAK" "$KEY"; fi; return 0; }',
+    'fail(){ rc=$1; shift; restore; echo "$*" >&2; exit "$rc"; }',
+    // A brand-new path has no directory yet, and only a pre-existing pair needs
+    // a backup, so both steps are conditional.
+    'mkdir -p "$(dirname "$CERT")" "$(dirname "$KEY")" || fail 1 cert_dir_failed',
+    'if [ -f "$CERT" ]; then cp -p "$CERT" "$CERT_BAK" || fail 1 backup_failed; fi',
+    'if [ -f "$KEY" ]; then cp -p "$KEY" "$KEY_BAK" || fail 1 backup_failed; fi',
+    'ACME=""; for c in "$(command -v acme.sh 2>/dev/null || true)" "${HOME:-/root}/.acme.sh/acme.sh" /root/.acme.sh/acme.sh; do if [ -n "$c" ] && [ -x "$c" ]; then ACME="$c"; break; fi; done',
+    '[ -n "$ACME" ] || fail 127 acme.sh_not_found',
+    `"$ACME" --issue --dns dns_cf ${args} --accountemail ${shellQuote(t.email)}${t.force ? " --force" : ""} || fail 1 acme_issue_failed`,
+    // acme.sh stores ECC and RSA certificates in different directories and
+    // --install-cert needs the matching flag, so retry once with --ecc.
+    `"$ACME" ${install} || "$ACME" --ecc ${install} || fail 1 acme_install_failed`,
+  ];
+  if (t.reload) {
+    lines.push(
+      "nginx -t || fail 1 nginx_config_test_failed",
+      "systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1 || fail 1 nginx_reload_failed",
+    );
+  }
+  lines.push('rm -f "$CERT_BAK" "$KEY_BAK"');
+  return lines.join("\n");
+}
+
+function storeCertificate(db: Db, machineId: number, row: { path: string; keyPath: string; domains: string[]; expiresAt: number | null; issuer: string }) {
+  db.prepare(`INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(machine_id,cert_path) DO UPDATE SET key_path=excluded.key_path,domains=excluded.domains,expires_at=excluded.expires_at,issuer=excluded.issuer,last_scan_at=excluded.last_scan_at,status=excluded.status,last_error=''`)
+    .run(machineId, row.path, row.keyPath, JSON.stringify(row.domains), row.expiresAt, row.issuer, Date.now(), row.expiresAt && row.expiresAt < Date.now() ? "expired" : "ok", "");
+}
+
+// Shared by the renew endpoint, the scheduler and the manual issue form.
+async function runAcme(client: any, t: AcmeTarget, c: { cfToken: string; cfAccountId: string }, failureCode: string) {
+  const result = await exec(client, withCredentials(acmeScript(t), c), 300_000);
+  if (result.code !== 0)
+    throw new WorkspaceError(502, `${failureCode}:${(result.stderr || result.stdout).slice(-1000)}`);
+  const probe = await exec(client, certProbeCommand(t.certPath), 30_000);
+  return parseCertText(probe.stdout);
+}
+
 async function renewStoredCertificate(db: Db, secret: string, env: { CERT_EMAIL?: string; CF_Token?: string; CF_Account_ID?: string }, id: number, row: any) {
   const c = cfg(db, secret, env);
   if (!c.cfToken || !c.cfAccountId) throw new WorkspaceError(409, "cloudflare_not_configured");
@@ -224,36 +336,11 @@ async function renewStoredCertificate(db: Db, secret: string, env: { CERT_EMAIL?
   if (!domains.length || !row.key_path) throw new WorkspaceError(409, "certificate_key_not_found");
   const client = await connectMachine(db, id, secret);
   try {
-    const args = domains.map((d) => `-d ${shellQuote(d)}`).join(" ");
-    const certBackup = `${row.cert_path}.yaws-before-renew`; const keyBackup = `${row.key_path}.yaws-before-renew`;
-    // The remote script runs as root, or through `sudo -n` when the SSH user is
-    // not root but has passwordless sudo (the usual way to reach /etc/nginx).
-    // The original pair is kept in an ERR trap so a failing `nginx -t` never
-    // leaves Nginx pointing at a broken certificate.
-    const script = [
-      "set -e",
-      `cp -p ${shellQuote(row.cert_path)} ${shellQuote(certBackup)}`,
-      `cp -p ${shellQuote(row.key_path)} ${shellQuote(keyBackup)}`,
-      `restore(){ cp -p ${shellQuote(certBackup)} ${shellQuote(row.cert_path)}; cp -p ${shellQuote(keyBackup)} ${shellQuote(row.key_path)}; }`,
-      "trap restore ERR",
-      'ACME=""; for c in "$(command -v acme.sh 2>/dev/null)" "$HOME/.acme.sh/acme.sh" /root/.acme.sh/acme.sh; do if [ -n "$c" ] && [ -x "$c" ]; then ACME="$c"; break; fi; done',
-      '[ -n "$ACME" ] || { echo acme.sh_not_found >&2; exit 127; }',
-      `"$ACME" --issue --dns dns_cf ${args} --accountemail ${shellQuote(c.email)}`,
-      `"$ACME" --install-cert -d ${shellQuote(domains[0])} --key-file ${shellQuote(row.key_path)} --fullchain-file ${shellQuote(row.cert_path)} --reloadcmd "true"`,
-      "nginx -t",
-      "systemctl reload nginx 2>/dev/null || nginx -s reload",
-      "trap - ERR",
-      `rm -f ${shellQuote(certBackup)} ${shellQuote(keyBackup)}`,
-    ].join("\n");
-    const envPrefix = `CF_Token=${shellQuote(c.cfToken)} CF_Account_ID=${shellQuote(c.cfAccountId)}`;
-    const command = `if [ "$(id -u)" = "0" ]; then ${envPrefix} sh -c ${shellQuote(script)}; elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then sudo -n env ${envPrefix} sh -c ${shellQuote(script)}; else ${envPrefix} sh -c ${shellQuote(script)}; fi`;
-    const result = await exec(client, command);
-    if (result.code !== 0) throw new WorkspaceError(502, `certificate_renew_failed:${(result.stderr || result.stdout).slice(-1000)}`);
+    const issued = await runAcme(client, { domains, certPath: row.cert_path, keyPath: row.key_path, email: c.email, force: false, reload: true }, c, "certificate_renew_failed");
     // acme.sh installed a new file, so the stored expiry is stale until the next
     // scan; re-read it now or the scheduler keeps re-renewing the same row.
-    const fresh = await exec(client, `openssl x509 -in ${shellQuote(row.cert_path)} -noout -enddate 2>/dev/null | sed -n 's/^notAfter=//p'`);
-    const expiresAt = Date.parse(fresh.stdout.trim());
-    db.prepare("UPDATE certificate_inventory SET last_renew_at=?,last_error='',status='ok',expires_at=COALESCE(?,expires_at) WHERE id=?").run(Date.now(), Number.isFinite(expiresAt) ? expiresAt : null, row.id);
+    db.prepare("UPDATE certificate_inventory SET last_renew_at=?,last_error='',status='ok',expires_at=COALESCE(?,expires_at),domains=? WHERE id=?")
+      .run(Date.now(), issued.expiresAt, JSON.stringify(issued.domains.length ? issued.domains : domains), row.id);
   } finally { client.end(); }
 }
 
@@ -309,8 +396,7 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
       for (const r of rows) (seen.has(r.path) ? updated++ : added++);
       let pruned = 0;
       const tx = db.transaction(() => {
-        const up = db.prepare(`INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(machine_id,cert_path) DO UPDATE SET key_path=excluded.key_path,domains=excluded.domains,expires_at=excluded.expires_at,issuer=excluded.issuer,last_scan_at=excluded.last_scan_at,status=excluded.status,last_error=''`);
-        for (const r of rows) up.run(id, r.path, r.keyPath, JSON.stringify(r.domains), r.expiresAt, r.issuer, Date.now(), r.expiresAt && r.expiresAt < Date.now() ? "expired" : "ok", "");
+        for (const r of rows) storeCertificate(db, id, r);
         // Only a completed scan that still found certificates may remove
         // entries; a transient failure must not wipe the inventory.
         if (result.code === 0 && rows.length) {
@@ -332,6 +418,36 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
     if (!row) return res.status(404).json({ error: "certificate_not_found" });
     try { await renewStoredCertificate(db, secret, env, id, row); res.json({ ok: true, reloaded: true }); }
     catch (e) { db.prepare("UPDATE certificate_inventory SET status='error',last_error=? WHERE id=?").run(String(e instanceof Error ? e.message : e).slice(-2000), row.id); next(phaseError("renew", e)); }
+  });
+  // Manual issuance: the operator types the domains, Cloudflare DNS-01 does the
+  // validation, and the result is written into the same inventory the scanner
+  // fills so it shows up (and auto-renews) like any discovered certificate.
+  router.post("/machine/:machineId/issue", async (req, res, next) => {
+    const id = machineId(req);
+    const parsed = IssueBody.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "bad_request" });
+    let client: any;
+    try {
+      const c = cfg(db, secret, env);
+      const domains = normalizeDomains(parsed.data.domains);
+      // Reuse the paths of an already-tracked certificate covering one of these
+      // domains, so adding a SAN does not silently create a second file pair.
+      const known = (db.prepare("SELECT cert_path, key_path, domains FROM certificate_inventory WHERE machine_id=?").all(id) as any[])
+        .find((r) => parseDomains(r.domains).some((d) => domains.includes(d)));
+      const base = domains[0].replace(/^\*\./, "");
+      const certPath = normalizePath(parsed.data.certPath || known?.cert_path || `/etc/nginx/ssl/${base}.pem`, "cert");
+      const keyPath = normalizePath(parsed.data.keyPath || known?.key_path || `/etc/nginx/ssl/${base}.key`, "key");
+      if (certPath === keyPath) throw new WorkspaceError(400, "cert_and_key_same_path");
+      // Validated before the Cloudflare check so bad input is reported as such
+      // even when the API token is not configured yet.
+      if (!c.cfToken || !c.cfAccountId) throw new WorkspaceError(409, "cloudflare_not_configured");
+      const reload = parsed.data.reload !== false;
+      client = await connectMachine(db, id, secret);
+      const issued = await runAcme(client, { domains, certPath, keyPath, email: c.email, force: parsed.data.force !== false, reload }, c, "certificate_issue_failed");
+      const finalDomains = issued.domains.length ? issued.domains : domains;
+      storeCertificate(db, id, { path: certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, issuer: "" });
+      res.json({ ok: true, certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, reloaded: reload });
+    } catch (e) { next(phaseError("issue", e)); } finally { try { client?.end(); } catch {} }
   });
   // Last line of defence for this router: an unexpected exception (SQLite
   // failure, driver error, malformed payload) must name itself instead of
