@@ -51,13 +51,32 @@ browserTest(
     );
     await page.getByRole("button", { name: "确认并信任此指纹" }).click();
     await expect(page.locator(".workspace-header")).toContainText("已连接");
+    // The shortcut list starts folded; the resource panel keeps its space.
+    const shortcutToggle = page.locator(".shortcut-toggle");
+    await expect(shortcutToggle).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator(".shortcut-item")).toHaveCount(0);
+    await expect(page.locator(".shortcut-form")).toHaveCount(0);
+    await expect(page.locator(".stats-panel")).toBeVisible();
+    // Adding a command unfolds the list.
     await page.getByRole("button", { name: "添加指令", exact: true }).click();
+    await expect(shortcutToggle).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator(".shortcut-form")).toBeVisible();
     await page.getByLabel("指令名称").fill("健康检查");
     await page.getByLabel("指令内容").fill("uptime");
     await page
       .locator(".shortcut-form")
       .getByRole("button", { name: "保存", exact: true })
       .click();
+    await expect(page.locator(".shortcut-item")).toContainText("健康检查");
+    await expect(page.locator(".shortcut-count")).toContainText("1");
+    // Folding keeps the saved command and its count one click away.
+    await shortcutToggle.click();
+    await expect(shortcutToggle).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator(".shortcut-item")).toHaveCount(0);
+    await expect(page.locator(".shortcut-count")).toBeVisible();
+    await expect(page.locator(".shortcut-count")).toContainText("1");
+    await expect(page.locator(".stats-panel")).toBeVisible();
+    await shortcutToggle.click();
     await expect(page.locator(".shortcut-item")).toContainText("健康检查");
     page.on("dialog", (dialog) => dialog.accept());
     await page
