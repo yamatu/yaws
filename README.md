@@ -243,9 +243,11 @@ npm run dev
 登录后台后打开“证书管理”：
 
 1. 配置 `CF_Token` 和 `CF_Account_ID`，注册邮箱默认 `yamatu@qq.com`。Token 只需要 Zone DNS 编辑权限，建议使用 Cloudflare API Token，不要使用 Global API Key。
-2. 选择已经配置并完成 SSH 主机指纹信任的机器，点击“扫描证书”。系统会扫描 Nginx、Let’s Encrypt、OpenSSL、宝塔/1Panel 常见目录，并显示证书域名、路径和到期时间。
-3. 点击证书对应的“申请/更新”前，服务器需要安装 `acme.sh`，且 SSH 用户需要能够执行 `nginx -t`、读取证书和私钥路径并 reload Nginx。更新会先备份当前证书/私钥，申请成功后执行 `nginx -t`，校验失败自动恢复备份。
-4. 开启“到期前自动续期”后，主控每 6 小时检查一次，默认在到期前 30 天处理。只处理扫描到且存在私钥路径的证书。
+2. 页面会直接列出所有已配置 SSH 的机器，可以单台扫描，也可以点“扫描全部”批量扫描。只有已完成 SSH 主机指纹信任的机器可以扫描。
+3. 扫描时先执行 `nginx -T` 读取正在生效的 `ssl_certificate` / `ssl_certificate_key` 指令，因此宝塔等面板写入自定义路径的证书也能被发现；同时会搜索 Nginx、Let’s Encrypt、Apache、OpenSSL、宝塔/1Panel、`/etc/pki`、`/root/.acme.sh` 等常见目录。SSH 用户不是 root 时会自动尝试免密 `sudo -n`。
+4. 证书域名优先取 SAN，没有 SAN 时回退到证书 CN；匹配的私钥按同目录 `privkey.pem` / `key.pem`、同名 `.key` / `.pem` 顺序查找，并排除“把证书本身当成私钥”的情况。扫描结果会显示候选文件数、可解析证书数、openssl 与 nginx 是否存在，便于排查权限问题。
+5. 点击证书对应的“申请/更新”前，服务器需要安装 `acme.sh`（`PATH`、`~/.acme.sh/acme.sh`、`/root/.acme.sh/acme.sh` 任一位置），且 SSH 用户需要能够执行 `nginx -t` 并 reload Nginx。非 root 用户在有免密 sudo 时会通过 `sudo -n` 执行。更新会先备份当前证书/私钥，申请成功后执行 `nginx -t`，校验失败自动恢复备份，并回写新的到期时间。
+6. 开启“到期前自动续期”后，主控每 6 小时检查一次，默认在到期前 30 天处理。只处理扫描到且存在私钥路径的证书；因进程重启而中断的续期会在下次启动时恢复为可重试状态。
 
 环境变量示例：
 

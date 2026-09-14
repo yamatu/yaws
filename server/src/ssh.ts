@@ -112,7 +112,16 @@ export function connectMachine(
   secret: string,
   signal?: AbortSignal,
 ): Promise<Client> {
-  const config = sshConfig(sshMachine(db, id), secret);
+  let config: ConnectConfig;
+  try {
+    config = sshConfig(sshMachine(db, id), secret);
+  } catch (e) {
+    if (e instanceof WorkspaceError) throw e;
+    // The stored password/private key only fails to decrypt when the server
+    // secret changed or the ciphertext is damaged; surface that explicitly
+    // instead of letting it become a generic internal_error.
+    throw new WorkspaceError(409, "ssh_credentials_invalid");
+  }
   return new Promise((resolve, reject) => {
     const client = new Client();
     const abort = () => {
