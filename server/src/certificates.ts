@@ -144,7 +144,7 @@ EOF
 info candidates "$(wc -l < "$list" 2>/dev/null | tr -d ' ' )"
 info certificates "$certCount"
 `;
-const SCAN = `if command -v timeout >/dev/null 2>&1; then timeout 120s sh -c ${shellQuote(SCAN_SCRIPT)}; else sh -c ${shellQuote(SCAN_SCRIPT)}; fi`;
+const SCAN = `sh -c ${shellQuote(SCAN_SCRIPT)}`;
 
 async function renewStoredCertificate(db: Db, secret: string, env: { CERT_EMAIL?: string; CF_Token?: string; CF_Account_ID?: string }, id: number, row: any) {
   const c = cfg(db, secret, env);
@@ -178,7 +178,7 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
     if (body.data.autoRenewDays !== undefined) save(db, "cert_auto_renew_days", String(body.data.autoRenewDays));
     res.json({ ok: true });
   });
-  router.get("/machines", (_req, res) => res.json({ machines: db.prepare("SELECT id,name,ssh_host as sshHost,ssh_user as sshUser FROM machines WHERE deleted_at IS NULL ORDER BY sort_order,id").all() }));
+  router.get("/machines", (_req, res) => res.json({ machines: db.prepare("SELECT id,name,ssh_host as sshHost,ssh_port as sshPort,ssh_user as sshUser,ssh_auth_type as sshAuthType,CASE WHEN ssh_host_fingerprint != '' AND ssh_fingerprint_address = lower(trim(ssh_host)) || ':' || ssh_port THEN 1 ELSE 0 END as sshTrusted FROM machines WHERE deleted_at IS NULL AND trim(ssh_host) != '' AND trim(ssh_user) != '' ORDER BY sort_order,id").all() }));
   router.get("/machine/:machineId", (req, res) => {
     const id = machineId(req);
     res.json({ certificates: db.prepare("SELECT id,cert_path as certPath,key_path as keyPath,domains,expires_at as expiresAt,issuer,last_scan_at as lastScanAt,last_renew_at as lastRenewAt,status,last_error as lastError FROM certificate_inventory WHERE machine_id=? ORDER BY expires_at ASC").all(id).map((r: any) => ({ ...r, domains: JSON.parse(r.domains || "[]") })) });
@@ -187,7 +187,7 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
     const id = machineId(req); let client: any;
     try {
       client = await connectMachine(db, id, secret);
-      const result = await exec(client, `timeout 120s ${SCAN}`);
+      const result = await exec(client, `if command -v timeout >/dev/null 2>&1; then timeout 120s sh -c ${shellQuote(SCAN_SCRIPT)}; else sh -c ${shellQuote(SCAN_SCRIPT)}; fi`);
       client.end();
       if (result.code !== 0 && !result.stdout) throw new WorkspaceError(502, `certificate_scan_failed:${(result.stderr || "remote scan failed").slice(-1000)}`);
       const parsed = parseScan(result.stdout);
