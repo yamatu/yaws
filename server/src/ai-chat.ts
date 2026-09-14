@@ -30,7 +30,7 @@ import {
   type AutoRunMode,
   type CommandClass,
 } from "./ai-safety.js";
-import type { AIConfig } from "./ai.js";
+import type { AIConfig, LoadedProfile } from "./ai-profiles.js";
 
 export type ChatTool = {
   name: string;
@@ -175,6 +175,11 @@ const ChatBody = z.object({
   message: z.string().trim().min(1).max(12000),
   root: z.string().min(1).max(4096),
   autoRun: z.enum(["off", "read", "all"]).default("read"),
+  /** Empty means "whichever profile is active". */
+  profileId: z.string().max(64).default(""),
+});
+const Rename = z.object({
+  title: z.string().trim().min(1).max(120),
 });
 
 export const MAX_CHAT_STEPS = 8;
@@ -301,8 +306,11 @@ export function toolDetail(name: string, args: Record<string, unknown>): string 
 export type ChatDeps = {
   db: Db;
   secret: string;
-  /** Reads the stored model configuration; throws `ai_not_configured` when empty. */
-  load: () => AIConfig;
+  /**
+   * Reads a stored model profile; throws `ai_not_configured` when there is
+   * none. An empty id selects the active profile.
+   */
+  load: (profileId?: string) => LoadedProfile;
   /** POSTs a JSON body to the configured model endpoint. */
   model: (config: AIConfig, body: unknown, signal: AbortSignal) => Promise<unknown>;
 };
@@ -334,8 +342,12 @@ export function chatRouter(deps: ChatDeps) {
     const machineId = Number(req.query.machineId ?? 0);
     const rows = db
       .prepare(
-        `SELECT c.id, c.title, c.root, c.created_at as createdAt, c.updated_at as updatedAt,
-           (SELECT COUNT(*) FROM ai_runs r WHERE r.conversation_id = c.id) as turns
+        `SELECT c.id, c.title, c.root, c.model, c.created_at as createdAt, c.updated_at as updatedAt,
+           (SELECT COUNT(*) FROM ai_runs r WHERE r.conversation_id = c.id) as turns,
+           (SELECT r2.prompt FROM ai_runs r2 WHERE r2.conversation_id = c.id
+              ORDER BY r2.created_at DESC LIMIT 1) as preview,
+           (SELECT r3.status FROM ai_runs r3 WHERE r3.conversation_id = c.id
+              ORDER BY r3.created_at DESC LIMIT 1) as lastStatus
          FROM ai_conversations c
          WHERE c.user_id = ? AND (? = 0 OR c.machine_id = ?)
          ORDER BY c.updated_at DESC LIMIT 100`,
@@ -344,11 +356,27 @@ export function chatRouter(deps: ChatDeps) {
       id: string;
       title: string;
       root: string;
+      model: string;
       createdAt: number;
       updatedAt: number;
       turns: number;
+      preview: string | null;
+      lastStatus: string | null;
     }>;
-    res.json({ conversations: rows });
+    res.json({
+      conversations: rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        root: row.root,
+        model: row.model ?? "",
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        turns: row.turns,
+        // Prompts are encrypted at rest, so the preview has to be decoded here.
+        preview: row.preview ? clip(decodeField(secret, row.preview), 120) : "",
+        lastStatus: row.lastStatus ?? "",
+      })),
+    });
   });
 
   router.get("/conversations/:cid", (req, res) => {
@@ -358,7 +386,14 @@ export function chatRouter(deps: ChatDeps) {
         "SELECT * FROM ai_conversations WHERE id = ? AND user_id = ?",
       )
       .get(req.params.cid, userId) as
-      | { id: string; machine_id: number; title: string; root: string; updated_at: number }
+      | {
+          id: string;
+          machine_id: number;
+          title: string;
+          root: string;
+          model: string;
+          updated_at: number;
+        }
       | undefined;
     if (!conversation) throw new WorkspaceError(404, "not_found");
     const runs = db
@@ -379,6 +414,7 @@ export function chatRouter(deps: ChatDeps) {
         machineId: conversation.machine_id,
         title: conversation.title,
         root: conversation.root,
+        model: conversation.model ?? "",
         updatedAt: conversation.updated_at,
       },
       turns: runs.map((run) => {
@@ -401,6 +437,16 @@ export function chatRouter(deps: ChatDeps) {
     });
   });
 
+  router.patch("/conversations/:cid", (req, res) => {
+    const userId = (req as AuthedRequest).user.id;
+    const { title } = Rename.parse(req.body);
+    const result = db
+      .prepare("UPDATE ai_conversations SET title=?, updated_at=? WHERE id=? AND user_id=?")
+      .run(title, Date.now(), req.params.cid, userId);
+    if (!result.changes) throw new WorkspaceError(404, "not_found");
+    res.json({ ok: true, title });
+  });
+
   router.delete("/conversations/:cid", (req, res) => {
     const userId = (req as AuthedRequest).user.id;
     const conversation = db
@@ -420,8 +466,9 @@ export function chatRouter(deps: ChatDeps) {
       const machine = sshMachine(db, machineId);
       if (active.has(userId) || active.size >= 4)
         throw new WorkspaceError(429, "ai_busy");
-      const config = deps.load();
       const body = ChatBody.parse(req.body);
+      const profile = deps.load(body.profileId);
+      const config = profile.config;
       remotePath(body.root);
 
       const conversationId = body.conversationId
@@ -431,13 +478,14 @@ export function chatRouter(deps: ChatDeps) {
         throw new WorkspaceError(404, "not_found");
       if (!body.conversationId)
         db.prepare(
-          "INSERT INTO ai_conversations (id, machine_id, user_id, title, root, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+          "INSERT INTO ai_conversations (id, machine_id, user_id, title, root, model, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
         ).run(
           conversationId,
           machineId,
           userId,
           commandSummary(body.message, 40),
           body.root,
+          config.model,
           Date.now(),
           Date.now(),
         );
@@ -473,7 +521,14 @@ export function chatRouter(deps: ChatDeps) {
         else trace.push(event);
         emit({ type: "tool", tool: event });
       };
-      emit({ type: "start", runId, conversationId, autoRun: body.autoRun });
+      emit({
+        type: "start",
+        runId,
+        conversationId,
+        autoRun: body.autoRun,
+        profile: { id: profile.id, name: profile.name },
+        model: config.model,
+      });
 
       const signal = AbortSignal.any([
         requestSignal(res),
@@ -504,10 +559,9 @@ export function chatRouter(deps: ChatDeps) {
           encryptText(JSON.stringify(trace), secret),
           runId,
         );
-        db.prepare("UPDATE ai_conversations SET updated_at=? WHERE id=?").run(
-          Date.now(),
-          conversationId,
-        );
+        db.prepare(
+          "UPDATE ai_conversations SET updated_at=?, model=? WHERE id=?",
+        ).run(Date.now(), config.model, conversationId);
         audit(db, machineId, userId, "ai_chat", body.root, runId);
         emit({ type: "answer", text: answer });
         emit({

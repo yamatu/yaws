@@ -297,7 +297,8 @@ export async function harness(port = 0) {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString());
-    modelRequests.push(body);
+    // The authorization header is kept so tests can tell profiles apart.
+    modelRequests.push({ ...body, headers: { authorization: req.headers.authorization ?? "" } });
     const chat = req.url.endsWith("/chat/completions");
     const history = chat ? body.messages : body.input;
     const count = history.filter(

@@ -78,6 +78,167 @@ test("ai chat", async (t) => {
     200,
   );
 
+  await t.test("several profiles can be stored and switched", async () => {
+    const single = await request(f, "/api/ai/profiles");
+    assert.equal(single.status, 200);
+    assert.equal(single.body.profiles.length, 1);
+    assert.equal(single.body.profiles[0].name, "默认配置");
+    assert.equal(single.body.profiles[0].model, "fixture-model");
+    assert.equal(single.body.profiles[0].hasKey, true);
+    assert.equal("apiKey" in single.body.profiles[0], false);
+    assert.equal(single.body.activeId, "default");
+
+    const both = await request(f, "/api/ai/profiles", "PUT", {
+      activeId: "fast",
+      profiles: [
+        {
+          id: "fast",
+          name: "快速模型",
+          baseUrl: f.modelUrl,
+          model: "fixture-model",
+          protocol: "chat",
+          reasoning: "low",
+          apiKey: "fast-key",
+          allowPrivate: true,
+        },
+        {
+          id: "smart",
+          name: "强推理模型",
+          baseUrl: f.modelUrl,
+          model: "fixture-model",
+          protocol: "chat",
+          reasoning: "high",
+          apiKey: "smart-key",
+          allowPrivate: true,
+        },
+      ],
+    });
+    assert.equal(both.status, 200, JSON.stringify(both.body));
+    assert.deepEqual(
+      both.body.profiles.map((p) => p.name),
+      ["快速模型", "强推理模型"],
+    );
+    assert.equal(both.body.activeId, "fast");
+
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[run] 用哪个模型",
+      autoRun: "read",
+      profileId: "smart",
+    });
+    const start = turn.events.find((e) => e.type === "start");
+    assert.equal(start.profile.name, "强推理模型");
+    assert.equal(
+      f.modelRequests.at(-1).headers.authorization,
+      "Bearer smart-key",
+      "the selected profile owns the API key",
+    );
+    const list = await request(f, "/api/ai/conversations?machineId=1");
+    const row = list.body.conversations.find(
+      (c) => c.id === start.conversationId,
+    );
+    assert.equal(row.model, "fixture-model");
+    assert.equal(row.preview, "[run] 用哪个模型");
+    assert.equal(row.lastStatus, "completed");
+
+    // Renaming keeps the row but changes what the picker shows.
+    assert.equal(
+      (await request(f, `/api/ai/conversations/${start.conversationId}`, "PATCH", {
+        title: "排查磁盘",
+      })).status,
+      200,
+    );
+    const renamed = await request(f, "/api/ai/conversations?machineId=1");
+    assert.equal(
+      renamed.body.conversations.find((c) => c.id === start.conversationId)
+        .title,
+      "排查磁盘",
+    );
+    assert.equal(
+      (await request(f, "/api/ai/conversations/missing", "PATCH", {
+        title: "x",
+      })).status,
+      404,
+    );
+
+    // Switching the active profile is what the UI does on selection.
+    assert.equal(
+      (await request(f, "/api/ai/profiles/active", "PUT", { id: "smart" }))
+        .status,
+      200,
+    );
+    const active = await request(f, "/api/ai/profiles");
+    assert.equal(active.body.activeId, "smart");
+    assert.equal(
+      (await request(f, "/api/ai/profiles/active", "PUT", { id: "nope" }))
+        .status,
+      404,
+    );
+    // Config validation happens before anything is stored.
+    assert.equal(
+      (await request(f, "/api/ai/profiles", "PUT", {
+        activeId: "fast",
+        profiles: [
+          {
+            id: "fast",
+            name: "坏地址",
+            baseUrl: "https://user:pass@example.com/v1",
+            model: "fixture-model",
+          },
+        ],
+      })).status,
+      400,
+    );
+    assert.equal(
+      (await request(f, "/api/ai/profiles", "PUT", {
+        activeId: "fast",
+        profiles: [
+          { id: "same", name: "A", baseUrl: f.modelUrl, model: "m" },
+          { id: "same", name: "B", baseUrl: f.modelUrl, model: "m" },
+        ],
+      })).status,
+      400,
+    );
+    // Editing without a key keeps the stored one.
+    const edited = await request(f, "/api/ai/profiles", "PUT", {
+      activeId: "smart",
+      profiles: [
+        {
+          id: "fast",
+          name: "快速模型 v2",
+          baseUrl: f.modelUrl,
+          model: "fixture-model",
+          reasoning: "medium",
+          allowPrivate: true,
+        },
+        {
+          id: "smart",
+          name: "强推理模型",
+          baseUrl: f.modelUrl,
+          model: "fixture-model",
+          reasoning: "high",
+          allowPrivate: true,
+        },
+      ],
+    });
+    assert.equal(edited.status, 200);
+    assert.equal(edited.body.profiles[0].hasKey, true);
+    const again = await chat(f, {
+      root: "/srv/app",
+      message: "[run] 再次提问",
+      autoRun: "read",
+      profileId: "fast",
+    });
+    assert.equal(
+      again.events.find((e) => e.type === "start").profile.name,
+      "快速模型 v2",
+    );
+    assert.equal(
+      f.modelRequests.at(-1).headers.authorization,
+      "Bearer fast-key",
+    );
+  });
+
   await t.test("read-only commands run without approval", async () => {
     const before = f.commands.length;
     const turn = await chat(f, {
@@ -132,6 +293,42 @@ test("ai chat", async (t) => {
     assert.equal(
       f.commands.slice(before).some((c) => c.includes("systemctl restart nginx")),
       true,
+    );
+    // Ignoring a card is final and never runs anything.
+    const ignored = await chat(f, {
+      root: "/srv/app",
+      message: "[write] 重启 nginx",
+      autoRun: "read",
+    });
+    const ignoredCard = ignored.events.find((e) => e.type === "proposal");
+    const after = f.commands.length;
+    assert.equal(
+      (await request(
+        f,
+        `/api/ai/machines/1/proposals/${ignoredCard.proposal.id}/reject`,
+        "POST",
+        { confirm: true },
+      )).status,
+      200,
+    );
+    assert.equal(f.commands.length, after);
+    assert.equal(
+      (await request(
+        f,
+        `/api/ai/machines/1/proposals/${ignoredCard.proposal.id}/reject`,
+        "POST",
+        { confirm: true },
+      )).status,
+      409,
+    );
+    assert.equal(
+      (await request(
+        f,
+        `/api/ai/machines/1/proposals/${ignoredCard.proposal.id}/apply`,
+        "POST",
+        { confirm: true },
+      )).status,
+      409,
     );
   });
 

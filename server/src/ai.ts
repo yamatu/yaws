@@ -19,20 +19,28 @@ import {
 import { route, audit, requestSignal } from "./workspace.js";
 import { chatRouter } from "./ai-chat.js";
 import { secretPath } from "./ai-safety.js";
+import {
+  AIConfigSchema,
+  AIProfileInputSchema,
+  MAX_PROFILES,
+  activeProfileId,
+  endpointError,
+  mergeProfileKeys,
+  pickProfile,
+  publicProfiles,
+  readProfiles,
+  writeProfiles,
+  type AIConfig,
+  type LoadedProfile,
+} from "./ai-profiles.js";
 
-const Config = z.object({
-  baseUrl: z.string().url().max(2048),
-  protocol: z.enum(["chat", "responses"]).default("chat"),
-  model: z.string().trim().min(1).max(200),
-  reasoning: z
-    .string()
-    .max(32)
-    .regex(/^[a-z0-9_-]*$/)
-    .default(""),
-  apiKey: z.string().max(4096).default(""),
-  allowPrivate: z.boolean().default(false),
+const Config = AIConfigSchema;
+export type { AIConfig };
+const ProfilesBody = z.object({
+  profiles: z.array(AIProfileInputSchema).min(1).max(MAX_PROFILES),
+  activeId: z.string().max(64).default(""),
 });
-export type AIConfig = z.infer<typeof Config>;
+const ProfileRef = z.object({ id: z.string().trim().min(1).max(64) });
 export function publicAddress(address: string) {
   try {
     return ipaddr.process(address).range() === "unicast";
@@ -245,17 +253,48 @@ export function aiRouter(db: Db, secret: string) {
   db.prepare(
     "UPDATE ai_proposals SET status='failed' WHERE status='applying'",
   ).run();
-  const load = () => {
-    const row = db
-      .prepare("SELECT value FROM settings WHERE key = 'ai_config_enc'")
-      .get() as { value: string } | undefined;
-    if (!row) throw new WorkspaceError(409, "ai_not_configured");
-    return Config.parse(JSON.parse(decryptText(row.value, secret)));
+  const load = (profileId = ""): LoadedProfile => {
+    const profile = pickProfile(readProfiles(db, secret), activeProfileId(db), profileId);
+    if (!profile) throw new WorkspaceError(409, "ai_not_configured");
+    const bad = endpointError(profile.baseUrl);
+    if (bad) throw new WorkspaceError(400, bad);
+    const { id, name, ...config } = profile;
+    return { id, name, config };
   };
+  router.get("/profiles", (_req, res) => {
+    res.json(publicProfiles(readProfiles(db, secret), activeProfileId(db)));
+  });
+  router.put("/profiles", (req, res) => {
+    const body = ProfilesBody.parse(req.body);
+    const ids = new Set(body.profiles.map((p) => p.id));
+    if (ids.size !== body.profiles.length)
+      throw new WorkspaceError(400, "duplicate_profile");
+    for (const profile of body.profiles) {
+      const bad = endpointError(profile.baseUrl);
+      if (bad) throw new WorkspaceError(400, bad);
+    }
+    const next = mergeProfileKeys(body.profiles, readProfiles(db, secret));
+    writeProfiles(db, secret, next, body.activeId);
+    res.json(publicProfiles(next, body.activeId));
+  });
+  router.put("/profiles/active", (req, res) => {
+    const { id } = ProfileRef.parse(req.body);
+    const list = readProfiles(db, secret);
+    if (!list.some((p) => p.id === id))
+      throw new WorkspaceError(404, "not_found");
+    writeProfiles(db, secret, list, id);
+    res.json({ ok: true, activeId: id });
+  });
   router.get("/settings", (_req, res) => {
     try {
-      const config = load();
-      res.json({ ...config, apiKey: undefined, hasKey: !!config.apiKey });
+      const { id, name, config } = load();
+      res.json({
+        ...config,
+        apiKey: undefined,
+        hasKey: !!config.apiKey,
+        profileId: id,
+        profileName: name,
+      });
     } catch (e) {
       if (e instanceof WorkspaceError && e.message === "ai_not_configured")
         res.json({
@@ -265,34 +304,28 @@ export function aiRouter(db: Db, secret: string) {
           protocol: "chat",
           allowPrivate: false,
           hasKey: false,
+          profileId: "",
+          profileName: "",
         });
       else throw e;
     }
   });
+  // Kept for compatibility: patches the active profile in place.
   router.put("/settings", (req, res) => {
     const body = Config.parse(req.body);
-    if (req.body.apiKey === undefined) {
-      try {
-        const previous = load();
-        if (new URL(previous.baseUrl).origin === new URL(body.baseUrl).origin)
-          body.apiKey = previous.apiKey;
-      } catch (e) {
-        if (!(e instanceof WorkspaceError)) throw e;
-      }
-    }
-    const endpoint = new URL(body.baseUrl);
-    if (
-      endpoint.username ||
-      endpoint.password ||
-      endpoint.search ||
-      endpoint.hash ||
-      !["https:", "http:"].includes(endpoint.protocol)
-    )
-      throw new WorkspaceError(400, "bad_ai_endpoint");
-    db.prepare(
-      "INSERT INTO settings (key,value,updated_at) VALUES ('ai_config_enc',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
-    ).run(encryptText(JSON.stringify(body), secret), Date.now());
-    res.json({ ok: true });
+    const bad = endpointError(body.baseUrl);
+    if (bad) throw new WorkspaceError(400, bad);
+    const list = readProfiles(db, secret);
+    const current = pickProfile(list, activeProfileId(db));
+    const next = current
+      ? list.map((p) =>
+          p.id === current.id
+            ? { ...p, ...body, apiKey: body.apiKey || p.apiKey }
+            : p,
+        )
+      : [{ id: "default", name: "默认配置", ...body }];
+    writeProfiles(db, secret, next, current?.id ?? "default");
+    res.json({ ok: true, profileId: current?.id ?? "default" });
   });
   router.post(
     "/machines/:id/run",
@@ -302,7 +335,7 @@ export function aiRouter(db: Db, secret: string) {
       sshMachine(db, machineId);
       if (active.has(userId) || active.size >= 2)
         throw new WorkspaceError(429, "ai_busy");
-      const config = load();
+      const config = load().config;
       const body = Run.parse(req.body);
       remotePath(body.root);
       const signal = AbortSignal.any([

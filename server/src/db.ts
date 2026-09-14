@@ -293,13 +293,17 @@ function migrate(db: Db) {
       kind TEXT NOT NULL, path TEXT NOT NULL, before_text TEXT NOT NULL, after_text TEXT NOT NULL,
       revision TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
     CREATE TABLE IF NOT EXISTS ai_conversations (id TEXT PRIMARY KEY, machine_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
-      title TEXT NOT NULL, root TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      title TEXT NOT NULL, root TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS idx_ai_conversations_scope ON ai_conversations(user_id, machine_id, updated_at DESC);`);
 
   // Chat support: a run is one turn of a conversation and carries the tool trace.
   ensureColumns(db, "ai_runs", [
     { name: "conversation_id", sql: "ALTER TABLE ai_runs ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''" },
     { name: "trace", sql: "ALTER TABLE ai_runs ADD COLUMN trace TEXT NOT NULL DEFAULT ''" },
+  ]);
+  // The picker shows which model produced a conversation.
+  ensureColumns(db, "ai_conversations", [
+    { name: "model", sql: "ALTER TABLE ai_conversations ADD COLUMN model TEXT NOT NULL DEFAULT ''" },
   ]);
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_ai_runs_conversation ON ai_runs(conversation_id, created_at)",

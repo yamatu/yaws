@@ -1,4 +1,12 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useParams } from "react-router-dom";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
@@ -27,6 +35,8 @@ import {
   type KeyButton,
   type Mods,
 } from "./terminalKeys";
+import { SplitHandle } from "./SplitHandle";
+import { SPLIT_DEFAULT, storedSplit } from "./splitter";
 import { workspaceError } from "./workspaceErrors";
 const Files = lazy(() =>
   import("./FileWorkspace").then((m) => ({ default: m.FileWorkspace })),
@@ -37,6 +47,15 @@ const AiDock = lazy(() =>
 );
 
 const KEY_BAR_STORAGE = "yaws.terminal.keys";
+const SPLIT_STORAGE = "yaws.workspace.split";
+
+function storedSplitMain(): number {
+  try {
+    return storedSplit(localStorage.getItem(SPLIT_STORAGE), SPLIT_DEFAULT);
+  } catch {
+    return SPLIT_DEFAULT;
+  }
+}
 
 function storedKeyBar(): boolean {
   try {
@@ -78,6 +97,15 @@ export function SshPage() {
   // While browsing or editing files the SSH session stays visible in a side panel, so
   // commands can be run next to the file that is being worked on.
   const [dockTerminal, setDockTerminal] = useState(true);
+  const [split, setSplitState] = useState(storedSplitMain);
+  const setSplit = useCallback((percent: number) => {
+    setSplitState(percent);
+    try {
+      localStorage.setItem(SPLIT_STORAGE, String(percent));
+    } catch {
+      // private mode
+    }
+  }, []);
   const [root, setRoot] = useState("/");
   // Escape/Tab/arrows do not exist on a touch keyboard, so the terminal can show a key bar.
   const [keyBar, setKeyBar] = useState(storedKeyBar);
@@ -582,7 +610,10 @@ export function SshPage() {
           </button>
         ) : null}
       </div>
-      <div className={`workspace-body${docked ? " docked" : ""}`}>
+      <div
+        className={`workspace-body${docked ? " docked" : ""}`}
+        style={{ ["--split-main" as string]: `${split}%` }}
+      >
         <div
           className={`terminal-workspace${docked ? " docked-mini" : ""}`}
           style={{ display: tab === "terminal" || docked ? "grid" : "none" }}
@@ -621,6 +652,13 @@ export function SshPage() {
             ) : null}
           </div>
         </div>
+        {docked ? (
+          <SplitHandle
+            value={split}
+            onChange={setSplit}
+            label="调整终端面板比例"
+          />
+        ) : null}
         {trusted && visited.files && (
           <div className="workspace-tab-body" hidden={tab !== "files"}>
             <Suspense fallback={<div className="p-4">加载文件…</div>}>

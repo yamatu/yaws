@@ -5,12 +5,14 @@ import {
   ChevronDown,
   ChevronRight,
   CircleStop,
+  Copy,
   Cpu,
   FileCode2,
   FolderTree,
   MessageSquarePlus,
   Pencil,
   Play,
+  Plus,
   Send,
   Settings2,
   Sparkles,
@@ -22,8 +24,12 @@ import { diffLines } from "diff";
 import { apiFetch } from "./api";
 import { getToken } from "./auth";
 import { workspaceError } from "./workspaceErrors";
+import { ConversationPicker } from "./ConversationPicker";
+import type { Conversation } from "./conversations";
 
-type Config = {
+type Profile = {
+  id: string;
+  name: string;
   baseUrl: string;
   model: string;
   protocol: "chat" | "responses";
@@ -31,6 +37,8 @@ type Config = {
   allowPrivate: boolean;
   hasKey?: boolean;
 };
+/** A profile being edited: `apiKey` empty keeps the stored key unless dropped. */
+type Draft = Profile & { apiKey: string; dropKey: boolean };
 type AutoRun = "off" | "read" | "all";
 type Tool = {
   id: string;
@@ -60,20 +68,13 @@ type Entry =
   | { key: string; kind: "tool"; tool: Tool }
   | { key: string; kind: "proposal"; proposal: Proposal }
   | { key: string; kind: "error"; text: string };
-type Conversation = {
-  id: string;
-  title: string;
-  root: string;
-  updatedAt: number;
-  turns: number;
-};
-
 export const AUTO_RUN_KEY = "yaws.ai.autorun";
 export const AUTO_RUN_MODES: Array<{ value: AutoRun; label: string }> = [
   { value: "read", label: "只读命令自动执行（推荐）" },
   { value: "all", label: "修改类命令也自动执行" },
   { value: "off", label: "每条命令都先确认" },
 ];
+export const PROFILE_KEY = "yaws.ai.profile";
 const EXAMPLES = [
   "服务器磁盘和内存现在什么情况？",
   "Nginx 为什么启动失败，帮我查日志并给出修复命令",
@@ -91,6 +92,38 @@ export function storedAutoRun(): AutoRun {
 }
 
 const chatKey = (machineId: number) => `yaws.ai.chat.${machineId}`;
+
+const newId = () =>
+  `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+function blankDraft(): Draft {
+  return {
+    id: newId(),
+    name: "新配置",
+    baseUrl: "",
+    model: "",
+    protocol: "chat",
+    reasoning: "",
+    allowPrivate: false,
+    apiKey: "",
+    dropKey: false,
+  };
+}
+
+function toDraft(profile: Profile): Draft {
+  return { ...profile, apiKey: "", dropKey: false };
+}
+
+/** The stored key is never returned, so an empty field means "keep it". */
+function toBody(draft: Draft) {
+  const { apiKey, dropKey, ...rest } = draft;
+  return {
+    ...rest,
+    baseUrl: rest.baseUrl.trim(),
+    name: rest.name.trim() || "未命名配置",
+    ...(dropKey ? { apiKey: null } : apiKey ? { apiKey } : {}),
+  };
+}
 
 function storedConversation(machineId: number): string {
   try {
@@ -125,14 +158,9 @@ export function AiChat({
   initialRoot: string;
   compact?: boolean;
 }) {
-  const [config, setConfig] = useState<Config>({
-    baseUrl: "",
-    model: "",
-    protocol: "chat",
-    reasoning: "",
-    allowPrivate: false,
-  });
-  const [apiKey, setApiKey] = useState("");
+  const [profiles, setProfiles] = useState<Draft[]>([]);
+  const [activeProfile, setActiveProfile] = useState("");
+  const [editingId, setEditingId] = useState("");
   const [settings, setSettings] = useState(false);
   const [root, setRoot] = useState(initialRoot || "/");
   const [autoRun, setAutoRun] = useState<AutoRun>(storedAutoRun);
@@ -143,6 +171,10 @@ export function AiChat({
   const [notice, setNotice] = useState("");
   const [conversationId, setConversationId] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [session, setSession] = useState<{ name: string; model: string }>({
+    name: "",
+    model: "",
+  });
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
   const [working, setWorking] = useState("");
   const controller = useRef<AbortController | null>(null);
@@ -168,21 +200,49 @@ export function AiChat({
     }
   }, [machineId]);
 
+  const current = profiles.find((p) => p.id === editingId) ?? profiles[0];
+
+  const applyProfiles = useCallback(
+    (data: { activeId: string; profiles: Profile[] }) => {
+      const drafts = data.profiles.map(toDraft);
+      setProfiles(drafts);
+      setActiveProfile((id) =>
+        drafts.some((p) => p.id === id)
+          ? id
+          : drafts.some((p) => p.id === data.activeId)
+            ? data.activeId
+            : (drafts[0]?.id ?? ""),
+      );
+      setEditingId((id) =>
+        drafts.some((p) => p.id === id) ? id : (drafts[0]?.id ?? ""),
+      );
+      return drafts;
+    },
+    [],
+  );
+
   useEffect(() => {
     const ac = new AbortController();
-    void apiFetch<Config>("/api/ai/settings", { signal: ac.signal })
-      .then((r) => {
-        setConfig(r);
-        if (!r.baseUrl) setSettings(true);
-      })
-      .catch((e: unknown) => {
+    void (async () => {
+      try {
+        const data = await apiFetch<{ activeId: string; profiles: Profile[] }>(
+          "/api/ai/profiles",
+          { signal: ac.signal },
+        );
+        // Nothing configured yet: start from a blank profile and open the editor.
+        if (applyProfiles(data).length === 0) {
+          setProfiles([blankDraft()]);
+          setSettings(true);
+        }
+      } catch (e: unknown) {
         if (!ac.signal.aborted) setError(workspaceError(e));
-      });
+      }
+    })();
     return () => {
       ac.abort();
       controller.current?.abort();
     };
-  }, []);
+  }, [applyProfiles]);
 
   const openConversation = useCallback(
     async (id: string) => {
@@ -254,16 +314,134 @@ export function AiChat({
     }
   }
 
+  /** Saves every profile in one request; the server keeps stored keys. */
   async function saveSettings() {
     setError("");
     try {
-      await apiFetch("/api/ai/settings", {
-        method: "PUT",
-        body: JSON.stringify({ ...config, ...(apiKey ? { apiKey } : {}) }),
-      });
-      setApiKey("");
+      const data = await apiFetch<{ activeId: string; profiles: Profile[] }>(
+        "/api/ai/profiles",
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            activeId: activeProfile || profiles[0]?.id || "",
+            profiles: profiles.map(toBody),
+          }),
+        },
+      );
+      applyProfiles(data);
       setSettings(false);
       setNotice("AI 设置已保存");
+    } catch (e) {
+      setError(workspaceError(e));
+    }
+  }
+
+  async function activate(id: string) {
+    setActiveProfile(id);
+    try {
+      localStorage.setItem(PROFILE_KEY, id);
+    } catch {
+      // ignore
+    }
+    try {
+      await apiFetch("/api/ai/profiles/active", {
+        method: "PUT",
+        body: JSON.stringify({ id }),
+      });
+    } catch {
+      // The next send still uses the profile that is selected here.
+    }
+  }
+
+  function patch(id: string, changes: Partial<Draft>) {
+    setProfiles((old) =>
+      old.map((profile) =>
+        profile.id === id ? { ...profile, ...changes } : profile,
+      ),
+    );
+  }
+
+  function addProfile() {
+    const draft = blankDraft();
+    setProfiles((old) => [...old, draft]);
+    setEditingId(draft.id);
+    setActiveProfile(draft.id);
+    setSettings(true);
+  }
+
+  function duplicateProfile(source: Draft) {
+    // The API key cannot be copied: it is never sent back to the browser.
+    const draft: Draft = {
+      ...source,
+      id: newId(),
+      name: `${source.name} 副本`,
+      apiKey: "",
+      dropKey: false,
+      hasKey: false,
+    };
+    setProfiles((old) => [...old, draft]);
+    setEditingId(draft.id);
+    setSettings(true);
+  }
+
+  async function removeProfile(id: string) {
+    const rest = profiles.filter((profile) => profile.id !== id);
+    const next = rest[0]?.id ?? "";
+    setProfiles(rest);
+    setEditingId(next);
+    await activate(next);
+    if (!rest.length) {
+      setSettings(false);
+      try {
+        await apiFetch("/api/ai/profiles", {
+          method: "PUT",
+          body: JSON.stringify({ activeId: "", profiles: [] }),
+        });
+        setNotice("已删除全部配置");
+      } catch (e) {
+        setError(workspaceError(e));
+      }
+      return;
+    }
+    try {
+      const data = await apiFetch<{ activeId: string; profiles: Profile[] }>(
+        "/api/ai/profiles",
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            activeId: next,
+            profiles: rest.map(toBody),
+          }),
+        },
+      );
+      applyProfiles(data);
+      setNotice("已删除配置");
+    } catch (e) {
+      setError(workspaceError(e));
+    }
+  }
+
+  async function renameConversation(id: string, title: string) {
+    try {
+      await apiFetch(`/api/ai/conversations/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      });
+      setConversations((old) =>
+        old.map((item) => (item.id === id ? { ...item, title } : item)),
+      );
+    } catch (e) {
+      setError(workspaceError(e));
+    }
+  }
+
+  /** The picker asks for confirmation inline, so no extra dialog here. */
+  async function removeConversation(id: string) {
+    try {
+      await apiFetch(`/api/ai/conversations/${id}`, { method: "DELETE" });
+      setConversations((old) => old.filter((item) => item.id !== id));
+      if (id === conversationId) newChat();
+      setNotice("已删除对话");
     } catch (e) {
       setError(workspaceError(e));
     }
@@ -272,6 +450,8 @@ export function AiChat({
   function handleEvent(event: Record<string, any>) {
     if (event.type === "start") {
       setConversationId(event.conversationId);
+      if (event.profile?.name || event.model)
+        setSession({ name: event.profile?.name ?? "", model: event.model ?? "" });
       try {
         localStorage.setItem(chatKey(machineId), event.conversationId);
       } catch {
@@ -364,7 +544,13 @@ export function AiChat({
           "content-type": "application/json",
           ...(token ? { authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ conversationId, message, root, autoRun }),
+        body: JSON.stringify({
+          conversationId,
+          message,
+          root,
+          autoRun,
+          profileId: activeProfile,
+        }),
         signal: ac.signal,
       });
       if (!response.ok || !response.body) {
@@ -476,27 +662,35 @@ export function AiChat({
       <div className="workspace-toolbar ai-chat-head">
         <Sparkles size={16} />
         <strong className="flex-1 min-w-0 truncate text-sm">AI 助手</strong>
-        <span className="text-xs text-white/45 truncate hidden sm:inline">
-          {config.model || "未配置模型"}
-        </span>
         <select
-          aria-label="历史对话"
-          className="yaws-select ai-chat-history"
-          value={conversationId}
-          disabled={busy}
-          onChange={(e) => {
-            const id = e.target.value;
-            if (id) void openConversation(id);
-            else newChat();
-          }}
+          aria-label="模型配置"
+          className="yaws-select ai-chat-profile"
+          title={
+            current
+              ? `${current.name} · ${current.model || "未填写模型"}`
+              : "未配置模型"
+          }
+          value={activeProfile}
+          disabled={busy || !profiles.length}
+          onChange={(e) => void activate(e.target.value)}
         >
-          <option value="">新对话</option>
-          {conversations.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.title || "未命名"} · {c.turns} 轮
+          {profiles.length === 0 && <option value="">未配置</option>}
+          {profiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.name}
             </option>
           ))}
         </select>
+        <ConversationPicker
+          conversations={conversations}
+          currentId={conversationId}
+          busy={busy}
+          onSelect={(id) => void openConversation(id)}
+          onNew={newChat}
+          onRename={renameConversation}
+          onDelete={removeConversation}
+          onRefresh={() => void loadConversations()}
+        />
         <button
           className="icon-btn"
           title="新对话"
@@ -517,88 +711,188 @@ export function AiChat({
       </div>
       {settings && (
         <form
-          className="ai-settings"
+          className="ai-settings ai-profiles"
           onSubmit={(e) => {
             e.preventDefault();
             void saveSettings();
           }}
         >
-          <label>
-            API 地址
-            <input
-              className="yaws-input"
-              type="url"
-              value={config.baseUrl}
-              required
-              placeholder="https://api.example.com/v1"
-              onChange={(e) => setConfig({ ...config, baseUrl: e.target.value })}
-            />
-          </label>
-          <label>
-            模型
-            <input
-              className="yaws-input"
-              value={config.model}
-              required
-              onChange={(e) => setConfig({ ...config, model: e.target.value })}
-            />
-          </label>
-          <label>
-            协议
-            <select
-              className="yaws-select w-full"
-              value={config.protocol}
-              onChange={(e) =>
-                setConfig({
-                  ...config,
-                  protocol: e.target.value as Config["protocol"],
-                })
-              }
+          <div className="ai-profiles-top">
+            <span className="ai-profiles-label">模型配置</span>
+            <button
+              type="button"
+              className="ai-profile-mini"
+              onClick={addProfile}
             >
-              <option value="chat">Chat Completions</option>
-              <option value="responses">Responses</option>
-            </select>
-          </label>
-          <label>
-            推理级别
-            <input
-              list="reasoning-levels"
-              className="yaws-input"
-              value={config.reasoning}
-              placeholder="默认"
-              onChange={(e) => setConfig({ ...config, reasoning: e.target.value })}
-            />
-            <datalist id="reasoning-levels">
-              {["low", "medium", "high", "xhigh", "max"].map((v) => (
-                <option key={v} value={v} />
-              ))}
-            </datalist>
-          </label>
-          <label>
-            API Key
-            <input
-              className="yaws-input"
-              type="password"
-              autoComplete="new-password"
-              value={apiKey}
-              placeholder={config.hasKey ? "已保存，留空不修改" : "可选"}
-              onChange={(e) => setApiKey(e.target.value)}
-            />
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={config.allowPrivate}
-              onChange={(e) =>
-                setConfig({ ...config, allowPrivate: e.target.checked })
-              }
-            />
-            允许内网 / HTTP 接口
-          </label>
-          <button className="yaws-btn-primary tool-text" type="submit">
-            <Check size={16} />
-            保存设置
-          </button>
+              <Plus size={13} />
+              新建配置
+            </button>
+          </div>
+          <div className="ai-profile-list">
+            {profiles.map((profile) => (
+              <button
+                key={profile.id}
+                type="button"
+                className={`ai-profile-chip${
+                  profile.id === current?.id ? " active" : ""
+                }`}
+                aria-pressed={profile.id === current?.id}
+                onClick={() => setEditingId(profile.id)}
+              >
+                {profile.name}
+                {profile.id === activeProfile ? (
+                  <span className="ai-profile-dot" title="当前使用" />
+                ) : null}
+                {!profile.hasKey && !profile.apiKey ? (
+                  <span className="ai-profile-warn" title="还没有 API Key">
+                    !
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+          {current ? (
+            <>
+              <label>
+                名称
+                <input
+                  className="yaws-input"
+                  value={current.name}
+                  required
+                  onChange={(e) => patch(current.id, { name: e.target.value })}
+                />
+              </label>
+              <label>
+                API 地址
+                <input
+                  className="yaws-input"
+                  type="url"
+                  value={current.baseUrl}
+                  required
+                  placeholder="https://api.example.com/v1"
+                  onChange={(e) =>
+                    patch(current.id, { baseUrl: e.target.value })
+                  }
+                />
+              </label>
+              <label>
+                模型
+                <input
+                  className="yaws-input"
+                  value={current.model}
+                  required
+                  onChange={(e) => patch(current.id, { model: e.target.value })}
+                />
+              </label>
+              <label>
+                协议
+                <select
+                  className="yaws-select w-full"
+                  value={current.protocol}
+                  onChange={(e) =>
+                    patch(current.id, {
+                      protocol: e.target.value as Profile["protocol"],
+                    })
+                  }
+                >
+                  <option value="chat">Chat Completions</option>
+                  <option value="responses">Responses</option>
+                </select>
+              </label>
+              <label>
+                推理级别
+                <input
+                  list="reasoning-levels"
+                  className="yaws-input"
+                  value={current.reasoning}
+                  placeholder="默认"
+                  onChange={(e) =>
+                    patch(current.id, { reasoning: e.target.value })
+                  }
+                />
+                <datalist id="reasoning-levels">
+                  {["low", "medium", "high", "xhigh", "max"].map((v) => (
+                    <option key={v} value={v} />
+                  ))}
+                </datalist>
+              </label>
+              <label>
+                API Key
+                <input
+                  className="yaws-input"
+                  type="password"
+                  autoComplete="new-password"
+                  value={current.apiKey}
+                  placeholder={current.hasKey ? "已保存，留空不修改" : "可选"}
+                  onChange={(e) =>
+                    patch(current.id, { apiKey: e.target.value })
+                  }
+                />
+              </label>
+              <div className="ai-profile-keynote">
+                <span>
+                  {current.dropKey
+                    ? "保存后将清除该配置的密钥"
+                    : current.hasKey
+                      ? "密钥已保存，不会显示"
+                      : "该配置还没有密钥"}
+                </span>
+                <button
+                  type="button"
+                  className="ai-profile-mini"
+                  onClick={() =>
+                    patch(current.id, {
+                      dropKey: !current.dropKey,
+                      apiKey: "",
+                    })
+                  }
+                >
+                  {current.dropKey ? "取消清除" : "清除密钥"}
+                </button>
+              </div>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={current.allowPrivate}
+                  onChange={(e) =>
+                    patch(current.id, { allowPrivate: e.target.checked })
+                  }
+                />
+                允许内网 / HTTP 接口
+              </label>
+              <div className="ai-settings-actions">
+                <button className="yaws-btn-primary tool-text" type="submit">
+                  <Check size={16} />
+                  保存全部配置
+                </button>
+                <button
+                  type="button"
+                  className="yaws-btn tool-text"
+                  disabled={current.id === activeProfile}
+                  onClick={() => void activate(current.id)}
+                >
+                  {current.id === activeProfile ? "正在使用" : "设为当前"}
+                </button>
+                <button
+                  type="button"
+                  className="yaws-btn tool-text"
+                  title="复制该配置（API Key 需要重新填写）"
+                  onClick={() => duplicateProfile(current)}
+                >
+                  <Copy size={15} />
+                  复制
+                </button>
+                <button
+                  type="button"
+                  className="yaws-btn tool-text danger"
+                  onClick={() => void removeProfile(current.id)}
+                >
+                  <Trash2 size={15} />
+                  删除
+                </button>
+              </div>
+            </>
+          ) : null}
         </form>
       )}
       <div className="ai-chat-transcript" ref={transcript}>
@@ -813,6 +1107,15 @@ export function AiChat({
               ))}
             </select>
           </label>
+          {session.model ? (
+            <span
+              className="ai-chat-session"
+              title={`本对话由「${session.name || "配置"}」生成`}
+            >
+              {session.name ? `${session.name} · ` : ""}
+              {session.model}
+            </span>
+          ) : null}
         </div>
         <div className="ai-chat-input">
           <textarea

@@ -149,17 +149,66 @@ browserTest(
       path: "test-results/files-desktop.png",
       fullPage: true,
     });
+    // The docked terminal is resizable: dragging the divider widens it.
+    const paneWidth = () =>
+      page.locator(".terminal-workspace").boundingBox().then((b) => b.width);
+    const splitter = page.getByRole("separator", { name: "调整终端面板比例" });
+    await expect(splitter).toBeVisible();
+    const narrow = await paneWidth();
+    const divider = await splitter.boundingBox();
+    await page.mouse.move(divider.x + divider.width / 2, divider.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(divider.x - 140, divider.y + 40, { steps: 8 });
+    await page.mouse.up();
+    const wide = await paneWidth();
+    expect(wide).toBeGreaterThan(narrow + 60);
+    const savedSplit = await page.evaluate(() =>
+      localStorage.getItem("yaws.workspace.split"),
+    );
+    expect(Number(savedSplit)).toBeLessThan(64);
+    // The keyboard works too, and double clicking restores the default.
+    await splitter.focus();
+    await page.keyboard.press("ArrowRight");
+    expect(Number(await page.evaluate(
+      () => localStorage.getItem("yaws.workspace.split"),
+    ))).toBeGreaterThan(Number(savedSplit));
+    await splitter.dblclick();
+    expect(Number(await page.evaluate(
+      () => localStorage.getItem("yaws.workspace.split"),
+    ))).toBe(64);
     // The assistant is a chat: ask a question, approve anything that touches the server.
     await page.getByRole("tab", { name: "AI", exact: true }).click();
-    await page.getByLabel("API 地址", { exact: true }).fill(f.modelUrl);
-    await page.getByLabel("模型", { exact: true }).fill("fixture-model");
-    await page.getByLabel("API Key", { exact: true }).fill("fixture-key");
-    await page.getByLabel("允许内网 / HTTP 接口", { exact: true }).check();
-    await page.getByRole("button", { name: "保存设置", exact: true }).click();
+    const form = page.locator(".ai-settings");
+    await expect(form).toBeVisible();
+    await form.getByLabel("名称", { exact: true }).fill("主力模型");
+    await form.getByLabel("API 地址", { exact: true }).fill(f.modelUrl);
+    await form.getByLabel("模型", { exact: true }).fill("fixture-model");
+    await form.getByLabel("API Key", { exact: true }).fill("fixture-key");
+    await form.getByLabel("允许内网 / HTTP 接口", { exact: true }).check();
+    await page.getByRole("button", { name: "保存全部配置", exact: true }).click();
     await expect(page.locator(".ai-chat .workspace-notice")).toContainText(
       "AI 设置已保存",
     );
+    await expect(page.locator(".ai-chat-profile")).toContainText("主力模型");
     await expect(page.locator(".ai-chip")).toHaveCount(3);
+    // A second configuration can be added and switched to.
+    await page.getByRole("button", { name: "AI 设置", exact: true }).click();
+    await expect(page.locator(".ai-profile-chip")).toHaveCount(1);
+    await page.getByRole("button", { name: "新建配置", exact: true }).click();
+    await form.getByLabel("名称", { exact: true }).fill("快速模型");
+    await form.getByLabel("API 地址", { exact: true }).fill(f.modelUrl);
+    await form.getByLabel("模型", { exact: true }).fill("fixture-model");
+    await form.getByLabel("API Key", { exact: true }).fill("second-key");
+    await form.getByLabel("允许内网 / HTTP 接口", { exact: true }).check();
+    await page.getByRole("button", { name: "保存全部配置", exact: true }).click();
+    await page.getByRole("button", { name: "AI 设置", exact: true }).click();
+    await expect(page.locator(".ai-profile-chip")).toHaveCount(2);
+    await expect(page.locator(".ai-profile-chip").first()).toContainText(
+      "主力模型",
+    );
+    await page.getByRole("button", { name: "AI 设置", exact: true }).click();
+    await page.getByLabel("模型配置", { exact: true }).selectOption("主力模型");
+    await expect(page.locator(".ai-settings")).toHaveCount(0);
     await page.getByLabel("问题").fill("[run] 看一下磁盘");
     await page.getByRole("button", { name: "发送", exact: true }).click();
     await expect(page.locator(".ai-bubble")).toContainText("[run] 看一下磁盘");
@@ -168,6 +217,11 @@ browserTest(
     await expect(page.locator(".ai-answer")).toContainText(
       "已生成配置修改与验证命令。",
     );
+    // Each configuration carries its own API key.
+    expect(f.modelRequests.at(-1).headers.authorization).toBe(
+      "Bearer fixture-key",
+    );
+    await expect(page.locator(".ai-chat-session")).toContainText("主力模型");
     // Anything mutating waits for an approval card instead of running.
     await page.getByLabel("问题").fill("[write] 重启 nginx");
     await page.getByRole("button", { name: "发送", exact: true }).click();
@@ -187,6 +241,55 @@ browserTest(
     expect(f.commands.some((c) => c.includes("systemctl restart nginx"))).toBe(
       true,
     );
+    // The conversation picker searches, groups, renames and deletes.
+    await page.getByRole("button", { name: "选择对话", exact: true }).click();
+    await expect(page.locator(".ai-conv-pop")).toBeVisible();
+    await expect(page.locator(".ai-conv-group-label")).toContainText("今天");
+    await expect(page.locator(".ai-conv-row")).toHaveCount(1);
+    await expect(page.locator(".ai-conv-row").first()).toContainText("2 轮");
+    await page.getByLabel("搜索对话", { exact: true }).fill("重启");
+    await expect(page.locator(".ai-conv-row")).toHaveCount(1);
+    await expect(page.locator(".ai-conv-row").first()).toContainText("重启");
+    await page.getByLabel("搜索对话", { exact: true }).fill("没有这段内容");
+    await expect(page.locator(".ai-conv-empty")).toContainText("没有匹配");
+    await page.getByLabel("搜索对话", { exact: true }).fill("磁盘");
+    await expect(page.locator(".ai-conv-row")).toHaveCount(1);
+    await page.getByLabel("清除搜索", { exact: true }).click();
+    await page.locator(".ai-conv-row").first().getByLabel(/^重命名/).click();
+    await page.getByLabel("对话名称", { exact: true }).fill("磁盘排查");
+    await page.getByLabel("保存名称", { exact: true }).click();
+    await expect(page.locator(".ai-conv-row").first()).toContainText("磁盘排查");
+    // A fresh conversation from the picker is kept next to the first one.
+    await page
+      .locator(".ai-conv-pop")
+      .getByRole("button", { name: "新对话", exact: true })
+      .click();
+    await expect(page.locator(".ai-chat-transcript")).not.toContainText(
+      "看一下磁盘",
+    );
+    await page.getByLabel("问题").fill("[list] 看看目录");
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(page.locator(".ai-answer")).toContainText(
+      "已生成配置修改与验证命令。",
+    );
+    await page.getByRole("button", { name: "选择对话", exact: true }).click();
+    await expect(page.locator(".ai-conv-row")).toHaveCount(2);
+    await page.locator(".ai-conv-row").first().getByLabel(/^删除/).click();
+    await expect(page.locator(".ai-conv-confirm")).toContainText("删除「");
+    await page.getByLabel("确认删除", { exact: true }).click();
+    await expect(page.locator(".ai-conv-row")).toHaveCount(1);
+    // Picking the remaining conversation brings its transcript back.
+    await page.locator(".ai-conv-row").first().locator(".ai-conv-pick").click();
+    await expect(page.locator(".ai-conv-pop")).toHaveCount(0);
+    await expect(page.locator(".ai-conv-trigger")).toContainText("磁盘排查");
+    await expect(page.locator(".ai-chat-transcript")).toContainText(
+      "看一下磁盘",
+    );
+    // Escape closes the popover.
+    await page.getByRole("button", { name: "选择对话", exact: true }).click();
+    await expect(page.locator(".ai-conv-pop")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".ai-conv-pop")).toHaveCount(0);
     // The same assistant floats over the terminal as an add-on panel.
     await page.getByRole("tab", { name: "终端", exact: true }).click();
     await page.getByRole("button", { name: "AI 助手", exact: true }).click();
@@ -194,6 +297,35 @@ browserTest(
     await expect(page.locator(".ai-dock .ai-chat-transcript")).toContainText(
       "看一下磁盘",
     );
+    // The floating panel can be dragged anywhere and resized from its corner.
+    const dock = page.locator(".ai-dock");
+    const home = await dock.boundingBox();
+    await page.mouse.move(home.x + 70, home.y + 12);
+    await page.mouse.down();
+    await page.mouse.move(home.x - 260, home.y - 50, { steps: 10 });
+    await page.mouse.up();
+    const moved = await dock.boundingBox();
+    expect(moved.x).toBeLessThan(home.x - 120);
+    expect(moved.y).toBeLessThan(home.y - 20);
+    const storedBox = JSON.parse(
+      await page.evaluate(() => localStorage.getItem("yaws.ai.dock")),
+    );
+    expect(Math.abs(storedBox.x - moved.x)).toBeLessThan(2);
+    expect(Math.abs(storedBox.y - moved.y)).toBeLessThan(2);
+    const grip = await page.locator(".ai-dock-resize").boundingBox();
+    await page.mouse.move(grip.x + 8, grip.y + 8);
+    await page.mouse.down();
+    await page.mouse.move(grip.x + 88, grip.y + 68, { steps: 8 });
+    await page.mouse.up();
+    const resized = await dock.boundingBox();
+    expect(resized.width).toBeGreaterThan(moved.width + 40);
+    expect(resized.height).toBeGreaterThan(moved.height + 30);
+    // Double clicking the header sends it back to its default corner.
+    await page.locator(".ai-dock-head").dblclick({ position: { x: 90, y: 12 } });
+    expect(await page.evaluate(() => localStorage.getItem("yaws.ai.dock"))).toBe(
+      null,
+    );
+    await expect(dock).toBeVisible();
     await page.getByRole("button", { name: "收起 AI 助手", exact: true }).click();
     await expect(page.locator(".ai-dock")).toHaveCount(0);
     await page.getByRole("link", { name: "返回堡垒机" }).click();
@@ -236,9 +368,24 @@ browserTest(
     await page.getByRole("link", { name: "堡垒机", exact: true }).click();
     await page.getByRole("link", { name: "进入终端" }).first().click();
     await expect(page.locator(".workspace-header")).toContainText("已连接");
-    // The assistant dock fits a phone screen without horizontal overflow.
+    // The assistant dock fits a phone screen without horizontal overflow and can
+    // still be dragged out of the way of the touch key bar.
     await page.getByRole("button", { name: "AI 助手", exact: true }).click();
     await expect(page.locator(".ai-dock")).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    const dock = page.locator(".ai-dock");
+    const phone = await dock.boundingBox();
+    await page.mouse.move(phone.x + 60, phone.y + 14);
+    await page.mouse.down();
+    await page.mouse.move(phone.x + 40, phone.y - 90, { steps: 8 });
+    await page.mouse.up();
+    const lifted = await dock.boundingBox();
+    expect(lifted.y).toBeLessThan(phone.y - 40);
+    expect(lifted.x + lifted.width).toBeLessThanOrEqual(390);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -249,6 +396,19 @@ browserTest(
       fullPage: true,
     });
     await page.getByRole("button", { name: "收起 AI 助手", exact: true }).click();
+    // In the stacked layout the divider resizes the two panes vertically.
+    await page.getByRole("tab", { name: "文件", exact: true }).click();
+    const splitter = page.getByRole("separator", { name: "调整终端面板比例" });
+    await expect(splitter).toBeVisible();
+    const paneHeight = () =>
+      page.locator(".terminal-workspace").boundingBox().then((b) => b.height);
+    const short = await paneHeight();
+    const divider = await splitter.boundingBox();
+    await page.mouse.move(divider.x + 40, divider.y + 3);
+    await page.mouse.down();
+    await page.mouse.move(divider.x + 40, divider.y - 90, { steps: 8 });
+    await page.mouse.up();
+    expect(await paneHeight()).toBeGreaterThan(short + 40);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
