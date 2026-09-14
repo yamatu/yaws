@@ -54,11 +54,23 @@ function acmeFailureDetail(result: ExecResult, secrets: Array<string | undefined
     if (lines.length >= 12) break;
   }
   let detail = lines.length ? lines.join(" | ") : `${result.stderr || result.stdout}`.replace(/\s+/g, " ").trim().slice(-400);
-  for (const secret of secrets) {
-    if (secret && secret.length >= 8) detail = detail.split(secret).join("***");
-  }
-  detail = detail.replace(/(Bearer\s+)[A-Za-z0-9_\-.]{10,}/gi, "$1***").replace(/(X-Auth-(?:Key|Email):\s*)\S+/gi, "$1***");
+  detail = redactSecrets(detail, secrets)
+    .replace(/(Bearer\s+)[A-Za-z0-9_\-.]{10,}/gi, "$1***")
+    .replace(/(X-Auth-(?:Key|Email):\s*)\S+/gi, "$1***");
   return detail.slice(0, 1500);
+}
+
+/**
+ * Remote commands occasionally echo their own command line, which can contain the
+ * Cloudflare credentials we passed in. Never let those values reach a stored error
+ * message or the API response.
+ */
+export function redactSecrets(detail: string, secrets: Array<string | undefined>) {
+  let out = detail;
+  for (const secret of secrets) {
+    if (secret && secret.length >= 8) out = out.split(secret).join("***");
+  }
+  return out;
 }
 
 // Anything that is not a WorkspaceError reaches the global handler as a bare
@@ -69,11 +81,21 @@ export function errorDetail(e: unknown) {
   return `${name}: ${message}`.replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
-function phaseError(phase: string, e: unknown) {
+function phaseError(phase: string, e: unknown, secrets: Array<string | undefined> = []) {
   if (e instanceof WorkspaceError || e instanceof z.ZodError) return e;
   // eslint-disable-next-line no-console
   console.error(`[certificates] ${phase} failed`, e);
-  return new WorkspaceError(500, `certificate_${phase}_failed:${errorDetail(e)}`);
+  return new WorkspaceError(500, `certificate_${phase}_failed:${redactSecrets(errorDetail(e), secrets)}`);
+}
+
+/** Best-effort credential list for error redaction (never throws). */
+function configSecrets(db: Db, secret: string, env: CertSettings) {
+  try {
+    const c = cfg(db, secret, env);
+    return [c.cfToken, c.cfKey, c.cfAccountId];
+  } catch {
+    return [];
+  }
 }
 
 // timeoutMs > 0 guards against remote shells that never close the exec channel
@@ -539,14 +561,14 @@ export function certificateRouter(db: Db, secret: string, env: CertSettings) {
         certificates: rows, info: parsed.info,
         warning: rows.length === 0 ? "未发现可解析证书。请确认 SSH 用户可读取证书目录，且服务器安装 openssl；如果 Nginx 使用自定义路径，请检查 nginx -T 权限。" : undefined,
       });
-    } catch (e) { try { client?.end(); } catch {} next(phaseError("scan", e)); }
+    } catch (e) { try { client?.end(); } catch {} next(phaseError("scan", e, configSecrets(db, secret, env))); }
   });
   router.post("/machine/:machineId/renew", async (req, res, next) => {
     const id = machineId(req); const parsed = RenewBody.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: "bad_request" });
     const row = db.prepare("SELECT * FROM certificate_inventory WHERE id=? AND machine_id=?").get(parsed.data.id, id) as any;
     if (!row) return res.status(404).json({ error: "certificate_not_found" });
     try { await renewStoredCertificate(db, secret, env, id, row); res.json({ ok: true, reloaded: true }); }
-    catch (e) { db.prepare("UPDATE certificate_inventory SET status='error',last_error=? WHERE id=?").run(String(e instanceof Error ? e.message : e).slice(-2000), row.id); next(phaseError("renew", e)); }
+    catch (e) { db.prepare("UPDATE certificate_inventory SET status='error',last_error=? WHERE id=?").run(redactSecrets(String(e instanceof Error ? e.message : e), configSecrets(db, secret, env)).slice(-2000), row.id); next(phaseError("renew", e, configSecrets(db, secret, env))); }
   });
   // Manual issuance: the operator types the domains, Cloudflare DNS-01 does the
   // validation, and the result is written into the same inventory the scanner
@@ -576,7 +598,7 @@ export function certificateRouter(db: Db, secret: string, env: CertSettings) {
       const finalDomains = issued.domains.length ? issued.domains : domains;
       storeCertificate(db, id, { path: certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, issuer: "" });
       res.json({ ok: true, certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, reloaded: reload });
-    } catch (e) { next(phaseError("issue", e)); } finally { try { client?.end(); } catch {} }
+    } catch (e) { next(phaseError("issue", e, configSecrets(db, secret, env))); } finally { try { client?.end(); } catch {} }
   });
   // Remove one certificate from the inventory. Nothing is deleted on the server:
   // the operator is dropping a dead path or an unwanted entry, and a later scan
@@ -638,7 +660,7 @@ export function startCertificateScheduler(db: Db, secret: string, env: CertSetti
           await renewStoredCertificate(db, secret, env, row.machineId, full);
           db.prepare("UPDATE certificate_inventory SET status='ok' WHERE id=?").run(row.id);
         } catch (e) {
-          db.prepare("UPDATE certificate_inventory SET status='error',last_error=? WHERE id=?").run(String(e instanceof Error ? e.message : e).slice(-2000), row.id);
+          db.prepare("UPDATE certificate_inventory SET status='error',last_error=? WHERE id=?").run(redactSecrets(String(e instanceof Error ? e.message : e), configSecrets(db, secret, env)).slice(-2000), row.id);
         }
       }
     } catch {

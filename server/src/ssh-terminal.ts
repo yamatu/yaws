@@ -172,7 +172,13 @@ export function terminalSocket(
       );
     })().catch((error: unknown) =>
       finish(
-        error instanceof Error ? error.message : "ssh_connect_failed",
+        // Strip control characters so a hostile remote host cannot inject escape
+        // sequences / line breaks into the operator's terminal status line.
+        (error instanceof Error ? error.message : "ssh_connect_failed")
+          // eslint-disable-next-line no-control-regex
+          .replace(/[\x00-\x1f\x7f]+/g, " ")
+          .trim()
+          .slice(0, 300) || "ssh_connect_failed",
         true,
       ),
     );

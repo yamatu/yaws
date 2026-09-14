@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import os from "node:os";
 import zlib from "node:zlib";
 import Database from "better-sqlite3";
-import { loadEnv } from "./env.js";
+import { loadEnv, parseTrustProxy } from "./env.js";
 import { openDb } from "./db.js";
 import { authMiddleware } from "./http.js";
 import { hashAgentKey, hashPassword, signToken, verifyPassword } from "./auth.js";
@@ -17,8 +17,12 @@ import { decryptText, encryptText } from "./crypto.js";
 import { createPingService } from "./ping.js";
 import { workspaceRouter } from "./workspace.js";
 import { aiRouter } from "./ai.js";
-import { WorkspaceError } from "./ssh.js";
+import { WorkspaceError, shellQuote } from "./ssh.js";
 import { certificateRouter, startCertificateScheduler } from "./certificates.js";
+import { renderInstallScript } from "./install-script.js";
+import { billingMonthBoundsUtc } from "./billing.js";
+import { ttlKeyedStore, ttlStore } from "./cache.js";
+import { computeUptimeBuckets } from "./uptime.js";
 
 const env = loadEnv();
 const db = openDb(env.DATABASE_PATH);
@@ -38,24 +42,105 @@ if (previousAgentKeySecret && previousAgentKeySecret !== agentKeySecret) {
 
 const app = express();
 app.disable("x-powered-by");
+app.set("trust proxy", parseTrustProxy(env.TRUST_PROXY));
 app.use(express.json({ limit: "1mb" }));
 app.use("/api", (_req, res, next) => { res.setHeader("cache-control", "no-store"); next(); });
-app.use((_req, res, next) => {
+app.use((req, res, next) => {
   res.setHeader("x-content-type-options", "nosniff");
   res.setHeader("x-frame-options", "DENY");
   res.setHeader("referrer-policy", "no-referrer");
+  res.setHeader("x-permitted-cross-domain-policies", "none");
+  res.setHeader("cross-origin-opener-policy", "same-origin");
+  res.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
+  // The SPA only ever loads same-origin assets; inline styles are needed because the UI
+  // sets element styles dynamically. Keep this list in sync with the dashboard features.
+  res.setHeader(
+    "content-security-policy",
+    [
+      "default-src 'self'",
+      "base-uri 'none'",
+      "object-src 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'self'",
+      "img-src 'self' data: blob:",
+      "style-src 'self' 'unsafe-inline'",
+      "script-src 'self'",
+      "font-src 'self' data:",
+      "connect-src 'self' ws: wss:",
+      "worker-src 'self' blob:",
+      "manifest-src 'self'",
+    ].join("; ")
+  );
+  // Only advertise HSTS when TLS terminated in front of the app.
+  if (String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim().toLowerCase() === "https")
+    res.setHeader("strict-transport-security", "max-age=15552000; includeSubDomains");
   next();
 });
 
 let isRestoring = false;
 const loginFailures = new Map<string, { count: number; windowStartedAt: number }>();
+
+// Password verification is CPU bound (bcrypt cost 12). Requests wait for a free slot in
+// FIFO order instead of being rejected outright, so a burst of unauthenticated requests
+// cannot lock the administrator out with four cheap requests.
+const PASSWORD_CHECK_LIMIT = 4;
+const PASSWORD_QUEUE_LIMIT = 64;
+const PASSWORD_CHECK_TIMEOUT_MS = 10_000;
 let passwordChecks = 0;
+const passwordWaiters: Array<{ grant: () => void }> = [];
+
+function acquirePasswordSlot(): Promise<boolean> {
+  if (passwordChecks < PASSWORD_CHECK_LIMIT) {
+    passwordChecks += 1;
+    return Promise.resolve(true);
+  }
+  if (passwordWaiters.length >= PASSWORD_QUEUE_LIMIT) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout;
+    const entry = {
+      grant: () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(true);
+      },
+    };
+    timer = setTimeout(() => {
+      const index = passwordWaiters.indexOf(entry);
+      if (index >= 0) passwordWaiters.splice(index, 1);
+      if (settled) return;
+      settled = true;
+      resolve(false);
+    }, PASSWORD_CHECK_TIMEOUT_MS);
+    timer.unref();
+    passwordWaiters.push(entry);
+  });
+}
+
+function releasePasswordSlot() {
+  const next = passwordWaiters.shift();
+  if (next) {
+    // Hand the slot over without touching the in-flight counter.
+    next.grant();
+    return;
+  }
+  if (passwordChecks > 0) passwordChecks -= 1;
+}
+
 app.use(["/api/auth/login", "/api/auth/bootstrap"], (_req, res, next) => {
-  if (passwordChecks >= 4) return res.status(429).json({ error: "too_many_attempts" });
-  passwordChecks++;
-  let released = false;
-  const release = () => { if (!released) { released = true; passwordChecks--; } };
-  res.once("finish", release); res.once("close", release); next();
+  void acquirePasswordSlot().then((granted) => {
+    if (!granted) return res.status(429).json({ error: "too_many_attempts" });
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      releasePasswordSlot();
+    };
+    res.once("finish", release);
+    res.once("close", release);
+    next();
+  });
 });
 
 function asyncRoute(fn: (req: Request, res: express.Response, next: express.NextFunction) => Promise<any>) {
@@ -162,7 +247,10 @@ function rotateStoredSecrets(previousSecret: string, currentSecret: string) {
 }
 
 function loginAttemptKey(req: Request) {
-  return req.socket.remoteAddress ?? "unknown";
+  // Use the proxy-aware client address: behind the documented nginx setup the socket address
+  // is the proxy itself, which would give every user one shared failure budget (and let any
+  // single attacker lock everybody out). TRUST_PROXY decides how req.ip is derived.
+  return req.ip || req.socket.remoteAddress || "unknown";
 }
 
 function loginRetryAfterMs(key: string, now: number) {
@@ -249,12 +337,13 @@ async function cleanupDeletedMachines() {
     }
   }
 }
-app.use(
-  cors({
-    origin: env.CORS_ORIGIN,
-    credentials: false,
-  })
-);
+const DEV_CORS_ORIGIN = "http://localhost:5173";
+// Cross-origin API/WebSocket access is only enabled when explicitly configured (or in the
+// development setup, where the Vite dev server proxies to this process).
+const corsOrigin = env.CORS_ORIGIN || (env.NODE_ENV === "production" ? "" : DEV_CORS_ORIGIN);
+if (corsOrigin) {
+  app.use(cors({ origin: corsOrigin, credentials: false }));
+}
 
 app.use((req, res, next) => {
   if (!isRestoring) return next();
@@ -299,116 +388,13 @@ function monthKeyUtc(at: number) {
   return `${y}-${m}`;
 }
 
-function daysInMonthUtc(year: number, month0: number) {
-  return new Date(Date.UTC(year, month0 + 1, 0)).getUTCDate();
-}
-
-function pad2(n: number) {
-  return String(n).padStart(2, "0");
-}
-
-function billingMonthBoundsUtc(atMs: number, anchorDay: number) {
-  const at = new Date(atMs);
-  let year = at.getUTCFullYear();
-  let month0 = at.getUTCMonth();
-  const a = Math.min(31, Math.max(1, anchorDay || 1));
-
-  const mkStart = (y: number, m0: number) => {
-    const d = Math.min(a, daysInMonthUtc(y, m0));
-    return Date.UTC(y, m0, d, 0, 0, 0, 0);
-  };
-  let startAt = mkStart(year, month0);
-  if (atMs < startAt) {
-    month0 -= 1;
-    if (month0 < 0) {
-      month0 = 11;
-      year -= 1;
-    }
-    startAt = mkStart(year, month0);
-  }
-
-  let endYear = year;
-  let endMonth0 = month0 + 1;
-  if (endMonth0 > 11) {
-    endMonth0 = 0;
-    endYear += 1;
-  }
-  const endAt = mkStart(endYear, endMonth0);
-  const s = new Date(startAt);
-  const periodKey = `${s.getUTCFullYear()}-${pad2(s.getUTCMonth() + 1)}-${pad2(s.getUTCDate())}`;
-  return { periodKey, startAt, endAt, anchorDay: a };
-}
-
-type UptimeBucketState = "up" | "warn" | "down";
-
-function computeUptimeBuckets(db: Database.Database, opts: { machineId: number; hours: number; bucketMin: number; offlineAfterMin: number }) {
-  const hours = Math.max(1, Math.min(24 * 30, Math.floor(opts.hours || 24)));
-  const bucketMin = Math.max(1, Math.min(60, Math.floor(opts.bucketMin || 5)));
-  const offlineAfterMin = Math.max(1, Math.min(24 * 60, Math.floor(opts.offlineAfterMin || 5)));
-
-  const endAt = Date.now();
-  const bucketMs = bucketMin * 60_000;
-  const startAt = endAt - hours * 60 * 60_000;
-  const bucketsCount = Math.floor((endAt - startAt) / bucketMs);
-
-  const prev = db
-    .prepare("SELECT at FROM metrics WHERE machine_id = ? AND at < ? ORDER BY at DESC LIMIT 1")
-    .get(opts.machineId, startAt) as any | undefined;
-
-  const rows = db
-    .prepare("SELECT at FROM metrics WHERE machine_id = ? AND at >= ? AND at <= ? ORDER BY at ASC")
-    .all(opts.machineId, startAt, endAt) as any[];
-
-  const times: number[] = [];
-  if (prev?.at) times.push(Number(prev.at));
-  for (const r of rows) times.push(Number(r.at));
-
-  let idx = 0;
-  let lastAt: number | null = null;
-  const offlineAfterMs = offlineAfterMin * 60_000;
-
-  let upCount = 0;
-  let warnCount = 0;
-  let downCount = 0;
-
-  const buckets: Array<{ at: number; state: UptimeBucketState }> = [];
-  for (let i = 0; i < bucketsCount; i++) {
-    const bucketEnd = startAt + (i + 1) * bucketMs;
-    while (idx < times.length && times[idx] <= bucketEnd) {
-      lastAt = times[idx];
-      idx++;
-    }
-
-    let state: UptimeBucketState = "down";
-    if (lastAt != null) {
-      const delta = bucketEnd - lastAt;
-      if (delta <= offlineAfterMs) state = "up";
-      else if (delta <= offlineAfterMs * 3) state = "warn";
-      else state = "down";
-    }
-
-    if (state === "up") upCount++;
-    else if (state === "warn") warnCount++;
-    else downCount++;
-
-    buckets.push({ at: bucketEnd, state });
-  }
-
-  const total = Math.max(1, buckets.length);
-  return {
-    machineId: opts.machineId,
-    startAt,
-    endAt,
-    bucketMin,
-    hours,
-    offlineAfterMin,
-    upPct: upCount / total,
-    counts: { up: upCount, warn: warnCount, down: downCount, total },
-    buckets,
-  };
-}
+// This payload only changes when a metric arrives, so a one second cache removes the
+// incentive to hammer an endpoint that needs no credentials at all.
+const publicSummary = ttlStore<{ machines: unknown[] }>(1000);
 
 app.get("/api/public/summary", (_req, res) => {
+  const cached = publicSummary.get();
+  if (cached) return res.json(cached);
   const now = Date.now();
   const rows = db
     .prepare(
@@ -441,7 +427,7 @@ app.get("/api/public/summary", (_req, res) => {
     )
     .all(now, now);
 
-  res.json({
+  const payload = {
     machines: rows.map((r: any) => ({
       id: r.id,
       name: r.name,
@@ -482,7 +468,9 @@ app.get("/api/public/summary", (_req, res) => {
             }
           : null,
     })),
-  });
+  };
+  publicSummary.set(payload);
+  res.json(payload);
 });
 
 app.get("/api/public/machines/:id", (req, res) => {
@@ -544,6 +532,10 @@ app.get("/api/public/machines/:id", (req, res) => {
   });
 });
 
+// Bucketing is now cheap, but a hostile client can still vary hours/bucketMin freely; keep the
+// number of distinct computed windows bounded and reuse each one for a couple of seconds.
+const publicUptime = ttlKeyedStore<string, ReturnType<typeof computeUptimeBuckets>>(2000, 128);
+
 app.get("/api/public/machines/:id/uptime", (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
@@ -557,13 +549,17 @@ app.get("/api/public/machines/:id/uptime", (req, res) => {
   const bucketMin = Number((req.query as any).bucketMin ?? 5);
   const offlineAfterMin = Number(getSetting("telegram_offline_after_min") ?? "5");
 
+  const key = `${id}:${hours}:${bucketMin}:${offlineAfterMin}`;
+  const cached = publicUptime.get(key);
+  if (cached) return res.json(cached);
+
   const payload = computeUptimeBuckets(db, {
     machineId: id,
     hours,
     bucketMin,
     offlineAfterMin: Number.isFinite(offlineAfterMin) ? offlineAfterMin : 5,
   });
-
+  publicUptime.set(key, payload);
   res.json(payload);
 });
 
@@ -637,7 +633,7 @@ const pingService = createPingService(db, () => !isRestoring,
   (machineId) => wsHub.pingCapability(machineId));
 app.use("/api/ping", requireAuth, requireAdmin, pingService.router);
 app.use("/api/machines", requireAuth, requireAdmin);
-app.use("/api/machines/:id/workspace", workspaceRouter(db, agentKeySecret));
+app.use("/api/machines/:id/workspace", requireAuth, requireAdmin, workspaceRouter(db, agentKeySecret));
 app.use("/api/ai", requireAuth, requireAdmin, aiRouter(db, agentKeySecret));
 app.use("/api/certificates", requireAuth, requireAdmin, certificateRouter(db, agentKeySecret, {
   CERT_EMAIL: process.env.CERT_EMAIL,
@@ -1054,7 +1050,15 @@ app.post("/api/admin/telegram/test", requireAuth, requireAdmin, asyncRoute(async
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("[telegram] test failed", e);
-    res.status(500).json({ error: e instanceof Error ? e.message : "send_failed" });
+    // Never echo a message that could contain the bot token (some HTTP clients put the
+    // request URL into the error text) back to the browser.
+    const detail = String(e instanceof Error ? e.message : e)
+      .replace(/bot\d{4,}:[A-Za-z0-9_-]{10,}/gi, "bot***")
+      .replace(/https?:\/\/\S+/gi, "<url>")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 200);
+    res.status(500).json({ error: detail || "send_failed" });
   }
 }));
 
@@ -1722,7 +1726,7 @@ const wsHub = attachWebSockets({
   jwtSecret: env.JWT_SECRET,
   agentKeySecret,
   previousAgentKeySecret,
-  corsOrigin: env.CORS_ORIGIN,
+  corsOrigin,
 });
 
 app.get("/api/ssh/sessions", requireAuth, requireAdmin, (_req, res) => {
@@ -1783,13 +1787,19 @@ const NewPasswordSchema = z
   .refine((value) => Buffer.byteLength(value, "utf8") <= 72, "password_too_long");
 const BootstrapSchema = z.object({ username: z.string().trim().min(1).max(128), password: NewPasswordSchema });
 const LoginSchema = z.object({ username: z.string().trim().min(1).max(128), password: z.string().min(1).max(1024) });
+// The agent WebSocket URL is embedded into a root-level installer script, so keep it to a
+// strict URL shape (empty means "derive it from the request host").
+const AgentWsUrlSchema = z
+  .string()
+  .max(2048)
+  .refine((value) => value === "" || /^wss?:\/\/[^\s"'`<>\\]+$/.test(value), "bad_agent_ws_url");
 const MachineCreateSchema = z.object({
   name: z.string().trim().min(1).max(128),
   notes: z.string().max(10_000).optional(),
   groupName: z.string().max(64).optional(),
   intervalSec: z.number().int().min(2).max(3600).default(5),
   agentKey: z.string().min(8).max(4096).optional(),
-  agentWsUrl: z.string().max(2048).optional(),
+  agentWsUrl: AgentWsUrlSchema.optional(),
   sshHost: z.string().max(255).optional(),
   sshPort: z.number().int().min(1).max(65535).optional(),
   sshUser: z.string().max(64).optional(),
@@ -1807,7 +1817,7 @@ const MachineUpdateSchema = z.object({
   groupName: z.string().max(64).optional(),
   intervalSec: z.number().int().min(2).max(3600).optional(),
   agentKey: z.string().min(8).max(4096).optional(),
-  agentWsUrl: z.string().max(2048).optional(),
+  agentWsUrl: AgentWsUrlSchema.optional(),
   sshHost: z.string().max(255).optional(),
   sshPort: z.number().int().min(1).max(65535).optional(),
   sshUser: z.string().max(64).optional(),
@@ -2259,164 +2269,4 @@ function escapeHtml(s: string) {
     .replace(/>/g, "&gt;")
     .replace(/\"/g, "&quot;")
     .replace(/'/g, "&#39;");
-}
-
-function renderInstallScript(opts: {
-  machineId: number;
-  wsUrl: string;
-  key: string;
-  intervalSec: number;
-  agentRepo: string;
-  releaseBaseUrl: string;
-}) {
-  const cfg = {
-    url: opts.wsUrl,
-    id: opts.machineId,
-    key: opts.key,
-    disk: "/",
-    intervalSec: opts.intervalSec,
-  };
-  const cfgJson = JSON.stringify(cfg, null, 2);
-  const base = opts.releaseBaseUrl.replace(/\/+$/, "");
-  const repo = opts.agentRepo.trim();
-
-  return `#!/usr/bin/env bash
-set -euo pipefail
-
-if [ "\${EUID:-\$(id -u)}" -ne 0 ]; then
-  if command -v sudo >/dev/null 2>&1; then
-    exec sudo -E bash "$0" "$@"
-  fi
-  echo "Please run as root." >&2
-  exit 1
-fi
-
-FORCE=0
-CHECK_ONLY=0
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --force) FORCE=1 ;;
-    --check) CHECK_ONLY=1 ;;
-    -h|--help)
-      echo "Usage: $0 [--check] [--force]"
-      exit 0
-      ;;
-    *) echo "Unknown arg: $1" >&2; exit 2 ;;
-  esac
-  shift
-done
-
-OS="\$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="\$(uname -m)"
-if [ "\$OS" != "linux" ]; then
-  echo "Unsupported OS: \$OS (only linux supported by this installer)" >&2
-  exit 1
-fi
-
-case "\$ARCH" in
-  x86_64|amd64) ASSET="yaws-agent-linux-amd64" ;;
-  aarch64|arm64) ASSET="yaws-agent-linux-arm64" ;;
-  *) echo "Unsupported arch: \$ARCH" >&2; exit 1 ;;
-esac
-
-BIN="/usr/local/bin/yaws-agent"
-CFG="/etc/yaws-agent.json"
-SVC="/etc/systemd/system/yaws-agent.service"
-
-REPO="${repo}"
-BASE="${base}"
-
-LATEST_TAG=""
-if [ -n "$REPO" ]; then
-  API="https://api.github.com/repos/$REPO/releases/latest"
-  if command -v curl >/dev/null 2>&1; then
-    JSON="\$(curl -fsSL "\$API" 2>/dev/null || true)"
-  elif command -v wget >/dev/null 2>&1; then
-    JSON="\$(wget -qO- "\$API" 2>/dev/null || true)"
-  else
-    JSON=""
-  fi
-  if [ -n "\$JSON" ]; then
-    LATEST_TAG="\$(printf '%s' "\$JSON" | tr -d '\r' | grep -m1 '\"tag_name\"' | sed -E 's/.*\"tag_name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/')"
-  fi
-
-  # If BASE is a GitHub release URL, prefer downloading by tag so "latest" and version checks stay in sync.
-  if [ -n "\$LATEST_TAG" ] && printf '%s' "\$BASE" | grep -q '^https://github.com/'; then
-    BASE="https://github.com/$REPO/releases/download/\$LATEST_TAG"
-  fi
-fi
-
-INSTALLED_TAG=""
-if [ -x "\$BIN" ]; then
-  INSTALLED_TAG="\$("\$BIN" -version 2>/dev/null | head -n1 | tr -d '\r' || true)"
-fi
-
-if [ "\$CHECK_ONLY" -eq 1 ]; then
-  echo "installed=\${INSTALLED_TAG:-none}"
-  echo "latest=\${LATEST_TAG:-unknown}"
-  exit 0
-fi
-
-NEED_DOWNLOAD=0
-if [ ! -x "\$BIN" ] || [ "\$FORCE" -eq 1 ]; then
-  NEED_DOWNLOAD=1
-elif [ -n "\$LATEST_TAG" ]; then
-  # If the installed agent doesn't support -version, treat it as outdated.
-  if [ -z "\$INSTALLED_TAG" ] || [ "\$INSTALLED_TAG" != "\$LATEST_TAG" ]; then
-    NEED_DOWNLOAD=1
-  fi
-fi
-
-TMP="\$(mktemp -d)"
-trap 'rm -rf "\$TMP"' EXIT
-
-if [ "\$NEED_DOWNLOAD" -eq 1 ]; then
-  echo "[1/4] Downloading agent: \$BASE/\$ASSET (installed=\${INSTALLED_TAG:-none} latest=\${LATEST_TAG:-unknown})"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "\$BASE/\$ASSET" -o "\$TMP/yaws-agent"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "\$TMP/yaws-agent" "\$BASE/\$ASSET"
-  else
-    echo "Need curl or wget." >&2
-    exit 1
-  fi
-  install -m 0755 "\$TMP/yaws-agent" "\$BIN"
-else
-  echo "[1/4] Agent already latest: \${INSTALLED_TAG:-unknown}"
-fi
-
-echo "[2/4] Writing config: \$CFG"
-cat > "\$CFG" <<'JSON'
-${cfgJson}
-JSON
-chmod 0600 "\$CFG"
-
-echo "[3/4] Installing service"
-if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-  cat > "\$SVC" <<'UNIT'
-[Unit]
-Description=YAWS Agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/yaws-agent -config /etc/yaws-agent.json
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-  systemctl daemon-reload
-  systemctl enable --now yaws-agent
-  systemctl restart yaws-agent
-  echo "[4/4] Done. systemctl status yaws-agent --no-pager"
-else
-  echo "[3/4] systemd not found; running in background"
-  nohup "\$BIN" -config "\$CFG" >/var/log/yaws-agent.log 2>&1 &
-  echo "[4/4] Done. log: /var/log/yaws-agent.log"
-fi
-`;
 }

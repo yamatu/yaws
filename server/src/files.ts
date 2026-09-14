@@ -6,6 +6,7 @@ import { connectMachine, WorkspaceError, shellQuote } from "./ssh.js";
 
 export const TEXT_LIMIT = 512 * 1024;
 export const FILE_LIMIT = 8 * 1024 * 1024;
+export const BACKUP_KEEP = 3;
 export const revision = (data: Buffer) =>
   createHash("sha256").update(data).digest("hex");
 export function remotePath(value: string) {
@@ -19,6 +20,25 @@ export function remotePath(value: string) {
 }
 export function insideRoot(root: string, file: string) {
   return root === "/" || file === root || file.startsWith(`${root}/`);
+}
+/**
+ * Remote edits leave `<file>.yaws-backup-<epoch>-<random>` copies behind so an operator can roll
+ * back by hand. Without pruning they accumulate forever (one per applied AI proposal), so keep
+ * only the newest `keep` copies of the same file. Inputs are directory entry names.
+ */
+export function backupsToPrune(
+  names: string[],
+  target: string,
+  keep = BACKUP_KEEP,
+): string[] {
+  const dir = path.posix.dirname(target);
+  const prefix = `${path.posix.basename(target)}.yaws-backup-`;
+  return names
+    .filter((name) => name.startsWith(prefix) && !name.includes("/"))
+    .sort()
+    .reverse()
+    .slice(Math.max(0, keep))
+    .map((name) => path.posix.join(dir, name));
 }
 export function callback<T>(
   run: (done: (error: Error | undefined | null, value: T) => void) => void,
@@ -222,6 +242,26 @@ export class RemoteFiles {
         if ((e as { code?: number }).code !== 2)
           console.warn("[sftp] temporary file cleanup failed");
       });
+      if (backup) await this.pruneBackups(target);
+    }
+  }
+  /**
+   * Best effort: drop all but the newest `BACKUP_KEEP` rollback copies of `target`.
+   * A readdir/unlink failure never fails the write that already succeeded.
+   */
+  async pruneBackups(target: string) {
+    try {
+      const entries = await callback<FileEntryWithStats[]>((cb) =>
+        this.sftp.readdir(path.posix.dirname(target), cb),
+      );
+      const stale = backupsToPrune(
+        entries.map((entry) => String(entry.filename)),
+        target,
+      );
+      for (const name of stale)
+        await action((cb) => this.sftp.unlink(name, cb)).catch(() => {});
+    } catch {
+      // ignore: pruning is housekeeping only
     }
   }
   async discover() {

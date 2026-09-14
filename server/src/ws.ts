@@ -1,12 +1,13 @@
 import type { IncomingMessage } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 import { z } from "zod";
-import type { Db } from "./db.js";
+import { memo, type Db } from "./db.js";
 import { verifyAgentKey, verifyToken } from "./auth.js";
 import { currentUser } from "./http.js";
 import { terminalSocket, type TerminalSession } from "./ssh-terminal.js";
 import { randomUUID } from "node:crypto";
 import type { PingResult } from "./ping.js";
+import { billingMonthBoundsUtc } from "./billing.js";
 
 type UiClient = {
   ws: WebSocket;
@@ -41,6 +42,11 @@ export function attachWebSockets(opts: {
   const browserTokens = new Map<WebSocket, string>();
   opts.db.prepare("UPDATE ssh_sessions SET ended_at = ?, status = 'closed', reason = 'server_restarted' WHERE ended_at IS NULL").run(Date.now());
   const pendingPings = new Map<string, { ws: WebSocket; finish: (result: PingResult) => void }>();
+  // Password/HMAC verification is expensive (bcrypt fallback for legacy agent keys), so the
+  // number of concurrent agent handshakes is bounded. Connections beyond the cap are told to
+  // back off instead of queueing unbounded CPU work.
+  const MAX_CONCURRENT_KEY_CHECKS = 8;
+  let keyChecks = 0;
   function probeMachine(machineId: number, target: string, signal?: AbortSignal): Promise<PingResult> {
     const agent = agents.get(machineId);
     const failed = (error: string) => ({ at: Date.now(), latencyMs: null, error });
@@ -175,14 +181,25 @@ export function attachWebSockets(opts: {
             ws.close(1008, "unknown machine");
             return;
           }
-          let keyOk = await verifyAgentKey(msg.key, row.agent_key_hash, opts.agentKeySecret);
-          if (
-            !keyOk &&
-            opts.previousAgentKeySecret &&
-            opts.previousAgentKeySecret !== opts.agentKeySecret &&
-            !row.agent_key_hash.startsWith("$2")
-          ) {
-            keyOk = await verifyAgentKey(msg.key, row.agent_key_hash, opts.previousAgentKeySecret);
+          if (keyChecks >= MAX_CONCURRENT_KEY_CHECKS) {
+            ws.send(JSON.stringify({ type: "error", error: "agent_busy" }));
+            ws.close(1013, "busy");
+            return;
+          }
+          keyChecks += 1;
+          let keyOk = false;
+          try {
+            keyOk = await verifyAgentKey(msg.key, row.agent_key_hash, opts.agentKeySecret);
+            if (
+              !keyOk &&
+              opts.previousAgentKeySecret &&
+              opts.previousAgentKeySecret !== opts.agentKeySecret &&
+              !row.agent_key_hash.startsWith("$2")
+            ) {
+              keyOk = await verifyAgentKey(msg.key, row.agent_key_hash, opts.previousAgentKeySecret);
+            }
+          } finally {
+            keyChecks -= 1;
           }
           if (ws.readyState !== WebSocket.OPEN) return;
           if (!keyOk) {
@@ -260,17 +277,16 @@ export function attachWebSockets(opts: {
           const l1 = msg.load?.l1 ?? 0;
           const l5 = msg.load?.l5 ?? 0;
           const l15 = msg.load?.l15 ?? 0;
-          const touch = opts.db
-            .prepare("UPDATE machines SET last_seen_at = ?, online = 1 WHERE id = ? AND deleted_at IS NULL")
-            .run(at, machineId);
+          const touch = memo(opts.db,
+            "UPDATE machines SET last_seen_at = ?, online = 1 WHERE id = ? AND deleted_at IS NULL"
+          ).run(at, machineId);
           if (touch.changes === 0) {
             ws.close(1008, "unknown machine");
             return;
           }
 
-          opts.db
-            .prepare(
-              `INSERT INTO metrics (
+          memo(opts.db,
+            `INSERT INTO metrics (
                  machine_id, at,
                  cpu_usage, mem_used, mem_total, disk_used, disk_total,
                  net_rx_bytes, net_tx_bytes,
@@ -278,7 +294,7 @@ export function attachWebSockets(opts: {
                  load_1, load_5, load_15
                 )
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            )
+          )
             .run(
               machineId,
               at,
@@ -326,7 +342,7 @@ export function attachWebSockets(opts: {
       if (agent?.ws !== ws) return;
       agents.delete(machineId);
       if (!opts.db.open) return;
-      opts.db.prepare("UPDATE machines SET online = 0 WHERE id = ? AND deleted_at IS NULL").run(machineId);
+      memo(opts.db, "UPDATE machines SET online = 0 WHERE id = ? AND deleted_at IS NULL").run(machineId);
       broadcastUi({ type: "machine_status", machineId, online: false, lastSeenAt: Date.now() });
     });
   }
@@ -384,46 +400,6 @@ export function attachWebSockets(opts: {
   return { closeAgent, closeSshSession, probeMachine, closeUser, pingCapability };
 }
 
-function daysInMonthUtc(year: number, month0: number) {
-  return new Date(Date.UTC(year, month0 + 1, 0)).getUTCDate();
-}
-
-function pad2(n: number) {
-  return String(n).padStart(2, "0");
-}
-
-function billingMonthBoundsUtc(atMs: number, anchorDay: number) {
-  const at = new Date(atMs);
-  let year = at.getUTCFullYear();
-  let month0 = at.getUTCMonth();
-  const a = Math.min(31, Math.max(1, anchorDay || 1));
-
-  const mkStart = (y: number, m0: number) => {
-    const d = Math.min(a, daysInMonthUtc(y, m0));
-    return Date.UTC(y, m0, d, 0, 0, 0, 0);
-  };
-  let startAt = mkStart(year, month0);
-  if (atMs < startAt) {
-    month0 -= 1;
-    if (month0 < 0) {
-      month0 = 11;
-      year -= 1;
-    }
-    startAt = mkStart(year, month0);
-  }
-
-  let endYear = year;
-  let endMonth0 = month0 + 1;
-  if (endMonth0 > 11) {
-    endMonth0 = 0;
-    endYear += 1;
-  }
-  const endAt = mkStart(endYear, endMonth0);
-  const s = new Date(startAt);
-  const periodKey = `${s.getUTCFullYear()}-${pad2(s.getUTCMonth() + 1)}-${pad2(s.getUTCDate())}`;
-  return { periodKey, startAt, endAt, anchorDay: a };
-}
-
 function updateBillingMonthTraffic(db: Db, machineId: number, at: number, netRx: number, netTx: number) {
   const now = Date.now();
   const state = db
@@ -466,7 +442,7 @@ function updateBillingMonthTraffic(db: Db, machineId: number, at: number, netRx:
   const bounds = billingMonthBoundsUtc(at, anchorDay);
 
   if (!state || state.periodKey !== bounds.periodKey) {
-    db.prepare(
+    memo(db,
       `INSERT INTO traffic_cycles_state (
          machine_id, anchor_day, period_key, start_at, end_at,
          last_at, last_rx_bytes, last_tx_bytes, usage_rx_bytes, usage_tx_bytes, updated_at
@@ -485,7 +461,7 @@ function updateBillingMonthTraffic(db: Db, machineId: number, at: number, netRx:
          updated_at = excluded.updated_at`
     ).run(machineId, bounds.anchorDay, bounds.periodKey, bounds.startAt, bounds.endAt, at, netRx, netTx, now);
 
-    db.prepare(
+    memo(db,
       `INSERT INTO traffic_cycles (machine_id, period_key, start_at, end_at, rx_bytes, tx_bytes, updated_at)
        VALUES (?, ?, ?, ?, 0, 0, ?)
        ON CONFLICT(machine_id, period_key) DO UPDATE SET
@@ -510,7 +486,7 @@ function updateBillingMonthTraffic(db: Db, machineId: number, at: number, netRx:
   if (netTx >= state.lastTx) usageTx += netTx - state.lastTx;
   else usageTx += netTx;
 
-  db.prepare(
+  memo(db,
     `UPDATE traffic_cycles_state
      SET period_key = ?, start_at = ?, end_at = ?,
          last_at = ?, last_rx_bytes = ?, last_tx_bytes = ?,
@@ -518,7 +494,7 @@ function updateBillingMonthTraffic(db: Db, machineId: number, at: number, netRx:
      WHERE machine_id = ?`
   ).run(bounds.periodKey, bounds.startAt, bounds.endAt, at, netRx, netTx, usageRx, usageTx, now, machineId);
 
-  db.prepare(
+  memo(db,
     `INSERT INTO traffic_cycles (machine_id, period_key, start_at, end_at, rx_bytes, tx_bytes, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(machine_id, period_key) DO UPDATE SET
@@ -530,86 +506,6 @@ function updateBillingMonthTraffic(db: Db, machineId: number, at: number, netRx:
   ).run(machineId, bounds.periodKey, bounds.startAt, bounds.endAt, usageRx, usageTx, now);
 
   return { month: bounds.periodKey, startAt: bounds.startAt, endAt: bounds.endAt, rxBytes: usageRx, txBytes: usageTx, updatedAt: now };
-}
-
-function monthKeyUtc(at: number) {
-  const d = new Date(at);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
-}
-
-function updateMonthlyTraffic(db: Db, machineId: number, at: number, netRx: number, netTx: number) {
-  const now = Date.now();
-  const month = monthKeyUtc(at);
-  const state = db
-    .prepare(
-      `SELECT
-         month,
-         last_at as lastAt,
-         last_rx_bytes as lastRx,
-         last_tx_bytes as lastTx,
-         usage_rx_bytes as usageRx,
-         usage_tx_bytes as usageTx
-       FROM traffic_monthly_state WHERE machine_id = ?`
-    )
-    .get(machineId) as
-    | { month: string; lastAt: number; lastRx: number; lastTx: number; usageRx: number; usageTx: number }
-    | undefined;
-
-  if (!state || state.month !== month) {
-    db.prepare(
-      `INSERT INTO traffic_monthly_state (machine_id, month, last_at, last_rx_bytes, last_tx_bytes, usage_rx_bytes, usage_tx_bytes, updated_at)
-       VALUES (?, ?, ?, ?, ?, 0, 0, ?)
-       ON CONFLICT(machine_id) DO UPDATE SET
-         month = excluded.month,
-         last_at = excluded.last_at,
-         last_rx_bytes = excluded.last_rx_bytes,
-         last_tx_bytes = excluded.last_tx_bytes,
-         usage_rx_bytes = 0,
-         usage_tx_bytes = 0,
-         updated_at = excluded.updated_at`
-    ).run(machineId, month, at, netRx, netTx, now);
-
-    db.prepare(
-      `INSERT INTO traffic_monthly (machine_id, month, rx_bytes, tx_bytes, updated_at)
-       VALUES (?, ?, 0, 0, ?)
-       ON CONFLICT(machine_id, month) DO UPDATE SET updated_at = excluded.updated_at`
-    ).run(machineId, month, now);
-
-    return { month, rxBytes: 0, txBytes: 0, updatedAt: now };
-  }
-
-  if (at < state.lastAt) {
-    return { month, rxBytes: state.usageRx, txBytes: state.usageTx, updatedAt: state.lastAt };
-  }
-
-  let usageRx = state.usageRx;
-  let usageTx = state.usageTx;
-
-  if (netRx >= state.lastRx) usageRx += netRx - state.lastRx;
-  else usageRx += netRx;
-
-  if (netTx >= state.lastTx) usageTx += netTx - state.lastTx;
-  else usageTx += netTx;
-
-  db.prepare(
-    `UPDATE traffic_monthly_state
-     SET last_at = ?, last_rx_bytes = ?, last_tx_bytes = ?,
-         usage_rx_bytes = ?, usage_tx_bytes = ?, updated_at = ?
-     WHERE machine_id = ?`
-  ).run(at, netRx, netTx, usageRx, usageTx, now, machineId);
-
-  db.prepare(
-    `INSERT INTO traffic_monthly (machine_id, month, rx_bytes, tx_bytes, updated_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(machine_id, month) DO UPDATE SET
-       rx_bytes = excluded.rx_bytes,
-       tx_bytes = excluded.tx_bytes,
-       updated_at = excluded.updated_at`
-  ).run(machineId, month, usageRx, usageTx, now);
-
-  return { month, rxBytes: usageRx, txBytes: usageTx, updatedAt: now };
 }
 
 const UiMessageSchema = z.discriminatedUnion("type", [

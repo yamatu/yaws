@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 
 function deriveKey(secret: string) {
+  // The secret is required to be high entropy (>= 32 chars in production), so a single
+  // SHA-256 pass is enough to turn it into an AES-256 key. This also keeps the key stable
+  // across upgrades, which matters because it decrypts stored credentials in place.
   return crypto.createHash("sha256").update(secret, "utf8").digest();
 }
 
@@ -14,12 +17,17 @@ export function encryptText(plaintext: string, secret: string) {
 }
 
 export function decryptText(payload: string, secret: string) {
-  const [ivB64, tagB64, dataB64] = payload.split(":");
+  const parts = payload.split(":");
+  if (parts.length !== 3) throw new Error("bad_ciphertext");
+  const [ivB64, tagB64, dataB64] = parts;
   if (!ivB64 || !tagB64 || !dataB64) throw new Error("bad_ciphertext");
   const key = deriveKey(secret);
   const iv = Buffer.from(ivB64, "base64");
   const tag = Buffer.from(tagB64, "base64");
   const data = Buffer.from(dataB64, "base64");
+  // Reject malformed envelope parameters instead of letting node throw cryptic errors.
+  if (iv.length !== 12) throw new Error("bad_ciphertext");
+  if (tag.length !== 16) throw new Error("bad_ciphertext");
   const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
   decipher.setAuthTag(tag);
   const plaintext = Buffer.concat([decipher.update(data), decipher.final()]);

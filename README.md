@@ -106,7 +106,7 @@ curl -X POST http://localhost:3001/api/auth/bootstrap \
 - v0.1.3 的旧主控监控将保留历史并暂停；请删除旧项后，按机器重新添加，避免混合不同来源的数据。
 - 每台机器进入 SSH 工作区前须核对并保存 SSH 主机指纹。可在服务器运行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256`（以服务端实际使用的主机密钥为准）。连接地址或指纹变化后需重新核实。
 - “快捷指令”按机器保存；可插入终端或确认后执行。“文件”通过同一 SSH 用户的 SFTP 权限访问，识别 Nginx、Apache、Caddy、Docker、宝塔、1Panel 等常见目录，同时支持手动路径。
-- 文本编辑限制为 UTF-8、512 KiB；上传/下载限制为 8 MiB。上传不覆盖已有文件。保存会检查内容版本、保留原权限和所有者、生成 `.yaws-backup-*`，OpenSSH 使用原子替换；不支持扩展的 SFTP 使用保留原文件的回滚替换。ACL/xattr 不通过 SFTP 复制，特殊文件和二进制文件不支持在线编辑。
+- 文本编辑限制为 UTF-8、512 KiB；上传/下载限制为 8 MiB。上传不覆盖已有文件。保存会检查内容版本、保留原权限和所有者、生成 `.yaws-backup-*` 回滚副本（同一文件只保留最近 3 份，旧的自动清理），OpenSSH 使用原子替换；不支持扩展的 SFTP 使用保留原文件的回滚替换。ACL/xattr 不通过 SFTP 复制，特殊文件和二进制文件不支持在线编辑。
 - AI 设置支持完整接口地址或 `/v1` 基地址、模型、可选推理级别；`high`、`max` 等按提供方原样发送，具体支持范围由模型接口决定。模型必须支持工具调用。Responses 使用 `reasoning.effort`，Chat 使用 `reasoning_effort`。
 - AI 只读取选定目录中的文件并生成建议，文件内容会发送到配置的模型接口。常见凭据路径会被拒绝，但配置文件仍可能包含敏感值；请选择适合发送的目录。AI 的文件修改和命令逐项审批，命令使用 SSH 用户权限运行，不是容器沙箱。
 - AI 密钥、任务和修改内容加密存储；改变 API 域名不会复用之前域名的密钥。默认仅允许公共 HTTPS 接口，自建内网接口需显式开启“允许内网 / HTTP 接口”。
@@ -150,6 +150,11 @@ server {
     proxy_set_header Connection $connection_upgrade;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto $scheme;
+    # Required: without these the backend only sees the proxy address, so every
+    # login attempt shares one rate-limit budget (login lockout) and the log has
+    # no real client IP. Keep TRUST_PROXY=1 in .env to match this single hop.
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
   }
@@ -158,6 +163,8 @@ server {
     proxy_pass http://yaws_backend;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
   }
 }
 ```
@@ -218,16 +225,31 @@ npm run dev
 - Web 开发端口：`http://localhost:5173`
 - API/WS：`http://localhost:3001`
 
+## 安全基线
+
+代码层面已经内置以下防护，运维时请一并确认：
+
+- **请求头**：所有响应都带 `Content-Security-Policy`（无内联脚本/外部资源，`connect-src` 仅本方同源 + `ws(s)`）、`X-Content-Type-Options`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、`Permissions-Policy`、`Cross-Origin-Opener-Policy`；当 `X-Forwarded-Proto: https` 时附加 HSTS。若要新增 CDN/外链等资源，必须同步放宽 CSP，否则会被浏览器拦截。
+- **登录**：生产环境必须显式提供 `BOOTSTRAP_TOKEN` 才能初始化管理员；密码校验（bcrypt）并发上限 4、排队上限 64、排队超时 10 秒，超过则返回 429（不会把管理员永久锁在门外）；同一 IP 10 分钟内失败 20 次会短暂 429。请务必按上面的 Nginx 配置传递 `X-Forwarded-For`，否则所有客户端会被算作同一个 IP。
+- **授权**：`/api/machines/:id/workspace`（远程文件/终端）与其它 `/api/machines` 路由都显式要求 `requireAuth + requireAdmin`；WebSocket（`/ws/ui`、`/ws/ssh`）在升级前校验 Origin、JWT 和角色，探针连接必须通过机器密钥校验。
+- **密钥强度**：生产环境 `JWT_SECRET`、`AGENT_KEY_SECRET` 少于 32 字符直接拒绝启动；数据库中保存的凭据（探针密钥、SSH 密码/私钥、Telegram、Cloudflare Token）都用 AES-256-GCM 加密存放，并校验密文结构。
+- **命令执行**：探针安装脚本会用单引号包裹所有外部参数（仓库、镜像地址），配置写入使用带引号的 heredoc，SQL 全部使用参数化语句，SSRF/命令注入白名单在 AI 与 Ping 模块中生效。
+- **AI 工作区**：远程编辑会在目标文件旁生成 `.yaws-backup-<时间戳>-<随机>` 回滚副本，现在只保留最近 3 份，避免长期占用磁盘。
+- **数据库**：WAL 模式 + `busy_timeout`，并设置 16 MiB 页缓存与预编译语句缓存以提升高并发写入（指标/流量）性能，语句缓存按连接复用。
+
+本地开发时请不要把 `.env`、`data/` 或备份文件提交到 Git。
+
 ## 环境变量（后端）
 
 见 `server/.env.example`，常用项：
 
 - `PORT`：HTTP 端口（默认 `3001`）
 - `DATABASE_PATH`：SQLite 路径（Docker 推荐用 `../data/yaws.sqlite` 或容器内绝对路径 `/app/data/yaws.sqlite`）
-- `JWT_SECRET`：JWT 密钥（至少 16 字符）
-- `AGENT_KEY_SECRET`：用于加密保存 agentKey（可选但强烈建议，至少 16 字符）
+- `JWT_SECRET`：JWT 密钥（**生产环境至少 32 字符**，用 `openssl rand -hex 32` 生成，否则启动会报错）
+- `AGENT_KEY_SECRET`：用于加密保存 agentKey（可选但强烈建议，生产环境至少 32 字符）
 - `AGENT_KEY_SECRET_PREVIOUS`：仅在轮换加密密钥时临时填写旧值
-- `CORS_ORIGIN`：开发时跨域来源；生产同域可不需要
+- `TRUST_PROXY`：反代层数（默认 `1`，对应上面的 Nginx 单层反代；端口直接暴露给公网时设为 `0`）。它决定 `X-Forwarded-For` 是否可信，因此也决定登录失败限流按哪个 IP 计数
+- `CORS_ORIGIN`：跨域来源，留空即关闭（生产默认关闭，仪表盘同域访问不需要；开发环境自动使用 `http://localhost:5173`）
 - `METRICS_RETENTION_DAYS`：指标保留天数（默认 30）
 - `METRICS_PRUNE_INTERVAL_MIN`：清理频率（默认 10 分钟）
 - `ADMIN_RESTORE_MAX_MB`：后台“恢复备份”上传上限（MB，默认 2048）

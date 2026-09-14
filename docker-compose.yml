@@ -10,7 +10,10 @@ services:
       BOOTSTRAP_TOKEN: "${BOOTSTRAP_TOKEN:-}"
       AGENT_KEY_SECRET: "${AGENT_KEY_SECRET:?set AGENT_KEY_SECRET in .env}"
       AGENT_KEY_SECRET_PREVIOUS: "${AGENT_KEY_SECRET_PREVIOUS:-}"
-      CORS_ORIGIN: "${CORS_ORIGIN:-http://localhost:3001}"
+      # Leave empty: the dashboard is served same-origin (no cross-origin API access).
+      CORS_ORIGIN: "${CORS_ORIGIN:-}"
+      # Reverse proxy hops in front of the app (1 = documented Nginx setup, 0 = direct).
+      TRUST_PROXY: "${TRUST_PROXY:-1}"
       METRICS_RETENTION_DAYS: "30"
       METRICS_PRUNE_INTERVAL_MIN: "10"
       ADMIN_RESTORE_MAX_MB: "2048"

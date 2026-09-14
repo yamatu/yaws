@@ -12,9 +12,34 @@ export function openDb(databasePath: string): Db {
   db.pragma("synchronous = NORMAL");
   db.pragma("busy_timeout = 5000");
   db.pragma("temp_store = MEMORY");
+  // 16 MiB page cache instead of the 2 MiB default: the metrics dashboard and the
+  // 1 s agent metric stream hit the same B-tree pages constantly.
+  db.pragma("cache_size = -16000");
   db.pragma("foreign_keys = ON");
+  db.pragma("wal_autocheckpoint = 2000");
   migrate(db);
   return db;
+}
+
+const statementCache = new WeakMap<Db, Map<string, Database.Statement>>();
+
+/**
+ * Cached `db.prepare`. better-sqlite3 re-parses SQL on every prepare call, which is
+ * measurable on the hot metric/traffic ingestion path. Statements are cached per
+ * connection so a closed/reopened database never reuses a stale handle.
+ */
+export function memo<T = Database.Statement>(db: Db, sql: string): T {
+  let cache = statementCache.get(db);
+  if (!cache) {
+    cache = new Map();
+    statementCache.set(db, cache);
+  }
+  let statement = cache.get(sql);
+  if (!statement) {
+    statement = db.prepare(sql);
+    cache.set(sql, statement);
+  }
+  return statement as T;
 }
 
 function migrate(db: Db) {
