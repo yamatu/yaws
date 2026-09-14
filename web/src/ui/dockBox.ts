@@ -7,7 +7,8 @@ export type Viewport = { width: number; height: number };
 
 export const DOCK_KEY = "yaws.ai.dock";
 export const MIN_DOCK_W = 320;
-export const MIN_DOCK_H = 240;
+// Tall enough for the header, the composer and a usable transcript.
+export const MIN_DOCK_H = 360;
 export const DOCK_EDGE = 8;
 
 function clamp(value: number, min: number, max: number) {

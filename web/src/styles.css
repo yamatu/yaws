@@ -96,10 +96,24 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .workspace-editor .cm-editor { height: 100%; }
 .workspace-empty { padding: 50px 20px; color: #a9b2bc; }
 .workspace-notice { padding: 8px 12px; font-size: 12px; color: #86efac; overflow-wrap: anywhere; }
-.ai-settings { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; flex: 0 1 auto; min-height: 0; overflow: auto; border-bottom: 1px solid #373c43; padding: 12px; }
-.ai-chat.compact .ai-settings { grid-template-columns: minmax(0,1fr); }
+.ai-settings { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; flex: 0 1 auto; min-height: 0; max-height: 55%; overflow: auto; border-bottom: 1px solid #373c43; padding: 12px; }
+.ai-chat.compact .ai-settings { grid-template-columns: minmax(0,1fr); max-height: 60%; }
+/* The floating panel is narrow: one field per line keeps the composer compact
+   so the transcript keeps a usable area. */
+.ai-chat.compact .ai-chat-composer { gap: 6px; padding: 8px 10px 10px; }
+.ai-chat.compact .ai-chat-meta { gap: 6px; }
+.ai-chat.compact .ai-chat-meta .ai-meta-root { flex: 1 1 100%; }
+.ai-chat.compact .ai-chat-meta .ai-meta-run { flex: 0 1 auto; }
+.ai-chat.compact .ai-chat-meta .yaws-input, .ai-chat.compact .ai-chat-meta .yaws-select { flex: 1; width: auto; min-width: 0; }
+.ai-chat.compact .ai-chat-session { flex: 1 1 40%; }
+.ai-chat.compact .ai-chat-hint, .ai-chat.compact .ai-chat-clear { display: none; }
+/* Opening the profile editor covers the transcript instead of squeezing it. */
+.ai-chat.compact .ai-settings { position: absolute; inset: 0; z-index: 5; max-height: none; align-content: start; background: #181b1f; }
+/* …and the header stays opaque above it so the form scrolls behind it. */
+.ai-chat.compact .ai-chat-head { background: #181b1f; }
 .ai-settings label,.ai-chat-composer label,.monitor-form label { display: grid; gap: 6px; font-size: 12px; color: #b5bec8; }
 .ai-answer { white-space: pre-wrap; line-height: 1.7; font-size: 14px; overflow-wrap: anywhere; max-width: 92%; }
+.ai-proposal .workspace-toolbar { flex-wrap: wrap; }
 .ai-proposal { margin-top: 4px; border: 1px solid #40464d; border-radius: 6px; overflow: hidden; }
 .ai-proposal.muted { opacity: .55; }
 .ai-proposal-note { display: flex; align-items: center; gap: 5px; padding: 7px 10px; font-size: 12px; color: #fcd34d; border-bottom: 1px solid #333a41; }
@@ -107,8 +121,8 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .diff-line { display: block; min-width: max-content; }
 .diff-add { color: #b3ebc9; background: #183528; }
 .diff-remove { color: #fda4af; background: #462329; }
-.ai-chat { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; background: #181b1f; }
-.ai-chat-head { flex: 0 0 auto; border-bottom: 1px solid #373c43; }
+.ai-chat { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; background: #181b1f; }
+.ai-chat-head { position: relative; z-index: 6; flex: 0 0 auto; border-bottom: 1px solid #373c43; }
 .ai-chat-history { max-width: 180px; }
 .ai-chat-profile { max-width: 150px; }
 .ai-chat-session { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #7b848e; }
@@ -159,6 +173,10 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-settings-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; }
 .yaws-btn.danger { border-color: #7f1d1d; color: #fda4af; }
 .ai-chat-transcript { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
+/* Message rows always keep their natural height: a tall tool card or diff must
+   never be squeezed by the neighbouring messages into an unreadable sliver. */
+.ai-chat-transcript > * { flex: 0 0 auto; }
+.ai-chat-transcript .ai-tool-out, .ai-chat-transcript .diff-view, .ai-chat-transcript .command-output { max-width: 100%; }
 .ai-chat-empty { max-width: 640px; font-size: 13px; line-height: 1.7; color: #a9b2bc; }
 .ai-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .ai-chip { padding: 6px 12px; border: 1px solid #3d4249; border-radius: 999px; background: #23272c; font-size: 12px; color: #d9e0e6; }

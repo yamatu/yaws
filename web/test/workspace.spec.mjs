@@ -30,6 +30,16 @@ function browserTest(name, fn) {
     }
   });
 }
+/** Message rows must never be squeezed by the flex layout: a tool card that
+ *  needs 31px but gets 2px both hides its text and overlaps its neighbours. */
+async function expectNoSqueezedMessages(page, scope = ".ai-chat-transcript") {
+  const bad = await page.evaluate((selector) => {
+    return [...document.querySelectorAll(selector + " > *")]
+      .filter((el) => el.scrollHeight > el.clientHeight + 1)
+      .map((el) => `${el.className}:${el.clientHeight}/${el.scrollHeight}`);
+  }, scope);
+  expect(bad).toEqual([]);
+}
 browserTest(
   "desktop workspace: trust, shortcuts, files, AI chat, machine Ping",
   async ({ page }) => {
@@ -236,6 +246,7 @@ browserTest(
       path: "test-results/ai-desktop.png",
       fullPage: true,
     });
+    await expectNoSqueezedMessages(page);
     await approval.getByRole("button", { name: "执行命令", exact: true }).click();
     await expect(approval).toContainText("已执行");
     expect(f.commands.some((c) => c.includes("systemctl restart nginx"))).toBe(
@@ -297,6 +308,7 @@ browserTest(
     await expect(page.locator(".ai-dock .ai-chat-transcript")).toContainText(
       "看一下磁盘",
     );
+    await expectNoSqueezedMessages(page, ".ai-dock .ai-chat-transcript");
     // The floating panel can be dragged anywhere and resized from its corner.
     const dock = page.locator(".ai-dock");
     const home = await dock.boundingBox();
@@ -320,6 +332,21 @@ browserTest(
     const resized = await dock.boundingBox();
     expect(resized.width).toBeGreaterThan(moved.width + 40);
     expect(resized.height).toBeGreaterThan(moved.height + 30);
+    // Even at its smallest size the transcript keeps room for the messages.
+    const small = await page.locator(".ai-dock-resize").boundingBox();
+    await page.mouse.move(small.x + 8, small.y + 8);
+    await page.mouse.down();
+    await page.mouse.move(small.x - 600, small.y - 600, { steps: 8 });
+    await page.mouse.up();
+    const shrunk = await dock.boundingBox();
+    expect(shrunk.width).toBeLessThan(resized.width);
+    expect(shrunk.height).toBeLessThan(resized.height);
+    expect(
+      await page.evaluate(
+        () => document.querySelector(".ai-dock .ai-chat-transcript").clientHeight,
+      ),
+    ).toBeGreaterThan(60);
+    await expectNoSqueezedMessages(page, ".ai-dock .ai-chat-transcript");
     // Double clicking the header sends it back to its default corner.
     await page.locator(".ai-dock-head").dblclick({ position: { x: 90, y: 12 } });
     expect(await page.evaluate(() => localStorage.getItem("yaws.ai.dock"))).toBe(

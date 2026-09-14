@@ -1072,7 +1072,7 @@ export function AiChat({
         }}
       >
         <div className="ai-chat-meta">
-          <label className="flex items-center gap-1">
+          <label className="ai-meta-root flex items-center gap-1">
             目录
             <input
               className="yaws-input font-mono"
@@ -1083,7 +1083,7 @@ export function AiChat({
               onChange={(e) => setRoot(e.target.value)}
             />
           </label>
-          <label className="flex items-center gap-1">
+          <label className="ai-meta-run flex items-center gap-1">
             执行方式
             <select
               className="yaws-select"
