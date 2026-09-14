@@ -165,6 +165,25 @@ export function CertificatesPage() {
     setBusy(false);
   }
   async function renew(c:Cert){ if(!confirm(`确认申请并更新 ${c.domains.join(", ")}？将执行 acme.sh 续期、nginx -t 后重载 Nginx。`))return;setBusy(true);setNotice(null);try{await apiFetch(`/api/certificates/machine/${selected}/renew`,{method:"POST",body:JSON.stringify({id:c.id})});await Promise.all([refreshCerts(selected),loadSummary()]);setNotice({kind:"ok",text:"证书更新成功，Nginx 已重载"});}catch(e){setNotice({kind:"err",text:`更新失败：${friendlyError(e)}`});}finally{setBusy(false)}}
+  // Deleting a record only stops YAWS from tracking and renewing it; the files
+  // on the server stay untouched, so a rescan can bring the entry back.
+  async function removeCert(c:Cert){
+    if(!confirm(`删除 ${c.domains.join(", ")} 的证书记录？\n\n仅从主控清单中移除，不会删除服务器上的 ${c.certPath}\n删除后不会再自动续期；下次扫描到该文件时会重新出现。`))return;
+    setBusy(true);setNotice(null);
+    try{ await apiFetch(`/api/certificates/cert/${c.id}`,{method:"DELETE"}); await Promise.all([refreshCerts(selected),loadSummary()]); setNotice({kind:"ok",text:`已删除 ${c.domains.join(", ")} 的记录`}); }
+    catch(e){ setNotice({kind:"err",text:`删除失败：${friendlyError(e)}`}); }
+    finally{ setBusy(false); }
+  }
+  // Bulk cleanup is scoped to the machine on screen, so the button can never
+  // remove another server's rows by surprise.
+  async function purge(scope:"expired"|"error"|"expired_or_error"){
+    const label=scope==="expired"?"所有已到期的":scope==="error"?"所有状态异常的":"所有已到期或异常的";
+    if(!selected||!confirm(`删除当前服务器上${label}证书记录？\n\n仅删除主控清单记录，不会删除服务器上的证书文件，也不会执行任何远程命令。\n删除后这些证书不再自动续期。`))return;
+    setBusy(true);setNotice(null);
+    try{ const r=await apiFetch<{deleted:number}>(`/api/certificates/purge`,{method:"POST",body:JSON.stringify({scope,machineId:selected})}); await Promise.all([refreshCerts(selected),loadSummary()]); setNotice({kind:r.deleted?"ok":"err",text:r.deleted?`已删除 ${r.deleted} 条记录`:"没有符合条件的记录"}); }
+    catch(e){ setNotice({kind:"err",text:`清理失败：${friendlyError(e)}`}); }
+    finally{ setBusy(false); }
+  }
 
   useEffect(()=>{ if(!issueMachine&&selected) setIssueMachine(selected); },[selected,issueMachine]);
   // Only machines that can actually be reached are offered: issuance uses the
@@ -191,6 +210,8 @@ export function CertificatesPage() {
 
   const selectedMachine=machines.find(m=>m.id===selected);
   const visible=certs.filter(c=>{ if(filter==="all") return true; return certState(c).key===filter; });
+  const expiredCount=certs.filter(c=>certState(c).key==="expired").length;
+  const errorCount=certs.filter(c=>c.status==="error").length;
   const lastScanAt=certs.length?Math.max(...certs.map(c=>c.lastScanAt||0)):0;
 
   return <div className="grid gap-4">
@@ -259,7 +280,11 @@ export function CertificatesPage() {
 
     <div className="yaws-card p-5">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-3"><div className="font-extrabold">证书清单{selectedMachine?` · ${selectedMachine.name}`:""}</div>{lastScanAt?<span className="text-xs text-white/40">上次扫描 {fmtTime(lastScanAt)}</span>:null}</div>
-      <div className="flex flex-wrap gap-2">{FILTERS.map(f=><button key={f.key} className={`yaws-tag ${filter===f.key?"yaws-tag-active":""}`} onClick={()=>setFilter(f.key)}>{f.label}</button>)}</div></div>
+      <div className="flex flex-wrap items-center gap-2">{FILTERS.map(f=><button key={f.key} className={`yaws-tag ${filter===f.key?"yaws-tag-active":""}`} onClick={()=>setFilter(f.key)}>{f.label}</button>)}
+        <span className="mx-1 hidden h-4 w-px bg-white/10 sm:block" />
+        <button className="yaws-tag" disabled={busy||!selected||!expiredCount} title={expiredCount?`删除当前服务器上 ${expiredCount} 条已到期记录（不会删除服务器文件）`:"当前服务器没有已到期的记录"} onClick={()=>purge("expired")}>清理已到期{expiredCount?`（${expiredCount}）`:""}</button>
+        <button className="yaws-tag" disabled={busy||!selected||!errorCount} title={errorCount?`删除当前服务器上 ${errorCount} 条异常记录`:"当前服务器没有异常记录"} onClick={()=>purge("error")}>清理异常{errorCount?`（${errorCount}）`:""}</button>
+      </div></div>
       <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="text-xs text-white/40"><tr><th className="p-2">域名</th><th className="p-2">证书路径</th><th className="p-2">到期时间</th><th className="p-2">状态</th><th className="p-2">操作</th></tr></thead><tbody>{visible.map(c=>{
         const st=certState(c); const d=daysLeft(c.expiresAt);
         return <tr key={c.id} className="border-t border-white/[.06]">
@@ -267,7 +292,7 @@ export function CertificatesPage() {
           <td className="max-w-xs truncate p-2 font-mono text-xs text-white/50" title={c.certPath}>{c.certPath}</td>
           <td className="p-2">{fmtTime(c.expiresAt)}{d!==null&&d>0?<span className={`ml-2 text-xs ${d<=EXPIRING_DAYS?"text-amber-300":"text-white/40"}`}>剩 {d} 天</span>:null}</td>
           <td className="p-2"><span className={`yaws-badge ${st.cls}`}>{st.label}</span>{c.lastError?<div className="mt-1 max-w-xs truncate text-xs text-rose-300/80" title={c.lastError}>{c.lastError}</div>:null}</td>
-          <td className="p-2"><button className="yaws-btn-primary text-xs" disabled={busy||!config?.configured||!c.keyPath} title={!c.keyPath?"未找到私钥文件，无法续期":!config?.configured?"请先配置 Cloudflare":""} onClick={()=>renew(c)}>申请/更新</button></td>
+          <td className="whitespace-nowrap p-2"><button className="yaws-btn-primary text-xs" disabled={busy||!config?.configured||!c.keyPath} title={!c.keyPath?"未找到私钥文件，无法续期":!config?.configured?"请先配置 Cloudflare":""} onClick={()=>renew(c)}>申请/更新</button><button className="yaws-btn ml-1 text-xs text-rose-300" disabled={busy} title={`从清单中删除该记录（不会删除服务器上的 ${c.certPath}）`} onClick={()=>removeCert(c)}>删除</button></td>
         </tr>;})}</tbody></table>
         {!certs.length?<div className="p-8 text-center text-sm text-white/40">{selectedMachine?"暂无记录，点击「扫描证书」开始扫描":"请先选择一台服务器"}</div>:null}
         {certs.length&&!visible.length?<div className="p-8 text-center text-sm text-white/40">当前筛选下没有证书</div>:null}</div>

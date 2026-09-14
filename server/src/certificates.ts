@@ -21,6 +21,13 @@ const CertConfig = z.object({
   autoRenewDays: z.number().int().min(1).max(90).optional(),
 });
 const RenewBody = z.object({ id: z.number().int().positive() });
+// Deleting an inventory row only stops YAWS from tracking (and renewing) a
+// certificate; the files on the server are never touched, so the scope is kept
+// explicit instead of offering a blanket "delete everything".
+const PurgeBody = z.object({
+  scope: z.enum(["expired", "error", "expired_or_error"]),
+  machineId: z.number().int().positive().optional(),
+});
 const IssueBody = z.object({
   domains: z.array(z.string().max(253)).min(1).max(30),
   certPath: z.string().max(900).optional(),
@@ -528,6 +535,33 @@ export function certificateRouter(db: Db, secret: string, env: CertSettings) {
       storeCertificate(db, id, { path: certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, issuer: "" });
       res.json({ ok: true, certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, reloaded: reload });
     } catch (e) { next(phaseError("issue", e)); } finally { try { client?.end(); } catch {} }
+  });
+  // Remove one certificate from the inventory. Nothing is deleted on the server:
+  // the operator is dropping a dead path or an unwanted entry, and a later scan
+  // simply re-adds it if the file is still there.
+  router.delete("/cert/:id", (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: "bad_certificate_id" });
+    const row = db.prepare("SELECT id, machine_id as machineId FROM certificate_inventory WHERE id=?").get(id) as { id: number; machineId: number } | undefined;
+    if (!row) return res.status(404).json({ error: "certificate_not_found" });
+    db.prepare("DELETE FROM certificate_inventory WHERE id=?").run(id);
+    res.json({ ok: true, deleted: 1, machineId: row.machineId });
+  });
+  // Bulk cleanup: "expired" drops records whose certificate has already lapsed,
+  // "error" drops rows whose last operation failed, and the combined scope does
+  // both. Deleted rows are no longer eligible for automatic renewal.
+  router.post("/purge", (req, res) => {
+    const parsed = PurgeBody.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "bad_request" });
+    const now = Date.now();
+    const where: string[] = [];
+    const args: unknown[] = [];
+    if (parsed.data.machineId) { where.push("machine_id=?"); args.push(parsed.data.machineId); }
+    if (parsed.data.scope === "error") where.push("status='error'");
+    else if (parsed.data.scope === "expired") { where.push("expires_at IS NOT NULL AND expires_at < ?"); args.push(now); }
+    else { where.push("(status='error' OR (expires_at IS NOT NULL AND expires_at < ?))"); args.push(now); }
+    const deleted = db.prepare(`DELETE FROM certificate_inventory WHERE ${where.join(" AND ")}`).run(...args).changes;
+    res.json({ ok: true, deleted });
   });
   // Last line of defence for this router: an unexpected exception (SQLite
   // failure, driver error, malformed payload) must name itself instead of

@@ -651,3 +651,61 @@ test("a stored Global API Key and a custom CA server are used as configured", as
     assert.doesNotMatch(command, /CF_Token=/);
   } finally { close(); }
 });
+
+test("certificate records can be deleted, and expired/error rows purged", async () => {
+  const { ssh, port, fp } = await startSsh({
+    onExec: (accept) => {
+      const stream = accept();
+      stream.write("subject=CN=a.example.com\nnotAfter=Jan 01 00:00:00 2030 GMT\n");
+      stream.exit(0);
+      stream.end();
+    },
+  });
+  const { api, close, db } = await startApi({ ssh, port, fp, certEnv: cfEnv });
+  try {
+    const now = Date.now();
+    const insert = db.prepare("INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(?,?,?,?,?,'',?,'','')");
+    insert.run(1, "/etc/nginx/ssl/expired.pem", "/etc/nginx/ssl/expired.key", "[]", now - 86400000, now);
+    insert.run(1, "/etc/nginx/ssl/soon.pem", "/etc/nginx/ssl/soon.key", "[]", now + 5 * 86400000, now);
+    insert.run(1, "/etc/nginx/ssl/ok.pem", "/etc/nginx/ssl/ok.key", "[]", now + 200 * 86400000, now);
+    db.prepare("INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(1,'/etc/nginx/ssl/bad.pem','/etc/nginx/ssl/bad.key','[]',?,'',?,'error','acme_issue_failed')").run(now + 300 * 86400000, now);
+
+    const machine2 = db.prepare("INSERT INTO machines(name,ssh_host,ssh_port,ssh_user,ssh_auth_type,agent_key_hash,sort_order,created_at,updated_at) VALUES('other','10.0.0.9',22,'root','password','other-agent-key',1,?,?)").run(now, now).lastInsertRowid;
+    db.prepare("INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(?,?,?,?,?,'',?,'','')").run(machine2, "/etc/nginx/ssl/other.pem", "/etc/nginx/ssl/other.key", "[]", now - 86400000, now);
+
+    const list = await api("/machine/1");
+    const certs = list.body.certificates;
+    assert.equal(certs.length, 4);
+
+    // Single delete: only the named row goes away. The list is ordered by
+    // expiry, so index 2 is the healthy 200-day certificate.
+    assert.equal(certs[2].certPath, "/etc/nginx/ssl/ok.pem");
+    const del = await api(`/cert/${certs[2].id}`, { method: "DELETE" });
+    assert.equal(del.status, 200);
+    assert.equal(del.body.deleted, 1);
+    assert.equal((await api("/machine/1")).body.certificates.length, 3);
+    assert.equal((await api(`/cert/${certs[2].id}`, { method: "DELETE" })).status, 404);
+    assert.equal((await api("/cert/not-a-number", { method: "DELETE" })).status, 400);
+
+    // Purge is scoped to one machine: the other one keeps its expired row.
+    const expired = await api("/purge", { method: "POST", body: JSON.stringify({ scope: "expired", machineId: 1 }) });
+    assert.equal(expired.status, 200);
+    assert.equal(expired.body.deleted, 1);
+    assert.equal((await api("/machine/1")).body.certificates.length, 2);
+    assert.equal((await api(`/machine/${machine2}`)).body.certificates.length, 1);
+
+    const errors = await api("/purge", { method: "POST", body: JSON.stringify({ scope: "error", machineId: 1 }) });
+    assert.equal(errors.body.deleted, 1);
+    const left = (await api("/machine/1")).body.certificates;
+    assert.equal(left.length, 1);
+    assert.equal(left[0].certPath, "/etc/nginx/ssl/soon.pem");
+
+    // An empty result is a success, not an error, so the button can be pressed twice.
+    const again = await api("/purge", { method: "POST", body: JSON.stringify({ scope: "expired_or_error", machineId: 1 }) });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.deleted, 0);
+    // A bad scope must not silently wipe the table.
+    assert.equal((await api("/purge", { method: "POST", body: JSON.stringify({ scope: "everything" }) })).status, 400);
+    assert.equal((await api("/purge", { method: "POST", body: JSON.stringify({ scope: "expired" }) })).body.deleted, 1);
+  } finally { close(); }
+});
