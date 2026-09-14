@@ -249,6 +249,16 @@ npm run dev
 5. 点击证书对应的“申请/更新”前，服务器需要安装 `acme.sh`（`PATH`、`~/.acme.sh/acme.sh`、`/root/.acme.sh/acme.sh` 任一位置），且 SSH 用户需要能够执行 `nginx -t` 并 reload Nginx。非 root 用户在有免密 sudo 时会通过 `sudo -n` 执行。更新会先备份当前证书/私钥，申请成功后执行 `nginx -t`，校验失败自动恢复备份，并回写新的到期时间。
 6. 开启“到期前自动续期”后，主控每 6 小时检查一次，默认在到期前 30 天处理。只处理扫描到且存在私钥路径的证书；因进程重启而中断的续期会在下次启动时恢复为可重试状态。
 
+错误码与常见原因：
+
+- 机器列表会直接标出 SSH 凭据状态。出现“SSH 密码/私钥无法解密”说明 `AGENT_KEY_SECRET`（未设置时回退到 `JWT_SECRET`）与保存密码时不一致，扫描必然失败。
+- 修复方式二选一：到机器详情重新保存一次 SSH 密码/私钥；或把旧密钥配到 `AGENT_KEY_SECRET_PREVIOUS` 后重启一次，程序会自动把旧的密文重新加密成新密钥（`ssh_password_enc`、`ssh_key_enc`、`agent_key_enc` 都支持轮换）。
+- `ssh_auth_failed`：用户名或密码/私钥不正确（密码能解密但服务器拒绝登录）。
+- `ssh_host_untrusted` / `ssh_host_key_changed`：需要先在机器详情完成或重新做指纹信任。
+- `ssh_exec_failed`：该账户不允许远程命令（可能被限制为仅 SFTP），或连接在握手后立即断开。
+- `certificate_scan_failed` / `certificate_renew_failed`：括号内是远程命令的 stderr 末尾，可直接用来定位（例如 `acme.sh` 未安装、DNS API 报错）。
+- `certificate_internal_error`：本应不会出现；如果看到请把括号内容反馈，服务端日志同时会打印 `[certificates] ...` 的完整堆栈。
+
 环境变量示例：
 
 ```dotenv

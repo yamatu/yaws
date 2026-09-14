@@ -48,6 +48,37 @@ export function fingerprint(key: Buffer) {
   return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
 }
 
+// Stored credentials are AES-GCM sealed with AGENT_KEY_SECRET (falling back to
+// JWT_SECRET). Changing either secret without AGENT_KEY_SECRET_PREVIOUS makes
+// every saved password undecryptable, and because trusting a host fingerprint
+// never needs the password this only shows up as a failure to scan or connect.
+// Expose the state so the UI can warn before the user tries.
+export type CredentialState = "ok" | "missing" | "undecryptable";
+
+export function credentialState(
+  machine: Pick<SshMachine, "authType" | "password" | "privateKey">,
+  secret: string,
+): CredentialState {
+  const payload = machine.authType === "key" ? machine.privateKey : machine.password;
+  if (!payload) return "missing";
+  try {
+    return decryptText(payload, secret) ? "ok" : "missing";
+  } catch {
+    return "undecryptable";
+  }
+}
+
+function decryptCredential(payload: string, secret: string, code: string) {
+  let value: string;
+  try {
+    value = decryptText(payload, secret);
+  } catch {
+    throw new WorkspaceError(409, code);
+  }
+  if (!value) throw new WorkspaceError(409, code);
+  return value;
+}
+
 export function sshConfig(machine: SshMachine, secret: string): ConnectConfig {
   if (!machine.fingerprint || machine.fingerprintAddress !== address(machine))
     throw new WorkspaceError(409, "ssh_host_untrusted");
@@ -62,11 +93,11 @@ export function sshConfig(machine: SshMachine, secret: string): ConnectConfig {
   };
   if (machine.authType === "key") {
     if (!machine.privateKey) throw new WorkspaceError(409, "ssh_key_missing");
-    common.privateKey = decryptText(machine.privateKey, secret);
+    common.privateKey = decryptCredential(machine.privateKey, secret, "ssh_key_invalid");
   } else {
     if (!machine.password)
       throw new WorkspaceError(409, "ssh_password_missing");
-    common.password = decryptText(machine.password, secret);
+    common.password = decryptCredential(machine.password, secret, "ssh_credentials_invalid");
   }
   return common;
 }
@@ -134,15 +165,19 @@ export function connectMachine(
       signal?.removeEventListener("abort", abort);
       reject(new WorkspaceError(502, "ssh_closed"));
     });
-    client.on("error", (error: Error & { level?: string }) => {
-      reject(
-        new WorkspaceError(
-          502,
-          error.message.includes("verification")
-            ? "ssh_host_key_changed"
-            : `ssh_${error.level ?? "connect_failed"}`,
-        ),
-      );
+    client.on("error", (error: any) => {
+      // ssh2 reports the reason in `level`; map the ones the operator can act on
+      // to a stable code instead of leaking "ssh_client-authentication".
+      const message = String(error?.message ?? error ?? "ssh error");
+      const level = String(error?.level ?? "");
+      const code = message.includes("verification")
+        ? "ssh_host_key_changed"
+        : level === "client-authentication"
+          ? "ssh_auth_failed"
+          : level === "client-timeout"
+            ? "ssh_timeout"
+            : "ssh_connect_failed";
+      reject(new WorkspaceError(502, code));
     });
     client.once("ready", () => resolve(client));
     try {

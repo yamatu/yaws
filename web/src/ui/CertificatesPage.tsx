@@ -4,7 +4,7 @@ import { fmtTime, daysLeft } from "./format";
 
 type Cert = { id:number; certPath:string; keyPath:string; domains:string[]; expiresAt:number|null; issuer:string; lastScanAt:number; lastRenewAt:number|null; status:string; lastError:string };
 type ScanInfo = { user?:string; uid?:string; openssl?:string; nginx?:string; sudo?:string; nginxConfig?:string; candidates?:string; certificates?:string; skipped?:string };
-type Machine = { id:number; name:string; sshHost:string; sshPort:number; sshUser:string; sshAuthType:string; sshTrusted:number };
+type Machine = { id:number; name:string; sshHost:string; sshPort:number; sshUser:string; sshAuthType:string; sshTrusted:number; credentials?:"ok"|"missing"|"undecryptable" };
 type MachineStat = { machineId:number; certificates:number; expired:number; expiring:number; nextExpiry:number|null };
 type Config = { email:string; cfTokenMasked:string; cfAccountId:string; autoRenew:boolean; autoRenewDays:number; configured:boolean };
 type ScanResult = { found:number; added:number; updated:number; pruned:number; warning?:string; info?:ScanInfo };
@@ -20,11 +20,18 @@ function friendlyError(error: unknown): string {
   const code = raw.split(":")[0];
   const detail = raw.length > code.length ? raw.slice(code.length + 1).trim() : "";
   const texts: Record<string, string> = {
-    ssh_credentials_invalid: "SSH 凭据解密失败：服务端加密密钥可能已变更，请到机器详情重新保存 SSH 密码或私钥",
+    ssh_credentials_invalid: "SSH 凭据解密失败：服务端加密密钥（AGENT_KEY_SECRET / JWT_SECRET）可能已变更，请到机器详情重新保存 SSH 密码或私钥",
+    ssh_password_missing: "这台机器没有保存 SSH 密码，请到机器详情补充",
+    ssh_key_missing: "这台机器没有保存 SSH 私钥，请到机器详情补充",
+    ssh_key_invalid: "SSH 私钥无法解密：服务端加密密钥可能已变更，请到机器详情重新粘贴私钥",
+    ssh_auth_failed: "SSH 认证失败：用户名、密码或私钥不正确（也可能该账户被禁止登录）",
     ssh_exec_failed: "服务器拒绝了命令执行：请确认该账户允许远程命令（exec），未被限制为仅 SFTP",
     ssh_exec_timeout: "远程命令执行超时，请稍后重试",
-    certificate_scan_timeout: "扫描超过 150 秒被中止：请检查服务器负载，或确认证书目录没有挂载卡死的网络盘",
     certificate_scan_failed: "远程扫描命令执行失败",
+    certificate_scan_timeout: "扫描超过 150 秒被中止：请检查服务器负载，或确认证书目录没有挂载卡死的网络盘",
+    certificate_scan_failed_detail: "扫描命令在服务器上执行失败",
+    certificate_scan_internal: "扫描结果处理失败，请把括号内的详细信息反馈给开发者",
+    certificate_internal_error: "证书功能出现未预期的服务端错误，请把括号内的详细信息反馈给开发者",
     ssh_host_untrusted: "尚未信任该服务器的 SSH 指纹，请先到机器详情完成信任",
     ssh_host_key_changed: "SSH 主机密钥已变化，请核实服务器身份后重新信任指纹",
     ssh_not_configured: "这台机器还没有配置 SSH",
@@ -85,22 +92,31 @@ export function CertificatesPage() {
   async function scanFor(id:number, opts:{silent?:boolean}={}) {
     if (opts.silent) { setScanningId(id); } else { setBusy(true); setScanningId(id); setNotice(null); }
     setSelected(id);
+    let r: ScanResult;
     try {
-      const r=await apiFetch<ScanResult>(`/api/certificates/machine/${id}/scan`,{method:"POST",body:"{}"});
-      if (r.info) setScanInfoById(p=>({...p,[id]:r.info!}));
-      await Promise.all([refreshCerts(id),loadSummary()]);
-      if (!opts.silent) setNotice({kind:"ok",text:r.warning??`扫描完成：发现 ${r.found} 个证书（新增 ${r.added} · 更新 ${r.updated}${r.pruned?` · 清理 ${r.pruned}`:""}）`});
-      return r;
+      r = await apiFetch<ScanResult>(`/api/certificates/machine/${id}/scan`,{method:"POST",body:"{}"});
     } catch(e:any) {
       if (!opts.silent) setNotice({kind:"err",text:`扫描失败：${friendlyError(e)}`});
       throw e;
     } finally { setScanningId(0); if (!opts.silent) setBusy(false); }
+    if (r.info) setScanInfoById(p=>({...p,[id]:r.info!}));
+    // The scan already stored its rows, so a failing follow-up refresh must not
+    // be reported as "扫描失败" — that hides the fact the scan worked.
+    let refreshError="";
+    await Promise.all([refreshCerts(id).catch(e=>{refreshError=friendlyError(e)}),loadSummary()]);
+    if (!opts.silent) setNotice(refreshError
+      ? {kind:"err",text:`扫描已完成（发现 ${r.found} 个证书），但刷新列表失败：${refreshError}`}
+      : {kind:"ok",text:r.warning??`扫描完成：发现 ${r.found} 个证书（新增 ${r.added} · 更新 ${r.updated}${r.pruned?` · 清理 ${r.pruned}`:""}）`});
+    return r;
   }
-  async function scan(m:Machine){ if(!m.sshTrusted||busy) return; await scanFor(m.id); }
+  // A machine with unusable credentials would only fail server-side; say why.
+  function credWarning(m:Machine){ return m.credentials==="undecryptable"?"SSH 密码/私钥无法解密（服务端加密密钥已变），请到机器详情重新保存":m.credentials==="missing"?"未保存 SSH 密码或私钥":""; }
+  function canScan(m:Machine){ return !!m.sshTrusted && (!m.credentials||m.credentials==="ok"); }
+  async function scan(m:Machine){ if(!canScan(m)||busy) return; try { await scanFor(m.id); } catch { /* already reported */ } }
   async function scanAll(){
     if (busy) return; setBusy(true); setNotice(null);
-    const targets=machines.filter(m=>m.sshTrusted);
-    if (!targets.length){ setNotice({kind:"err",text:"没有已信任 SSH 指纹的服务器可扫描，请先到机器详情完成指纹信任"}); setBusy(false); return; }
+    const targets=machines.filter(canScan);
+    if (!targets.length){ setNotice({kind:"err",text:"没有可扫描的服务器：请先信任 SSH 指纹，并确认已保存可用的 SSH 密码或私钥"}); setBusy(false); return; }
     let total=0; const failed:string[]=[];
     for (const m of targets) {
       try { const r=await scanFor(m.id,{silent:true}); total+=r.found; }
@@ -122,7 +138,7 @@ export function CertificatesPage() {
     </div>
 
     <div className="yaws-card p-5">
-      <div className="mb-3 flex items-center justify-between"><div className="font-extrabold">SSH 服务器</div><div className="flex items-center gap-3"><span className="text-xs text-white/40">共 {machines.length} 台已配置 SSH</span><button className="yaws-btn-primary text-xs" disabled={busy||!machines.some(m=>m.sshTrusted)} onClick={scanAll}>{busy?"扫描中…":"扫描全部"}</button></div></div>
+      <div className="mb-3 flex items-center justify-between"><div className="font-extrabold">SSH 服务器</div><div className="flex items-center gap-3"><span className="text-xs text-white/40">共 {machines.length} 台已配置 SSH</span><button className="yaws-btn-primary text-xs" disabled={busy||!machines.some(canScan)} onClick={scanAll}>{busy?"扫描中…":"扫描全部"}</button></div></div>
       <div className="grid gap-3">{machines.length?machines.map(m=>{
         const stat=stats[m.id];
         return <div key={m.id} className={`rounded-xl border p-4 ${selected===m.id?"border-sky-400/50 bg-sky-400/[.08]":"border-white/[.08] bg-white/[.03]"}`}>
@@ -133,7 +149,8 @@ export function CertificatesPage() {
             </button>
             {stat?<span className="yaws-badge border-white/10 bg-white/[.04] text-xs text-white/70">{stat.certificates} 个证书{stat.expired?` · ${stat.expired} 已到期`:stat.expiring?` · ${stat.expiring} 即将到期`:""}</span>:null}
             <span className={`text-xs ${m.sshTrusted?"text-emerald-300":"text-amber-300"}`}>{m.sshTrusted?"SSH 指纹已信任":"需要先信任 SSH 指纹"}</span>
-            <button className="yaws-btn" disabled={!m.sshTrusted||busy} onClick={()=>void scan(m)}>{scanningId===m.id?"扫描中…":"扫描证书"}</button>
+            {credWarning(m)?<span className="text-xs text-rose-300">{credWarning(m)}</span>:null}
+            <button className="yaws-btn" disabled={!canScan(m)||busy} title={credWarning(m)||(!m.sshTrusted?"需要先信任 SSH 指纹":"")} onClick={()=>void scan(m)}>{scanningId===m.id?"扫描中…":"扫描证书"}</button>
             <button className="yaws-btn" disabled={busy} onClick={()=>setSelected(m.id)}>查看</button>
           </div>
           {selected===m.id&&scanInfoById[m.id]?<div className="mt-3 text-xs text-white/50">扫描身份：{scanInfoById[m.id].user||"—"}（uid {scanInfoById[m.id].uid||"—"}） · openssl：{scanInfoById[m.id].openssl||"未找到"} · nginx：{scanInfoById[m.id].nginx||"未找到"} · 配置：{scanInfoById[m.id].nginxConfig||"—"} · 候选文件：{scanInfoById[m.id].candidates||"0"} · 可解析证书：{scanInfoById[m.id].certificates||"0"} · 跳过 CA/信任库：{scanInfoById[m.id].skipped||"0"}</div>:null}

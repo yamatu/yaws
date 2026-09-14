@@ -276,3 +276,63 @@ test("renew without Cloudflare configured is a named 409", async () => {
     assert.equal(res.body.error, "cloudflare_not_configured");
   } finally { close(); }
 });
+
+test("/machines reports credential health so a stale secret is visible before scanning", async () => {
+  const { ssh, port, fp } = await startSsh({ onExec: (accept) => { const s = accept(); s.exit(0); s.end(); } });
+  const healthy = await startApi({ ssh, port, fp });
+  try {
+    const res = await healthy.api("/machines");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.machines[0].credentials, "ok");
+    // The sealed password must never be part of the response.
+    assert.equal(JSON.stringify(res.body).includes("sshPasswordEnc"), false);
+    assert.equal(JSON.stringify(res.body).includes(healthy.db.prepare("SELECT ssh_password_enc e FROM machines").get().e), false);
+  } finally { healthy.close(); }
+
+  const { ssh: ssh2server, port: port2, fp: fp2 } = await startSsh({ onExec: (accept) => { const s = accept(); s.exit(0); s.end(); } });
+  // Sealed with a different AGENT_KEY_SECRET, as after a secret rotation.
+  const broken = await startApi({ ssh: ssh2server, port: port2, fp: fp2, passwordEnc: encryptText(password, "another-secret-entirely") });
+  try {
+    const res = await broken.api("/machines");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.machines[0].credentials, "undecryptable");
+  } finally { broken.close(); }
+});
+
+test("a truncated scan record is skipped instead of failing the whole scan", async () => {
+  const output = [
+    // Channel closed mid-record: the marker with only two fields left.
+    `__YAWS_CERT__\t${b64("/etc/nginx/ssl/cut.pem")}\t${b64("Jan 01 00:00:00 2030 GMT")}`,
+    `__YAWS_CERT__\t${b64("/etc/nginx/ssl/ok.pem")}\t${b64("Jan 01 00:00:00 2030 GMT")}\t${b64("CN=R3")}\t${b64("CN=ok.example.com")}\t${b64("DNS:ok.example.com")}\t${b64("/etc/nginx/ssl/ok.key")}`,
+    "__YAWS_CERT__",
+    "",
+  ].join("\n");
+  const { ssh, port, fp } = await startSsh({ onExec: (accept) => { const s = accept(); s.write(output); s.exit(0); s.end(); } });
+  const { api, close } = await startApi({ ssh, port, fp });
+  try {
+    const res = await api("/machine/1/scan", { method: "POST", body: "{}" });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.found, 1);
+    assert.deepEqual(res.body.certificates[0].domains, ["ok.example.com"]);
+  } finally { close(); }
+});
+
+test("an unexpected exception names itself instead of returning internal_error", async () => {
+  const { ssh, port, fp } = await startSsh({ onExec: (accept) => {
+    const stream = accept();
+    stream.write(scanOutput());
+    stream.exit(0);
+    stream.end();
+  } });
+  const { api, db, close } = await startApi({ ssh, port, fp });
+  try {
+    // Any non-WorkspaceError used to reach the terminal handler as a bare 500
+    // internal_error, which hid the cause from the operator entirely.
+    db.exec("DROP TABLE certificate_inventory");
+    const res = await api("/machine/1/scan", { method: "POST", body: "{}" });
+    assert.equal(res.status, 500);
+    assert.match(res.body.error, /^certificate_scan_failed:/);
+    assert.match(res.body.error, /no such table/i);
+    assert.notEqual(res.body.error, "internal_error");
+  } finally { close(); }
+});

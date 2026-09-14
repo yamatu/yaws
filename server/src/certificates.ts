@@ -1,8 +1,8 @@
-import { Router } from "express";
+import { Router, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
 import type { Db } from "./db.js";
 import type { AuthedRequest } from "./http.js";
-import { connectMachine, shellQuote, sshMachine, WorkspaceError } from "./ssh.js";
+import { connectMachine, credentialState, shellQuote, sshMachine, WorkspaceError } from "./ssh.js";
 import { decryptText, encryptText } from "./crypto.js";
 
 const DEFAULT_EMAIL = "yamatu@qq.com";
@@ -16,6 +16,22 @@ const CertConfig = z.object({
 const RenewBody = z.object({ id: z.number().int().positive() });
 
 type ExecResult = { stdout: string; stderr: string; code: number };
+
+// Anything that is not a WorkspaceError reaches the global handler as a bare
+// "internal_error", which tells the operator nothing. Always carry the cause.
+export function errorDetail(e: unknown) {
+  const name = e instanceof Error ? e.name : typeof e;
+  const message = e instanceof Error ? e.message : String(e);
+  return `${name}: ${message}`.replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+function phaseError(phase: string, e: unknown) {
+  if (e instanceof WorkspaceError || e instanceof z.ZodError) return e;
+  // eslint-disable-next-line no-console
+  console.error(`[certificates] ${phase} failed`, e);
+  return new WorkspaceError(500, `certificate_${phase}_failed:${errorDetail(e)}`);
+}
+
 // timeoutMs > 0 guards against remote shells that never close the exec channel
 // (network black holes, hung sudo prompts); 0 means wait indefinitely, which the
 // renewal flow relies on because acme.sh DNS validation can take minutes.
@@ -28,18 +44,24 @@ function exec(client: any, command: string, timeoutMs = 0): Promise<ExecResult> 
     const timer = timeoutMs > 0
       ? setTimeout(() => done(new WorkspaceError(504, "ssh_exec_timeout")), timeoutMs)
       : null;
-    client.exec(command, (error: Error | undefined, stream: any) => {
-      if (error) {
-        // Channel-level refusals (restricted shells, MaxSessions, sftp-only
-        // servers) surface here as plain ssh2 errors.
-        return done(new WorkspaceError(502, `ssh_exec_failed:${String(error.message || "exec rejected").slice(-300)}`));
-      }
-      let stdout = "", stderr = "";
-      stream.on("data", (b: Buffer) => { stdout += b.toString(); });
-      stream.stderr.on("data", (b: Buffer) => { stderr += b.toString(); });
-      stream.on("error", (e: Error) => done(new WorkspaceError(502, `ssh_exec_failed:${String(e.message || "stream error").slice(-300)}`)));
-      stream.on("close", (code: number) => done(undefined, { stdout, stderr, code: Number(code ?? 0) }));
-    });
+    try {
+      client.exec(command, (error: Error | undefined, stream: any) => {
+        if (error) {
+          // Channel-level refusals (restricted shells, MaxSessions, sftp-only
+          // servers) surface here as plain ssh2 errors.
+          return done(new WorkspaceError(502, `ssh_exec_failed:${String(error.message || "exec rejected").slice(-300)}`));
+        }
+        let stdout = "", stderr = "";
+        stream.on("data", (b: Buffer) => { stdout += b.toString(); });
+        stream.stderr.on("data", (b: Buffer) => { stderr += b.toString(); });
+        stream.on("error", (e: Error) => done(new WorkspaceError(502, `ssh_exec_failed:${String(e.message || "stream error").slice(-300)}`)));
+        stream.on("close", (code: number) => done(undefined, { stdout, stderr, code: Number(code ?? 0) }));
+      });
+    } catch (e) {
+      // ssh2 throws synchronously ("Not connected") when the socket died between
+      // `ready` and this call; a raw throw here used to escape as internal_error.
+      done(new WorkspaceError(502, `ssh_exec_failed:${errorDetail(e)}`));
+    }
   });
 }
 function setting(db: Db, key: string) {
@@ -72,6 +94,14 @@ function tryDecrypt(value: string, secret: string) {
 function decodeRemoteField(value: string) {
   try { return Buffer.from(value, "base64").toString("utf8"); } catch { return ""; }
 }
+// domains is a JSON column written by this router, but a truncated write or a
+// row from an older build must not throw inside a synchronous handler.
+function parseDomains(value: unknown): string[] {
+  try {
+    const parsed = JSON.parse(String(value || "[]"));
+    return Array.isArray(parsed) ? parsed.filter((d): d is string => typeof d === "string") : [];
+  } catch { return []; }
+}
 
 function parseScan(text: string) {
   const rows: any[] = [];
@@ -84,7 +114,10 @@ function parseScan(text: string) {
     }
     if (!line.startsWith("__YAWS_CERT__\t")) continue;
     const [, ...fields] = line.trim().split("\t");
-    const [path, end, issuer, subject, sans, keyPath] = fields.map(decodeRemoteField);
+    // A channel that closes mid-record leaves a short line; skipping it keeps
+    // one truncated row from failing the entire scan with a TypeError.
+    if (fields.length < 5) continue;
+    const [path = "", end = "", issuer = "", subject = "", sans = "", keyPath = ""] = fields.map(decodeRemoteField);
     const domains = new Set<string>();
     // The scanner emits "subject=<RFC2253>", so the prefix must go before the
     // CN search; without this a SAN-less certificate was silently dropped.
@@ -187,7 +220,7 @@ const SCAN = `sh -c ${shellQuote(SCAN_SCRIPT)}`;
 async function renewStoredCertificate(db: Db, secret: string, env: { CERT_EMAIL?: string; CF_Token?: string; CF_Account_ID?: string }, id: number, row: any) {
   const c = cfg(db, secret, env);
   if (!c.cfToken || !c.cfAccountId) throw new WorkspaceError(409, "cloudflare_not_configured");
-  const domains: string[] = JSON.parse(row.domains || "[]");
+  const domains: string[] = parseDomains(row.domains);
   if (!domains.length || !row.key_path) throw new WorkspaceError(409, "certificate_key_not_found");
   const client = await connectMachine(db, id, secret);
   try {
@@ -240,7 +273,12 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
     if (body.data.autoRenewDays !== undefined) save(db, "cert_auto_renew_days", String(body.data.autoRenewDays));
     res.json({ ok: true });
   });
-  router.get("/machines", (_req, res) => res.json({ machines: db.prepare("SELECT id,name,ssh_host as sshHost,ssh_port as sshPort,ssh_user as sshUser,ssh_auth_type as sshAuthType,CASE WHEN ssh_host_fingerprint != '' AND ssh_fingerprint_address = lower(trim(ssh_host)) || ':' || ssh_port THEN 1 ELSE 0 END as sshTrusted FROM machines WHERE deleted_at IS NULL AND trim(ssh_host) != '' AND trim(ssh_user) != '' ORDER BY sort_order,id").all() }));
+  router.get("/machines", (_req, res) => {
+    // Credential health is computed here so a stale AGENT_KEY_SECRET shows up as
+    // a warning tag instead of only failing later inside a scan.
+    const rows = db.prepare("SELECT id,name,ssh_host as sshHost,ssh_port as sshPort,ssh_user as sshUser,ssh_auth_type as sshAuthType,ssh_password_enc as sshPasswordEnc,ssh_key_enc as sshKeyEnc,CASE WHEN ssh_host_fingerprint != '' AND ssh_fingerprint_address = lower(trim(ssh_host)) || ':' || ssh_port THEN 1 ELSE 0 END as sshTrusted FROM machines WHERE deleted_at IS NULL AND trim(ssh_host) != '' AND trim(ssh_user) != '' ORDER BY sort_order,id").all() as any[];
+    res.json({ machines: rows.map((r) => ({ id: r.id, name: r.name, sshHost: r.sshHost, sshPort: r.sshPort, sshUser: r.sshUser, sshAuthType: r.sshAuthType, sshTrusted: r.sshTrusted, credentials: credentialState({ authType: r.sshAuthType, password: r.sshPasswordEnc, privateKey: r.sshKeyEnc }, secret) })) });
+  });
   router.get("/summary", (_req, res) => {
     const now = Date.now();
     const rows = db.prepare(`SELECT machine_id as machineId, COUNT(*) as certificates,
@@ -252,7 +290,7 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
   });
   router.get("/machine/:machineId", (req, res) => {
     const id = machineId(req);
-    res.json({ certificates: db.prepare("SELECT id,cert_path as certPath,key_path as keyPath,domains,expires_at as expiresAt,issuer,last_scan_at as lastScanAt,last_renew_at as lastRenewAt,status,last_error as lastError FROM certificate_inventory WHERE machine_id=? ORDER BY expires_at ASC").all(id).map((r: any) => ({ ...r, domains: JSON.parse(r.domains || "[]") })) });
+    res.json({ certificates: db.prepare("SELECT id,cert_path as certPath,key_path as keyPath,domains,expires_at as expiresAt,issuer,last_scan_at as lastScanAt,last_renew_at as lastRenewAt,status,last_error as lastError FROM certificate_inventory WHERE machine_id=? ORDER BY expires_at ASC").all(id).map((r: any) => ({ ...r, domains: parseDomains(r.domains) })) });
   });
   router.post("/machine/:machineId/scan", async (req, res, next) => {
     const id = machineId(req); let client: any;
@@ -286,15 +324,24 @@ export function certificateRouter(db: Db, secret: string, env: { CERT_EMAIL?: st
         certificates: rows, info: parsed.info,
         warning: rows.length === 0 ? "未发现可解析证书。请确认 SSH 用户可读取证书目录，且服务器安装 openssl；如果 Nginx 使用自定义路径，请检查 nginx -T 权限。" : undefined,
       });
-    } catch (e) { try { client?.end(); } catch {} next(e); }
+    } catch (e) { try { client?.end(); } catch {} next(phaseError("scan", e)); }
   });
   router.post("/machine/:machineId/renew", async (req, res, next) => {
     const id = machineId(req); const parsed = RenewBody.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: "bad_request" });
     const row = db.prepare("SELECT * FROM certificate_inventory WHERE id=? AND machine_id=?").get(parsed.data.id, id) as any;
     if (!row) return res.status(404).json({ error: "certificate_not_found" });
     try { await renewStoredCertificate(db, secret, env, id, row); res.json({ ok: true, reloaded: true }); }
-    catch (e) { db.prepare("UPDATE certificate_inventory SET status='error',last_error=? WHERE id=?").run(String(e instanceof Error ? e.message : e).slice(-2000), row.id); next(e); }
+    catch (e) { db.prepare("UPDATE certificate_inventory SET status='error',last_error=? WHERE id=?").run(String(e instanceof Error ? e.message : e).slice(-2000), row.id); next(phaseError("renew", e)); }
   });
+  // Last line of defence for this router: an unexpected exception (SQLite
+  // failure, driver error, malformed payload) must name itself instead of
+  // degrading into a bare internal_error that hides the cause from the operator.
+  router.use(((err: unknown, _req: Request, _res: Response, next: NextFunction) => {
+    if (err instanceof WorkspaceError || err instanceof z.ZodError) return next(err);
+    // eslint-disable-next-line no-console
+    console.error("[certificates] unhandled", err);
+    next(new WorkspaceError(500, `certificate_internal_error:${errorDetail(err)}`));
+  }) as unknown as RequestHandler);
   return router;
 }
 
