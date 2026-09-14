@@ -214,6 +214,9 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-chip:hover { border-color: #38bdf8; color: #7dd3fc; }
 .ai-row { display: flex; }
 .ai-row.user { justify-content: flex-end; }
+/* The answer always closes a turn (see `orderTurnEntries`), so a hairline marks
+   where the finished steps end and the reply begins. */
+.ai-chat-transcript > :not(.ai-row.answer) + .ai-row.answer { margin-top: 2px; padding-top: 9px; border-top: 1px dashed #2f353b; }
 .ai-bubble { max-width: 88%; padding: 9px 12px; border: 1px solid #2b5a75; border-radius: 10px; background: #1d3a4d; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ai-tool { border: 1px solid #333a41; border-radius: 6px; background: #1c2025; overflow: hidden; }
 .ai-tool-head { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 9px; border: 0; background: none; color: #c6ced6; font-size: 12px; text-align: left; cursor: pointer; }

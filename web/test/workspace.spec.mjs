@@ -347,14 +347,28 @@ browserTest(
     await page.getByRole("button", { name: "AI 设置", exact: true }).click();
     await page.getByLabel("模型配置", { exact: true }).selectOption("主力模型");
     await expect(page.locator(".ai-settings")).toHaveCount(0);
-    await page.getByLabel("问题").fill("[run] 看一下磁盘");
+    await page.getByLabel("问题").fill("[pre][run] 看一下磁盘");
     await page.getByRole("button", { name: "发送", exact: true }).click();
-    await expect(page.locator(".ai-bubble")).toContainText("[run] 看一下磁盘");
+    await expect(page.locator(".ai-bubble")).toContainText("[pre][run] 看一下磁盘");
     await expect(page.locator(".ai-tool")).toContainText("df -h /");
     await expect(page.locator(".ai-tool-state")).toContainText("完成");
     await expect(page.locator(".ai-answer")).toContainText(
       "已生成配置修改与验证命令。",
     );
+    // The model streamed a sentence before it called the tool, so the assistant
+    // entry was created first — the transcript still lists the finished step
+    // above the answer, and the answer closes the turn.
+    expect(
+      await page.locator(".ai-chat-transcript").evaluate((node) => {
+        const tool = node.querySelector(".ai-tool");
+        const answer = node.querySelector(".ai-row.answer");
+        if (!tool || !answer) return false;
+        return (
+          node.lastElementChild === answer &&
+          answer.getBoundingClientRect().top > tool.getBoundingClientRect().bottom
+        );
+      }),
+    ).toBe(true);
     // Each configuration carries its own API key.
     expect(f.modelRequests.at(-1).headers.authorization).toBe(
       "Bearer fixture-key",

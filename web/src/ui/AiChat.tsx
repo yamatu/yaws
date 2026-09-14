@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -26,6 +26,7 @@ import { getToken } from "./auth";
 import { workspaceError } from "./workspaceErrors";
 import { ConversationPicker } from "./ConversationPicker";
 import { Markdown } from "./MarkdownView";
+import { orderTurnEntries } from "./chatOrder";
 import type { Conversation } from "./conversations";
 
 type Profile = {
@@ -184,6 +185,10 @@ export function AiChat({
   const nextKey = () => `e${++counter.current}`;
 
   useEffect(() => setRoot(initialRoot || "/"), [initialRoot]);
+
+  // Steps are always rendered above the answer they produced, even when the
+  // model streamed its first sentence before calling a tool.
+  const ordered = useMemo(() => orderTurnEntries(entries), [entries]);
 
   const push = useCallback((entry: Entry) => {
     setEntries((old) => [...old, entry]);
@@ -916,7 +921,7 @@ export function AiChat({
             </div>
           </div>
         )}
-        {entries.map((entry) => {
+        {ordered.map((entry) => {
           if (entry.kind === "user")
             return (
               <div key={entry.key} className="ai-row user">
@@ -925,7 +930,7 @@ export function AiChat({
             );
           if (entry.kind === "assistant")
             return (
-              <div key={entry.key} className="ai-row">
+              <div key={entry.key} className="ai-row answer">
                 <div className="ai-answer">
                   <Markdown text={entry.text} />
                 </div>

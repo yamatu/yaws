@@ -41,7 +41,8 @@ import { z } from "zod";
   "",
 ].join("\n");
 
-/** `[md]` returns a Markdown answer so the chat rendering can be asserted. */
+/** `[md]` returns a Markdown answer so the chat rendering can be asserted. `[pre]`
+ *  streams a sentence *before* the tool call, like a model that narrates its plan. */
 const MD_ANSWER = [
   "## 磁盘排查结论",
   "",
@@ -337,6 +338,9 @@ export async function harness(port = 0) {
     let calls = [];
     const marker = lastUserText(history, chat);
     const markdown = marker.includes("[md]");
+    // A model that narrates first would send content *and* tool_calls together,
+    // which makes the assistant bubble arrive before the steps it describes.
+    const preamble = marker.includes("[pre]") ? "我先看一下磁盘占用。" : "";
     if (markdown) calls = [];
     else if (/\[(run|write|danger|file|list|stats|log|secret|many)\]/.test(marker))
       calls = markerCalls(marker, count);
@@ -364,7 +368,7 @@ export async function harness(port = 0) {
               choices: [
                 {
                   message: {
-                    content: calls.length ? null : answer,
+                    content: calls.length ? preamble || null : answer,
                     ...(calls.length ? { tool_calls: toolCalls } : {}),
                   },
                 },
