@@ -11,6 +11,21 @@ export function usageLevel(percent: number | null | undefined): UsageLevel {
   return "ok";
 }
 
+/** The percentage a meter shows for a 0…1 fraction (home page / machine cards). */
+export function meterValue(fraction: number | null | undefined): number | null {
+  if (fraction === null || fraction === undefined || !Number.isFinite(fraction))
+    return null;
+  return Math.max(0, Math.min(100, Math.round(fraction * 100)));
+}
+
+/** `usageLevel` for a 0…1 fraction, so every meter shares the same thresholds. The
+ *  level is derived from the rounded percentage that is displayed next to the bar,
+ *  so a value never reads "75%" in green. */
+export function fractionLevel(fraction: number | null | undefined): UsageLevel {
+  const percent = meterValue(fraction);
+  return percent === null ? "unknown" : usageLevel(percent);
+}
+
 export function formatUptime(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0)
     return "—";

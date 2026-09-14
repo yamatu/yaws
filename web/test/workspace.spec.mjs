@@ -45,10 +45,101 @@ browserTest(
   async ({ page }) => {
     const failures = [];
     page.on("pageerror", (error) => failures.push(error.message));
+    // Seed one metric per fixture machine so the home page has something to draw:
+    // idle (green), nearly full (yellow) and full (red). The fixture inserts no
+    // metrics of its own, and they are removed again below so the other specs
+    // still see the untouched database.
+    const insertMetric = f.db.prepare(
+      "INSERT INTO metrics(machine_id,at,cpu_usage,mem_used,mem_total,disk_used,disk_total,load_1,load_5,load_15) VALUES (?,?,?,?,?,?,?,0,0,0)",
+    );
+    const metricAt = Date.now();
+    insertMetric.run(1, metricAt, 0.42, 1_500_000_000, 4_000_000_000, 8_000_000_000, 40_000_000_000);
+    insertMetric.run(2, metricAt, 0.76, 3_000_000_000, 4_000_000_000, 30_000_000_000, 40_000_000_000);
+    insertMetric.run(3, metricAt, 0.95, 3_800_000_000, 4_000_000_000, 39_000_000_000, 40_000_000_000);
     await page.goto(f.url + "/login");
     await page.getByPlaceholder("请输入用户名").fill("fixture");
     await page.getByPlaceholder("请输入密码").fill(f.password);
     await page.getByRole("button", { name: "登录", exact: true }).click();
+    // The home page meters must pick their colour from the load (green → yellow
+    // → red) and look like frosted glass, instead of painting every bar with the
+    // same fixed rainbow gradient.
+    const metersOf = (id) =>
+      page
+        .locator(".yaws-card")
+        .filter({ hasText: `Fixture ${id}` })
+        .first()
+        .locator(".yaws-meter");
+    await expect(metersOf(1)).toHaveCount(3);
+    for (const n of [0, 1, 2]) {
+      await expect(metersOf(1).nth(n)).toHaveClass(/level-ok/);
+      await expect(metersOf(2).nth(n)).toHaveClass(/level-warn/);
+      await expect(metersOf(3).nth(n)).toHaveClass(/level-high/);
+    }
+    const readMeter = (locator) =>
+      locator.evaluate((el) => {
+        const track = getComputedStyle(el);
+        const fill = getComputedStyle(el.firstElementChild);
+        return {
+          from: track.getPropertyValue("--meter-from").trim(),
+          to: track.getPropertyValue("--meter-to").trim(),
+          track: track.backgroundColor,
+          trackBlur: track.backdropFilter,
+          fillBlur: fill.backdropFilter,
+          fillImage: fill.backgroundImage,
+          fillWidth: fill.width,
+          trackWidth: track.width,
+        };
+      });
+    const [low, mid, high] = [
+      await readMeter(metersOf(1).nth(2)),
+      await readMeter(metersOf(2).nth(2)),
+      await readMeter(metersOf(3).nth(2)),
+    ];
+    // One hue per level, named by CSS variables so tests never depend on how the
+    // gradient itself is serialised.
+    expect(low.from).toBe("#34d399");
+    expect(low.to).toBe("#22c55e");
+    expect(mid.from).toBe("#fbbf24");
+    expect(high.from).toBe("#fb7185");
+    // The fill is one hue with a translucent white sheen over it: green must not
+    // contain the amber/cyan stops of the old rainbow.
+    expect(low.fillImage).toContain("rgb(52, 211, 153)");
+    expect(low.fillImage).toContain("rgba(255, 255, 255");
+    expect(low.fillImage).not.toContain("56, 189, 248");
+    expect(low.fillImage).not.toContain("251, 191, 36");
+    expect(mid.fillImage).toContain("rgb(251, 191, 36)");
+    expect(high.fillImage).toContain("rgb(251, 113, 133)");
+    // Frosted glass on both the track and the fill.
+    expect(low.trackBlur).toContain("blur(");
+    expect(high.fillBlur).toContain("blur(");
+    // A high load also tints its own track, so the alert reads early.
+    expect(high.track).not.toBe(low.track);
+    // The bar is still exactly as wide as the load it represents (disk 8/40 GB).
+    expect(parseFloat(low.fillWidth)).toBeCloseTo(parseFloat(low.trackWidth) * 0.2, 0);
+    // Numbers carry the level colour and the bar is announced to screen readers.
+    await expect(
+      page.locator(".yaws-meter-value.level-high").first(),
+    ).toHaveCSS("color", "rgb(252, 165, 165)");
+    await expect(metersOf(1).nth(0)).toHaveAttribute("role", "progressbar");
+    await expect(metersOf(1).nth(0)).toHaveAttribute("aria-valuenow", "42");
+    await expect(metersOf(1).nth(0)).toHaveAttribute("aria-valuetext", "42%");
+    await page.screenshot({
+      path: "test-results/usage-meters.png",
+      fullPage: true,
+    });
+    // The percentages added next to the bars must not push the cards sideways on a
+    // phone, where the meter rows are the widest content of a card.
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    ).toBe(true);
+    expect(
+      await page.locator(".yaws-meter").first().evaluate(
+        (el) => el.getBoundingClientRect().right <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.setViewportSize({ width: 1280, height: 720 });
+    f.db.prepare("DELETE FROM metrics").run();
     await page.getByRole("link", { name: "堡垒机", exact: true }).click();
     await page.getByRole("link", { name: "进入终端" }).first().click();
     await page
@@ -107,6 +198,22 @@ browserTest(
     await expect(stats.locator(".stat-bar-fill.level-high")).toHaveCount(1);
     // cpu, memory and swap are all below the warn threshold.
     await expect(stats.locator(".stat-bar-fill.level-ok")).toHaveCount(3);
+    // The workspace panel shares the meter palette: green / yellow / red with the
+    // same frosted glass fill as the home page.
+    expect(
+      await stats.locator(".stat-bar-fill.level-ok").first().evaluate((el) => ({
+        from: getComputedStyle(el).getPropertyValue("--meter-from").trim(),
+        image: getComputedStyle(el).backgroundImage,
+        blur: getComputedStyle(el).backdropFilter,
+      })),
+    ).toEqual({
+      from: "#34d399",
+      image: expect.stringContaining("rgba(255, 255, 255"),
+      blur: expect.stringContaining("blur("),
+    });
+    await expect(
+      stats.locator(".stat-value.level-high").first(),
+    ).toHaveCSS("color", "rgb(252, 165, 165)");
     await expect(stats).toContainText("Swap");
     const sidebarOrder = await page.evaluate(() => {
       const box = (sel) =>
@@ -449,6 +556,17 @@ browserTest(
     });
     await page.getByRole("link", { name: "堡垒机", exact: true }).click();
     await page.getByRole("link", { name: "进入终端" }).first().click();
+    // Trust the host key unless the desktop spec already did, so this spec also
+    // passes when it is run on its own.
+    const fingerprint = f.db
+      .prepare("SELECT ssh_host_fingerprint as fp FROM machines WHERE id=1")
+      .get().fp;
+    if (!fingerprint) {
+      await page
+        .getByRole("button", { name: "读取主机指纹", exact: true })
+        .click();
+      await page.getByRole("button", { name: "确认并信任此指纹" }).click();
+    }
     await expect(page.locator(".workspace-header")).toContainText("已连接");
     // The assistant dock fits a phone screen without horizontal overflow and can
     // still be dragged out of the way of the touch key bar.

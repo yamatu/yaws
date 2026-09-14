@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, type PublicMachine } from "./api";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, pct } from "./format";
+import { fractionLevel, meterValue } from "./serverStats";
+import { UsageMeter } from "./UsageMeter";
 
 type ViewMode = "cards" | "list";
 type GroupKey = string; // "__all__" | "__ungrouped__" | groupName
@@ -162,6 +164,12 @@ export function PublicDashboardPage() {
             const cpu = lm ? lm.cpuUsage : null;
             const memP = lm ? pct(lm.memUsed, lm.memTotal) : null;
             const diskP = lm ? pct(lm.diskUsed, lm.diskTotal) : null;
+            const cpuValue = meterValue(cpu);
+            const memValue = meterValue(memP);
+            const diskValue = meterValue(diskP);
+            const cpuLevel = fractionLevel(cpu);
+            const memLevel = fractionLevel(memP);
+            const diskLevel = fractionLevel(diskP);
             const sp = speed[m.id] ?? { rxBps: 0, txBps: 0 };
             const left = daysLeft(m.expiresAt);
             return (
@@ -185,12 +193,10 @@ export function PublicDashboardPage() {
                     <div className="mb-1.5 flex items-center gap-2 text-xs">
                       <div className="text-white/40">CPU</div>
                       <div className="flex-1" />
-                      <div className="font-medium">{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
+                      <div className={`font-medium yaws-meter-value level-${cpuLevel}`}>{cpuValue == null ? "—" : `${cpuValue}%`}</div>
                       <div className="text-white/30">{lm ? `load ${lm.load1.toFixed(2)}` : ""}</div>
                     </div>
-                    <div className="yaws-meter">
-                      <div style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }} />
-                    </div>
+                    <UsageMeter percent={cpuValue} level={cpuLevel} label="CPU 使用率" />
                   </div>
 
                   <div>
@@ -200,10 +206,11 @@ export function PublicDashboardPage() {
                       <div className="text-white/80">
                         {lm ? `${formatBytes(lm.memUsed)} / ${formatBytes(lm.memTotal)}` : "—"}
                       </div>
+                      {memValue == null ? null : (
+                        <div className={`yaws-meter-value level-${memLevel}`}>{memValue}%</div>
+                      )}
                     </div>
-                    <div className="yaws-meter">
-                      <div style={{ width: `${Math.round((memP ?? 0) * 100)}%` }} />
-                    </div>
+                    <UsageMeter percent={memValue} level={memLevel} label="内存使用率" />
                   </div>
 
                   <div>
@@ -213,10 +220,11 @@ export function PublicDashboardPage() {
                       <div className="text-white/80">
                         {lm ? `${formatBytes(lm.diskUsed)} / ${formatBytes(lm.diskTotal)}` : "—"}
                       </div>
+                      {diskValue == null ? null : (
+                        <div className={`yaws-meter-value level-${diskLevel}`}>{diskValue}%</div>
+                      )}
                     </div>
-                    <div className="yaws-meter">
-                      <div style={{ width: `${Math.round((diskP ?? 0) * 100)}%` }} />
-                    </div>
+                    <UsageMeter percent={diskValue} level={diskLevel} label="磁盘使用率" />
                   </div>
 
                   <div className="grid gap-1.5 text-xs">
@@ -268,6 +276,12 @@ export function PublicDashboardPage() {
             const cpu = lm ? lm.cpuUsage : null;
             const memP = lm ? pct(lm.memUsed, lm.memTotal) : null;
             const diskP = lm ? pct(lm.diskUsed, lm.diskTotal) : null;
+            const cpuValue = meterValue(cpu);
+            const memValue = meterValue(memP);
+            const diskValue = meterValue(diskP);
+            const cpuLevel = fractionLevel(cpu);
+            const memLevel = fractionLevel(memP);
+            const diskLevel = fractionLevel(diskP);
             const sp = speed[m.id] ?? { rxBps: 0, txBps: 0 };
             const left = daysLeft(m.expiresAt);
             const isExpanded = !!expanded[m.id];
@@ -308,9 +322,15 @@ export function PublicDashboardPage() {
                   </div>
 
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs md:flex md:flex-1 md:flex-wrap md:items-center md:justify-end">
-                    <div className="text-white/50">CPU：{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
-                    <div className="text-white/50">内存：{lm ? `${Math.round((memP ?? 0) * 100)}%` : "—"}</div>
-                    <div className="text-white/50">磁盘：{lm ? `${Math.round((diskP ?? 0) * 100)}%` : "—"}</div>
+                    <div className="text-white/50">
+                      CPU：<span className={`yaws-meter-value level-${cpuLevel}`}>{cpuValue == null ? "—" : `${cpuValue}%`}</span>
+                    </div>
+                    <div className="text-white/50">
+                      内存：<span className={`yaws-meter-value level-${memLevel}`}>{memValue == null ? "—" : `${memValue}%`}</span>
+                    </div>
+                    <div className="text-white/50">
+                      磁盘：<span className={`yaws-meter-value level-${diskLevel}`}>{diskValue == null ? "—" : `${diskValue}%`}</span>
+                    </div>
                     <div className="text-violet-300/70">
                       <span>网速：{lm ? `RX ${formatBps(sp.rxBps)} / TX ${formatBps(sp.txBps)}` : "—"}</span>
                       <span className="ml-2 text-sky-300/70">

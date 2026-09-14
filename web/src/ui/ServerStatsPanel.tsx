@@ -78,7 +78,7 @@ function Row({
     <div className="stat-row" title={title}>
       <div className="stat-row-head">
         <span className="stat-label">{label}</span>
-        <span className="stat-value">
+        <span className={`stat-value level-${usageLevel(percent)}`}>
           {percent === null ? "—" : `${Math.round(percent)}%`}
         </span>
       </div>
@@ -253,7 +253,7 @@ export function ServerStatsPanel({
                     <span className="stat-label mono-break" title={disk.mount}>
                       {disk.mount}
                     </span>
-                    <span className="stat-value">
+                    <span className={`stat-value level-${usageLevel(disk.usePercent)}`}>
                       {Math.round(disk.usePercent)}%
                     </span>
                   </div>

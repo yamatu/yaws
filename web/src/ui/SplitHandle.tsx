@@ -9,7 +9,9 @@ import {
   type Orientation,
 } from "./splitter";
 
-const NARROW = "(max-width: 760px)";
+// Must match the `@media (max-width: 900px)` block in styles.css, where the
+// docked panes stop sitting side by side and stack top/bottom instead.
+const NARROW = "(max-width: 900px)";
 
 /** True while the panes are stacked, which swaps the divider orientation. */
 function useOrientation(): Orientation {

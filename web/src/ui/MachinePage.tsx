@@ -3,6 +3,8 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { apiFetch, apiFetchText, type Machine, type Metric, type UptimeSummary } from "./api";
 import { connectUiWs } from "./ws";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, formatMoneyCents, pct } from "./format";
+import { fractionLevel, meterValue } from "./serverStats";
+import { UsageMeter } from "./UsageMeter";
 import { getToken } from "./auth";
 
 export function MachinePage() {
@@ -226,6 +228,12 @@ export function MachinePage() {
   const cpu = last ? last.cpuUsage : null;
   const memP = last ? pct(last.memUsed, last.memTotal) : null;
   const diskP = last ? pct(last.diskUsed, last.diskTotal) : null;
+  const cpuValue = meterValue(cpu);
+  const memValue = meterValue(memP);
+  const diskValue = meterValue(diskP);
+  const cpuLevel = fractionLevel(cpu);
+  const memLevel = fractionLevel(memP);
+  const diskLevel = fractionLevel(diskP);
   const dt = last && prev ? (last.at - prev.at) / 1000 : 0;
   const rxBps = last && prev && dt > 0 ? Math.max(0, (last.netRxBytes - prev.netRxBytes) / dt) : 0;
   const txBps = last && prev && dt > 0 ? Math.max(0, (last.netTxBytes - prev.netTxBytes) / dt) : 0;
@@ -449,13 +457,11 @@ export function MachinePage() {
         <div className="yaws-card p-4">
           <div className="mb-1 text-xs text-white/40">CPU</div>
           <div className="mb-2 flex items-end gap-2">
-            <div className="text-3xl font-black">{cpu == null ? "—" : `${Math.round(cpu * 100)}%`}</div>
+            <div className={`text-3xl font-black yaws-meter-value level-${cpuLevel}`}>{cpuValue == null ? "—" : `${cpuValue}%`}</div>
             <div className="flex-1" />
             <div className="text-xs text-white/40">{last ? new Date(last.at).toLocaleTimeString() : "—"}</div>
           </div>
-          <div className="yaws-meter">
-            <div className="h-full" style={{ width: `${Math.round((cpu ?? 0) * 100)}%` }} />
-          </div>
+          <UsageMeter percent={cpuValue} level={cpuLevel} label="CPU 使用率" />
           <div className="mt-2 text-xs text-white/40">
             load: {last ? `${last.load1.toFixed(2)} / ${last.load5.toFixed(2)} / ${last.load15.toFixed(2)}` : "—"}
           </div>
@@ -468,11 +474,9 @@ export function MachinePage() {
               {last ? `${formatBytes(last.memUsed)} / ${formatBytes(last.memTotal)}` : "—"}
             </div>
             <div className="flex-1" />
-            <div className="text-xs">{last ? `${Math.round((memP ?? 0) * 100)}%` : "—"}</div>
+            <div className={`text-xs yaws-meter-value level-${memLevel}`}>{memValue == null ? "—" : `${memValue}%`}</div>
           </div>
-          <div className="yaws-meter">
-            <div className="h-full" style={{ width: `${Math.round((memP ?? 0) * 100)}%` }} />
-          </div>
+          <UsageMeter percent={memValue} level={memLevel} label="内存使用率" />
         </div>
 
         <div className="yaws-card p-4">
@@ -482,11 +486,9 @@ export function MachinePage() {
               {last ? `${formatBytes(last.diskUsed)} / ${formatBytes(last.diskTotal)}` : "—"}
             </div>
             <div className="flex-1" />
-            <div className="text-xs">{last ? `${Math.round((diskP ?? 0) * 100)}%` : "—"}</div>
+            <div className={`text-xs yaws-meter-value level-${diskLevel}`}>{diskValue == null ? "—" : `${diskValue}%`}</div>
           </div>
-          <div className="yaws-meter">
-            <div className="h-full" style={{ width: `${Math.round((diskP ?? 0) * 100)}%` }} />
-          </div>
+          <UsageMeter percent={diskValue} level={diskLevel} label="磁盘使用率" />
         </div>
 
         <div className="yaws-card p-4">

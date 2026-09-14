@@ -430,9 +430,31 @@ export async function harness(port = 0) {
     res.json({
       machines: db
         .prepare(
-          "SELECT id,name,ssh_host as sshHost,ssh_user as sshUser,ssh_port as sshPort,1 as sshHasPassword,'password' as sshAuthType,online,'month' as billingCycle,0 as purchaseAmountCents,0 as autoRenew,'' as groupName FROM machines",
+          `SELECT m.id,m.name,m.ssh_host as sshHost,m.ssh_user as sshUser,m.ssh_port as sshPort,
+                  1 as sshHasPassword,'password' as sshAuthType,m.online,'month' as billingCycle,
+                  0 as purchaseAmountCents,0 as autoRenew,'' as groupName,
+                  x.at as metricAt,x.cpu_usage as cpuUsage,x.mem_used as memUsed,x.mem_total as memTotal,
+                  x.disk_used as diskUsed,x.disk_total as diskTotal,x.load_1 as load1
+             FROM machines m
+             LEFT JOIN metrics x ON x.id = (SELECT id FROM metrics WHERE machine_id = m.id ORDER BY at DESC LIMIT 1)`,
         )
-        .all(),
+        .all()
+        // The real dashboard seeds its live meters from this field, so the fixture
+        // has to expose it too (the fixture inserts no metrics of its own).
+        .map((row) => ({
+          ...row,
+          latestMetric: row.metricAt
+            ? {
+                at: row.metricAt,
+                cpuUsage: row.cpuUsage,
+                memUsed: row.memUsed,
+                memTotal: row.memTotal,
+                diskUsed: row.diskUsed,
+                diskTotal: row.diskTotal,
+                load1: row.load1,
+              }
+            : null,
+        })),
     }),
   );
   app.get("/api/public/summary", (_req, res) => res.json({ machines: [] }));
