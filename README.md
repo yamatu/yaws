@@ -21,6 +21,7 @@
 - 延迟监控：选择来源机器和目标 IP/域名，由该机器的 Agent 持续 Ping；保存历史样本，显示延迟、抖动和丢包率
 - SSH 工作区：机器专属快捷指令、SFTP 目录浏览/上传/下载、配置文件编辑、主机指纹校验
 - AI 工作区：自定义 Chat Completions / Responses 接口、模型和推理级别；生成文件差异与命令建议，经审批后应用
+- 证书自动管理：通过机器 SSH 扫描常见证书目录，识别域名/到期时间；支持 Cloudflare DNS 申请 Let’s Encrypt 证书、备份回滚、`nginx -t` 校验及 Nginx reload
 - 备份与恢复（后台）：
   - 下载 SQLite 备份（支持 `.sqlite.gz` 压缩）
   - 上传备份恢复（支持 `.sqlite` / `.sqlite.gz`），恢复后自动重启
@@ -234,6 +235,27 @@ npm run dev
 - `TELEGRAM_CHAT_ID`：接收消息的 chat_id（可选，也可在后台设置里配置）
 - `AGENT_GITHUB_REPO`：GitHub 仓库（例如 `yamatu/yaws`）
 - `AGENT_RELEASE_BASE_URL`：Release 下载前缀（可选，默认 `releases/latest/download`）
+- `CERT_EMAIL`：ACME 注册邮箱，默认 `yamatu@qq.com`
+- `CF_Token` / `CF_Account_ID`：Cloudflare DNS API 凭据（也可以在后台“证书管理”中配置；数据库配置会加密保存）
+
+## 证书自动管理
+
+登录后台后打开“证书管理”：
+
+1. 配置 `CF_Token` 和 `CF_Account_ID`，注册邮箱默认 `yamatu@qq.com`。Token 只需要 Zone DNS 编辑权限，建议使用 Cloudflare API Token，不要使用 Global API Key。
+2. 选择已经配置并完成 SSH 主机指纹信任的机器，点击“扫描证书”。系统会扫描 Nginx、Let’s Encrypt、OpenSSL、宝塔/1Panel 常见目录，并显示证书域名、路径和到期时间。
+3. 点击证书对应的“申请/更新”前，服务器需要安装 `acme.sh`，且 SSH 用户需要能够执行 `nginx -t`、读取证书和私钥路径并 reload Nginx。更新会先备份当前证书/私钥，申请成功后执行 `nginx -t`，校验失败自动恢复备份。
+4. 开启“到期前自动续期”后，主控每 6 小时检查一次，默认在到期前 30 天处理。只处理扫描到且存在私钥路径的证书。
+
+环境变量示例：
+
+```dotenv
+CERT_EMAIL=yamatu@qq.com
+CF_Token=your-cloudflare-api-token
+CF_Account_ID=your-cloudflare-account-id
+```
+
+Cloudflare API Token 至少需要对应 Zone 的 `DNS:Edit` 权限。不要把真实 Token 提交到 Git；后台保存的 Token 使用 `AGENT_KEY_SECRET` 加密。
 
 ## Telegram 通知配置
 

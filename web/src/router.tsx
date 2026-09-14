@@ -12,6 +12,7 @@ const SettingsPage = lazy(() => import("./ui/SettingsPage").then((m) => ({ defau
 const SshPage = lazy(() => import("./ui/SshPage").then((m) => ({ default: m.SshPage })));
 const PingPage = lazy(() => import("./ui/PingPage").then((m) => ({ default: m.PingPage })));
 const BastionPage = lazy(() => import("./ui/BastionPage").then((m) => ({ default: m.BastionPage })));
+const CertificatesPage = lazy(() => import("./ui/CertificatesPage").then((m) => ({ default: m.CertificatesPage })));
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = getToken();
@@ -45,6 +46,7 @@ export const router = createBrowserRouter([
       { path: "settings", element: <SettingsPage /> },
       { path: "ping", element: <PingPage /> },
       { path: "bastion", element: <BastionPage /> },
+      { path: "certificates", element: <CertificatesPage /> },
     ],
   },
   { path: "*", element: <Navigate to="/" replace /> },

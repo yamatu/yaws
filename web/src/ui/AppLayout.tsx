@@ -20,6 +20,7 @@ export function AppLayout() {
         </Link>
         <Link className="yaws-btn" to="ping">延迟监控</Link>
         <Link className="yaws-btn" to="bastion">堡垒机</Link>
+        <Link className="yaws-btn" to="certificates">证书管理</Link>
         <button
           className="yaws-btn"
           onClick={() => {

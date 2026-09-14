@@ -20,6 +20,9 @@ services:
       AGENT_GITHUB_REPO: "yamatu/yaws"
       # Optional override:
       # AGENT_RELEASE_BASE_URL: "https://github.com/OWNER/REPO/releases/latest/download"
+      CERT_EMAIL: "${CERT_EMAIL:-yamatu@qq.com}"
+      CF_Token: "${CF_Token:-}"
+      CF_Account_ID: "${CF_Account_ID:-}"
     volumes:
       - ./data:/app/data
     restart: unless-stopped

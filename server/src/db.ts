@@ -184,7 +184,27 @@ function migrate(db: Db) {
       updated_at INTEGER NOT NULL,
       FOREIGN KEY(machine_id) REFERENCES machines(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS certificate_inventory (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+      cert_path TEXT NOT NULL,
+      key_path TEXT NOT NULL DEFAULT '',
+      domains TEXT NOT NULL DEFAULT '[]',
+      expires_at INTEGER,
+      issuer TEXT NOT NULL DEFAULT '',
+      last_scan_at INTEGER NOT NULL,
+      last_renew_at INTEGER,
+      status TEXT NOT NULL DEFAULT 'ok',
+      last_error TEXT NOT NULL DEFAULT '',
+      UNIQUE(machine_id, cert_path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_certificate_inventory_machine ON certificate_inventory(machine_id, expires_at);
   `);
+
+  ensureColumns(db, "certificate_inventory", [
+    { name: "key_path", sql: "ALTER TABLE certificate_inventory ADD COLUMN key_path TEXT NOT NULL DEFAULT ''" },
+  ]);
 
   ensureColumns(db, "machines", [
     { name: "ssh_host_fingerprint", sql: "ALTER TABLE machines ADD COLUMN ssh_host_fingerprint TEXT NOT NULL DEFAULT ''" },

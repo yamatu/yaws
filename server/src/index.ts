@@ -18,6 +18,7 @@ import { createPingService } from "./ping.js";
 import { workspaceRouter } from "./workspace.js";
 import { aiRouter } from "./ai.js";
 import { WorkspaceError } from "./ssh.js";
+import { certificateRouter, startCertificateScheduler } from "./certificates.js";
 
 const env = loadEnv();
 const db = openDb(env.DATABASE_PATH);
@@ -638,6 +639,11 @@ app.use("/api/ping", requireAuth, requireAdmin, pingService.router);
 app.use("/api/machines", requireAuth, requireAdmin);
 app.use("/api/machines/:id/workspace", workspaceRouter(db, agentKeySecret));
 app.use("/api/ai", requireAuth, requireAdmin, aiRouter(db, agentKeySecret));
+app.use("/api/certificates", requireAuth, requireAdmin, certificateRouter(db, agentKeySecret, {
+  CERT_EMAIL: process.env.CERT_EMAIL,
+  CF_Token: process.env.CF_Token,
+  CF_Account_ID: process.env.CF_Account_ID,
+}));
 
 app.get("/api/me", requireAuth, (req, res) => {
   return res.json({ user: (req as any).user });
@@ -1756,6 +1762,11 @@ try {
 startMetricsPruner();
 scheduleDeletedMachineCleanup(1000);
 startTelegramNotifier();
+startCertificateScheduler(db, agentKeySecret, {
+  CERT_EMAIL: process.env.CERT_EMAIL,
+  CF_Token: process.env.CF_Token,
+  CF_Account_ID: process.env.CF_Account_ID,
+});
 
 const NewPasswordSchema = z
   .string()
