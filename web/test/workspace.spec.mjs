@@ -73,6 +73,15 @@ browserTest(
       .getByRole("button", { name: "config.json", exact: true })
       .click();
     await expect(page.locator(".cm-content")).toContainText("enabled");
+    await expect(page.locator(".editor-lang-tag")).toContainText("JSON");
+    // The SSH session stays docked next to the file editor.
+    await expect(page.locator(".workspace-body.docked")).toHaveCount(1);
+    await expect(page.locator(".workspace-body.docked .xterm")).toBeVisible();
+    await page.getByRole("button", { name: "隐藏终端面板" }).click();
+    await expect(page.locator(".workspace-body.docked")).toHaveCount(0);
+    await expect(page.locator(".terminal-workspace")).toBeHidden();
+    await page.getByRole("button", { name: "在文件编辑时显示终端" }).click();
+    await expect(page.locator(".workspace-body.docked .xterm")).toBeVisible();
     await page
       .locator(".cm-content")
       .fill('{"enabled":false,"browser":true}\n');

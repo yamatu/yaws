@@ -12,6 +12,8 @@ import {
   Folder,
   Sparkles,
   ShieldCheck,
+  PanelRightClose,
+  PanelRightOpen,
 } from "lucide-react";
 import { SshShortcuts } from "./SshShortcuts";
 import { workspaceError } from "./workspaceErrors";
@@ -47,6 +49,9 @@ export function SshPage() {
   const [connectNonce, setConnectNonce] = useState(0);
   const [tab, setTab] = useState<"terminal" | "files" | "ai">("terminal");
   const [visited, setVisited] = useState({ files: false, ai: false });
+  // While browsing or editing files the SSH session stays visible in a side panel, so
+  // commands can be run next to the file that is being worked on.
+  const [dockTerminal, setDockTerminal] = useState(true);
   const [root, setRoot] = useState("/");
   const [trusted, setTrusted] = useState(false);
   const [hostKey, setHostKey] = useState<{
@@ -64,6 +69,7 @@ export function SshPage() {
     () => !Number.isInteger(machineId) || machineId <= 0,
     [machineId],
   );
+  const docked = dockTerminal && trusted && tab !== "terminal";
 
   useEffect(() => {
     if (isBadId) return;
@@ -224,6 +230,10 @@ export function SshPage() {
     };
 
     const onWindowResize = () => {
+      // A hidden or collapsed pane has no usable size, and fitting it would push bogus
+      // window sizes into the remote session (which makes full screen programs redraw).
+      const el = containerRef.current;
+      if (!el || el.clientWidth < 40 || el.clientHeight < 30) return;
       try {
         fit.fit();
         sendResize();
@@ -456,44 +466,66 @@ export function SshPage() {
             {label}
           </button>
         ))}
+        <div className="flex-1" />
+        {tab !== "terminal" ? (
+          <button
+            className="icon-btn workspace-dock-toggle"
+            title={dockTerminal ? "隐藏终端面板" : "在文件编辑时显示终端"}
+            aria-label={dockTerminal ? "隐藏终端面板" : "在文件编辑时显示终端"}
+            aria-pressed={dockTerminal}
+            onClick={() => {
+              setDockTerminal((v) => !v);
+              // The terminal was collapsed while hidden, so let xterm re-measure itself.
+              window.setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
+            }}
+          >
+            {dockTerminal ? (
+              <PanelRightClose size={17} />
+            ) : (
+              <PanelRightOpen size={17} />
+            )}
+          </button>
+        ) : null}
       </div>
-      <div
-        className="terminal-workspace"
-        style={{ display: tab === "terminal" ? "grid" : "none" }}
-      >
-        <SshShortcuts
-          machineId={machineId}
-          connected={status === "connected"}
-          send={(command) => {
-            if (command.endsWith("\r")) {
-              wsRef.current?.send(
-                JSON.stringify({
-                  type: "input",
-                  dataB64: bytesToBase64(new TextEncoder().encode(command)),
-                }),
-              );
-            } else termRef.current?.paste(command);
-            termRef.current?.focus();
-          }}
-        />
-        <div className="terminal-pane">
-          <div ref={containerRef} className="h-full w-full" />
+      <div className={`workspace-body${docked ? " docked" : ""}`}>
+        <div
+          className={`terminal-workspace${docked ? " docked-mini" : ""}`}
+          style={{ display: tab === "terminal" || docked ? "grid" : "none" }}
+        >
+          <SshShortcuts
+            machineId={machineId}
+            connected={status === "connected"}
+            send={(command) => {
+              if (command.endsWith("\r")) {
+                wsRef.current?.send(
+                  JSON.stringify({
+                    type: "input",
+                    dataB64: bytesToBase64(new TextEncoder().encode(command)),
+                  }),
+                );
+              } else termRef.current?.paste(command);
+              termRef.current?.focus();
+            }}
+          />
+          <div className="terminal-pane">
+            <div ref={containerRef} className="h-full w-full" />
+          </div>
         </div>
+        {trusted && visited.files && (
+          <div className="workspace-tab-body" hidden={tab !== "files"}>
+            <Suspense fallback={<div className="p-4">加载文件…</div>}>
+              <Files machineId={machineId} onRoot={setRoot} />
+            </Suspense>
+          </div>
+        )}
+        {trusted && visited.ai && (
+          <div className="workspace-tab-body" hidden={tab !== "ai"}>
+            <Suspense fallback={<div className="p-4">加载 AI…</div>}>
+              <AI machineId={machineId} initialRoot={root} />
+            </Suspense>
+          </div>
+        )}
       </div>
-      {trusted && visited.files && (
-        <div className="workspace-tab-body" hidden={tab !== "files"}>
-          <Suspense fallback={<div className="p-4">加载文件…</div>}>
-            <Files machineId={machineId} onRoot={setRoot} />
-          </Suspense>
-        </div>
-      )}
-      {trusted && visited.ai && (
-        <div className="workspace-tab-body" hidden={tab !== "ai"}>
-          <Suspense fallback={<div className="p-4">加载 AI…</div>}>
-            <AI machineId={machineId} initialRoot={root} />
-          </Suspense>
-        </div>
-      )}
     </div>
   );
 }

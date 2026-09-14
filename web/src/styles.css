@@ -14,6 +14,7 @@
 .workspace-tabs { display: flex; gap: 4px; border-bottom: 1px solid #373c43; padding: 0 10px; }
 .workspace-tabs button { display: flex; align-items: center; gap: 6px; padding: 10px 16px; border-bottom: 2px solid transparent; font-size: 13px; }
 .workspace-tabs button[aria-selected="true"] { border-color: #38bdf8; color: #7dd3fc; }
+.workspace-tabs .workspace-dock-toggle { padding: 0; margin: 6px 0 6px 6px; align-self: center; border-bottom: 1px solid #3d4249; }
 .terminal-workspace { grid-template-columns: 240px minmax(0,1fr); flex: 1; min-height: 0; }
 .terminal-pane { min-width: 0; min-height: 0; padding: 8px; background: #060810; overflow: hidden; }
 .shortcut-panel { overflow: auto; border-right: 1px solid #373c43; }
@@ -24,6 +25,16 @@
 .host-key-prompt code { overflow-wrap: anywhere; min-width: 0; }
 .workspace-tab-body { flex: 1; min-height: 0; overflow: auto; }
 .workspace-tab-body[hidden] { display: none; }
+.workspace-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,1fr); }
+.workspace-body > * { grid-column: 1; grid-row: 1; min-width: 0; min-height: 0; }
+.workspace-body.docked { grid-template-columns: minmax(0,1fr) minmax(320px, 36%); }
+.workspace-body.docked > .terminal-workspace { grid-column: 2; border-left: 1px solid #373c43; }
+.workspace-dock-toggle[aria-pressed="true"] { border-color: #38bdf8; color: #7dd3fc; }
+.terminal-workspace.docked-mini { grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,1fr); }
+.terminal-workspace.docked-mini .shortcut-panel { display: none; }
+.editor-lang-tag { flex: 0 0 auto; padding: 3px 8px; border: 1px solid #3d4249; border-radius: 999px; font-size: 11px; color: #7dd3fc; background: #173840; white-space: nowrap; }
+.editor-lang-tag.plain { color: #a9b2bc; background: #23272c; }
+.workspace-editor .cm-content { tab-size: 2; }
 .file-workspace { height: 100%; min-height: 400px; display: grid; grid-template-columns: 290px minmax(0,1fr); }
 .file-sidebar { display: flex; flex-direction: column; min-height: 0; padding: 8px; border-right: 1px solid #373c43; }
 .file-list { overflow: auto; flex: 1; }
@@ -61,6 +72,10 @@
 .latency-stats small { color: #b5bec8; font-size: 11px; }
 .latency-chart { background: #181b1f; min-width: 0; }
 .latency-chart svg { display: block; width: 100%; min-height: 220px; }
+@media (max-width: 900px) {
+  .workspace-body.docked { grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,1fr) minmax(190px,42%); }
+  .workspace-body.docked > .terminal-workspace { grid-column: 1; grid-row: 2; border-left: 0; border-top: 1px solid #373c43; }
+}
 @media (max-width: 760px) {
   .monitor-form { grid-template-columns: minmax(0,1fr) minmax(0,1fr); }
   .monitor-content { grid-template-columns: minmax(0,1fr); }

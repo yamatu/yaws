@@ -39,6 +39,7 @@ export function FileWorkspace({
   >([]);
   const [file, setFile] = useState<OpenFile | null>(null);
   const [content, setContent] = useState("");
+  const [language, setLanguage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -334,6 +335,14 @@ export function FileWorkspace({
             {file?.path ?? "文件编辑器"}
             {dirty ? " *" : ""}
           </span>
+          {file ? (
+            <span
+              className={`editor-lang-tag${language ? "" : " plain"}`}
+              title="语法高亮"
+            >
+              {language ? `高亮 · ${language}` : "纯文本"}
+            </span>
+          ) : null}
           <button
             className="icon-btn"
             title="保存文件"
@@ -352,7 +361,12 @@ export function FileWorkspace({
         {notice && <div className="workspace-notice">{notice}</div>}
         {file ? (
           <Suspense fallback={<div className="p-4">加载编辑器…</div>}>
-            <Editor path={file.path} value={content} onChange={setContent} />
+            <Editor
+              path={file.path}
+              value={content}
+              onChange={setContent}
+              onLanguage={setLanguage}
+            />
           </Suspense>
         ) : (
           <div className="workspace-empty">选择文件</div>
