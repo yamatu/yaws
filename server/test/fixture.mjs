@@ -17,8 +17,7 @@ import { createPingService } from "../dist/ping.js";
 import { WorkspaceError } from "../dist/ssh.js";
 import { z } from "zod";
 
-/** Reply for the workspace resource probe (see server/src/system-stats.ts). */
-const STATS_OUTPUT = [
+/** Reply for the workspace resource probe (see server/src/system-stats.ts). */const STATS_OUTPUT = [
   "K host fixture-ssh",
   "K kernel Linux 6.1.0-fixture",
   "K uptime 86400.5",
@@ -41,6 +40,59 @@ const STATS_OUTPUT = [
   "K net 1000000 2000000",
   "",
 ].join("\n");
+
+const MARKER_TOOLS = {
+  run: { name: "run_command", args: { command: "df -h /", purpose: "检查磁盘" } },
+  write: {
+    name: "run_command",
+    args: { command: "systemctl restart nginx", purpose: "重启 nginx" },
+  },
+  danger: {
+    name: "run_command",
+    args: { command: "rm -rf /srv/app", purpose: "清理目录" },
+  },
+  file: {
+    name: "write_file",
+    args: {
+      path: "/srv/app/config.json",
+      content: '{"enabled":true}\n',
+      summary: "更新配置",
+    },
+  },
+  list: { name: "list_files", args: { path: "/srv/app" } },
+  stats: { name: "server_stats", args: {} },
+  log: {
+    name: "read_log",
+    args: { command: "tail -n 20 /var/log/nginx/error.log" },
+  },
+  secret: { name: "read_file", args: { path: "/srv/app/.env" } },
+};
+
+/** `[run]`/`[file]`/… at the start of a chat message drives one scripted tool call. */
+function markerCalls(text, count) {
+  if (count > 0) return [];
+  if (text.includes("[many]"))
+    return [
+      MARKER_TOOLS.run,
+      { name: "server_stats", args: {} },
+      MARKER_TOOLS.list,
+    ];
+  for (const [marker, call] of Object.entries(MARKER_TOOLS))
+    if (text.includes(`[${marker}]`)) return [call];
+  return [];
+}
+
+function lastUserText(history, chat) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const item = history[i];
+    if (item.role !== "user") continue;
+    if (typeof item.content === "string") return item.content;
+    if (Array.isArray(item.content))
+      return item.content.map((part) => part.text ?? "").join(" ");
+    return chat ? "" : JSON.stringify(item.content ?? "");
+  }
+  return "";
+}
 
 export async function harness(port = 0) {
   const secret = "fixture-only-secret-123456789";
@@ -252,9 +304,12 @@ export async function harness(port = 0) {
       (m) => m.role === "tool" || m.type === "function_call_output",
     ).length;
     let calls = [];
-    if (count === 0)
+    const marker = lastUserText(history, chat);
+    if (/\[(run|write|danger|file|list|stats|log|secret|many)\]/.test(marker))
+      calls = markerCalls(marker, count);
+    else if (count === 0)
       calls = [{ name: "read_file", args: { path: "/srv/app/config.json" } }];
-    if (count === 1)
+    else if (count === 1)
       calls = [
         {
           name: "propose_file",

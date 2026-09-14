@@ -291,7 +291,22 @@ function migrate(db: Db) {
       root TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS ai_proposals (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES ai_runs(id) ON DELETE CASCADE,
       kind TEXT NOT NULL, path TEXT NOT NULL, before_text TEXT NOT NULL, after_text TEXT NOT NULL,
-      revision TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending');`);
+      revision TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
+    CREATE TABLE IF NOT EXISTS ai_conversations (id TEXT PRIMARY KEY, machine_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+      title TEXT NOT NULL, root TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_ai_conversations_scope ON ai_conversations(user_id, machine_id, updated_at DESC);`);
+
+  // Chat support: a run is one turn of a conversation and carries the tool trace.
+  ensureColumns(db, "ai_runs", [
+    { name: "conversation_id", sql: "ALTER TABLE ai_runs ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''" },
+    { name: "trace", sql: "ALTER TABLE ai_runs ADD COLUMN trace TEXT NOT NULL DEFAULT ''" },
+  ]);
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_ai_runs_conversation ON ai_runs(conversation_id, created_at)",
+  );
+  ensureColumns(db, "ai_proposals", [
+    { name: "result", sql: "ALTER TABLE ai_proposals ADD COLUMN result TEXT NOT NULL DEFAULT ''" },
+  ]);
 
   ensureColumns(db, "metrics", [
     { name: "net_rx_bytes", sql: "ALTER TABLE metrics ADD COLUMN net_rx_bytes INTEGER NOT NULL DEFAULT 0" },

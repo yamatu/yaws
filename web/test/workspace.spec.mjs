@@ -31,7 +31,7 @@ function browserTest(name, fn) {
   });
 }
 browserTest(
-  "desktop workspace: trust, shortcuts, files, AI diff, machine Ping",
+  "desktop workspace: trust, shortcuts, files, AI chat, machine Ping",
   async ({ page }) => {
     const failures = [];
     page.on("pageerror", (error) => failures.push(error.message));
@@ -149,28 +149,53 @@ browserTest(
       path: "test-results/files-desktop.png",
       fullPage: true,
     });
+    // The assistant is a chat: ask a question, approve anything that touches the server.
     await page.getByRole("tab", { name: "AI", exact: true }).click();
     await page.getByLabel("API 地址", { exact: true }).fill(f.modelUrl);
     await page.getByLabel("模型", { exact: true }).fill("fixture-model");
-    await page.getByLabel("推理级别", { exact: true }).fill("high");
     await page.getByLabel("API Key", { exact: true }).fill("fixture-key");
     await page.getByLabel("允许内网 / HTTP 接口", { exact: true }).check();
     await page.getByRole("button", { name: "保存设置", exact: true }).click();
-    await page
-      .getByLabel("任务", { exact: true })
-      .fill("开启配置并提供验证命令");
-    await page.getByRole("button", { name: "生成修改", exact: true }).click();
-    await expect(page.locator(".ai-proposal")).toHaveCount(2);
-    await expect(page.locator(".diff-add")).toContainText("true");
-    expect(f.files.get("/srv/app/config.json").toString()).toContain("browser");
+    await expect(page.locator(".ai-chat .workspace-notice")).toContainText(
+      "AI 设置已保存",
+    );
+    await expect(page.locator(".ai-chip")).toHaveCount(3);
+    await page.getByLabel("问题").fill("[run] 看一下磁盘");
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(page.locator(".ai-bubble")).toContainText("[run] 看一下磁盘");
+    await expect(page.locator(".ai-tool")).toContainText("df -h /");
+    await expect(page.locator(".ai-tool-state")).toContainText("完成");
+    await expect(page.locator(".ai-answer")).toContainText(
+      "已生成配置修改与验证命令。",
+    );
+    // Anything mutating waits for an approval card instead of running.
+    await page.getByLabel("问题").fill("[write] 重启 nginx");
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    const approval = page.locator(".ai-proposal").last();
+    await expect(approval).toContainText("systemctl restart nginx");
+    await expect(approval).toContainText("需要你确认");
+    await expect(page.locator(".ai-chat-pending")).toContainText("1 条操作");
+    expect(f.commands.some((c) => c.includes("systemctl restart nginx"))).toBe(
+      false,
+    );
     await page.screenshot({
       path: "test-results/ai-desktop.png",
       fullPage: true,
     });
-    await page.getByRole("button", { name: "应用修改", exact: true }).click();
-    await expect(
-      page.getByRole("button", { name: "已应用", exact: true }),
-    ).toBeDisabled();
+    await approval.getByRole("button", { name: "执行命令", exact: true }).click();
+    await expect(approval).toContainText("已执行");
+    expect(f.commands.some((c) => c.includes("systemctl restart nginx"))).toBe(
+      true,
+    );
+    // The same assistant floats over the terminal as an add-on panel.
+    await page.getByRole("tab", { name: "终端", exact: true }).click();
+    await page.getByRole("button", { name: "AI 助手", exact: true }).click();
+    await expect(page.locator(".ai-dock")).toBeVisible();
+    await expect(page.locator(".ai-dock .ai-chat-transcript")).toContainText(
+      "看一下磁盘",
+    );
+    await page.getByRole("button", { name: "收起 AI 助手", exact: true }).click();
+    await expect(page.locator(".ai-dock")).toHaveCount(0);
     await page.getByRole("link", { name: "返回堡垒机" }).click();
     await page.getByRole("link", { name: "延迟监控", exact: true }).click();
     await page.getByRole("button", { name: "来源机器", exact: true }).click();
@@ -211,6 +236,19 @@ browserTest(
     await page.getByRole("link", { name: "堡垒机", exact: true }).click();
     await page.getByRole("link", { name: "进入终端" }).first().click();
     await expect(page.locator(".workspace-header")).toContainText("已连接");
+    // The assistant dock fits a phone screen without horizontal overflow.
+    await page.getByRole("button", { name: "AI 助手", exact: true }).click();
+    await expect(page.locator(".ai-dock")).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: "test-results/ai-mobile.png",
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "收起 AI 助手", exact: true }).click();
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

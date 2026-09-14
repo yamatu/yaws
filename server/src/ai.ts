@@ -17,6 +17,8 @@ import {
   TEXT_LIMIT,
 } from "./files.js";
 import { route, audit, requestSignal } from "./workspace.js";
+import { chatRouter } from "./ai-chat.js";
+import { secretPath } from "./ai-safety.js";
 
 const Config = z.object({
   baseUrl: z.string().url().max(2048),
@@ -30,7 +32,7 @@ const Config = z.object({
   apiKey: z.string().max(4096).default(""),
   allowPrivate: z.boolean().default(false),
 });
-type AIConfig = z.infer<typeof Config>;
+export type AIConfig = z.infer<typeof Config>;
 export function publicAddress(address: string) {
   try {
     return ipaddr.process(address).range() === "unicast";
@@ -232,12 +234,9 @@ type Proposal = {
   after_text: string;
   revision: string;
   status: string;
+  result?: string;
 };
-export function secretPath(value: string) {
-  return /(^|\/)(\.ssh|\.aws|\.gnupg|\.kube)(\/|$)|(^|\/)\.env(?:\.|$)|\.(pem|key|p12|pfx)$|(^|\/)(shadow|gshadow|id_rsa|id_ed25519)$/.test(
-    value,
-  );
-}
+export { secretPath };
 
 export function aiRouter(db: Db, secret: string) {
   const router = Router({ mergeParams: true });
@@ -569,6 +568,15 @@ export function aiRouter(db: Db, secret: string) {
       status: p.status,
     }));
   }
+  // Chat conversations live in the same tables (a run is one user message + its answer).
+  router.use(
+    chatRouter({
+      db,
+      secret,
+      load,
+      model: (config, body, signal) => modelRequest(config, body, signal),
+    }),
+  );
   router.get("/machines/:id/runs", (req, res) => {
     const userId = (req as AuthedRequest).user.id;
     const runs = db
@@ -674,7 +682,10 @@ export function aiRouter(db: Db, secret: string) {
             requestSignal(res),
           );
         }
-        db.prepare("UPDATE ai_proposals SET status='applied' WHERE id=?").run(
+        db.prepare(
+          "UPDATE ai_proposals SET status='applied', result=? WHERE id=?",
+        ).run(
+          encryptText(JSON.stringify({ ...(result as object), reverted: false }), secret),
           proposal.id,
         );
         audit(
@@ -693,6 +704,87 @@ export function aiRouter(db: Db, secret: string) {
         );
         throw e;
       }
+    }),
+  );
+  // An applied file change keeps a timestamped backup and the revision it wrote, so the
+  // operator can undo an assistant edit without leaving the chat.
+  router.post(
+    "/machines/:id/proposals/:proposalId/reject",
+    route(async (req, res) => {
+      const machineId = Number(req.params.id),
+        userId = (req as AuthedRequest).user.id;
+      if (req.body?.confirm !== true)
+        throw new WorkspaceError(400, "confirmation_required");
+      const proposal = db
+        .prepare(
+          `SELECT p.id FROM ai_proposals p JOIN ai_runs r ON r.id = p.run_id
+      WHERE p.id = ? AND r.machine_id = ? AND r.user_id = ?`,
+        )
+        .get(req.params.proposalId, machineId, userId) as { id: string } | undefined;
+      if (!proposal) throw new WorkspaceError(404, "not_found");
+      const rejected = db
+        .prepare(
+          "UPDATE ai_proposals SET status='rejected' WHERE id=? AND status='pending'",
+        )
+        .run(proposal.id);
+      if (!rejected.changes)
+        throw new WorkspaceError(409, "proposal_already_handled");
+      res.json({ ok: true });
+    }),
+  );
+  router.post(
+    "/machines/:id/proposals/:proposalId/revert",
+    route(async (req, res) => {
+      const machineId = Number(req.params.id),
+        userId = (req as AuthedRequest).user.id;
+      if (req.body?.confirm !== true)
+        throw new WorkspaceError(400, "confirmation_required");
+      const proposal = db
+        .prepare(
+          `SELECT p.* FROM ai_proposals p JOIN ai_runs r ON r.id = p.run_id
+      WHERE p.id = ? AND r.machine_id = ? AND r.user_id = ?`,
+        )
+        .get(req.params.proposalId, machineId, userId) as Proposal | undefined;
+      if (!proposal || proposal.kind !== "file")
+        throw new WorkspaceError(404, "not_found");
+      if (proposal.status !== "applied")
+        throw new WorkspaceError(409, "proposal_not_applied");
+      let writtenRevision = "";
+      try {
+        writtenRevision = String(
+          (JSON.parse(decode(proposal.result ?? "")) as { revision?: string })
+            .revision ?? "",
+        );
+      } catch {
+        writtenRevision = "";
+      }
+      if (!writtenRevision) throw new WorkspaceError(409, "proposal_not_applied");
+      const restored = await withFiles(
+        db,
+        machineId,
+        secret,
+        async (files) => {
+          const actual = await files.confined("/", proposal.path, true);
+          if (actual !== proposal.path)
+            throw new WorkspaceError(409, "file_path_changed");
+          return lockedWrite(machineId, actual, () =>
+            files.write(
+              actual,
+              Buffer.from(decode(proposal.before_text)),
+              writtenRevision,
+            ),
+          );
+        },
+        requestSignal(res),
+      );
+      db.prepare(
+        "UPDATE ai_proposals SET status='reverted', result=? WHERE id=?",
+      ).run(
+        encryptText(JSON.stringify({ revision: restored.revision, reverted: true }), secret),
+        proposal.id,
+      );
+      audit(db, machineId, userId, "ai_file_revert", proposal.path, proposal.id);
+      res.json({ ok: true, result: restored });
     }),
   );
   return router;

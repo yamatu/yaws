@@ -14,15 +14,41 @@ import {
   ShieldCheck,
   PanelRightClose,
   PanelRightOpen,
+  Keyboard,
 } from "lucide-react";
 import { SshShortcuts } from "./SshShortcuts";
+import { MobileKeyBar } from "./MobileKeyBar";
+import {
+  applyMods,
+  defaultKeyBarVisible,
+  modsActive,
+  NO_MODS,
+  sendKey,
+  type KeyButton,
+  type Mods,
+} from "./terminalKeys";
 import { workspaceError } from "./workspaceErrors";
 const Files = lazy(() =>
   import("./FileWorkspace").then((m) => ({ default: m.FileWorkspace })),
 );
-const AI = lazy(() =>
-  import("./AiWorkspace").then((m) => ({ default: m.AiWorkspace })),
+const AI = lazy(() => import("./AiChat").then((m) => ({ default: m.AiChat })));
+const AiDock = lazy(() =>
+  import("./AiChatDock").then((m) => ({ default: m.AiChatDock })),
 );
+
+const KEY_BAR_STORAGE = "yaws.terminal.keys";
+
+function storedKeyBar(): boolean {
+  try {
+    return defaultKeyBarVisible(
+      window.matchMedia?.("(pointer: coarse)").matches ?? false,
+      window.innerWidth,
+      window.localStorage.getItem(KEY_BAR_STORAGE),
+    );
+  } catch {
+    return window.innerWidth <= 760;
+  }
+}
 
 function base64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -53,6 +79,14 @@ export function SshPage() {
   // commands can be run next to the file that is being worked on.
   const [dockTerminal, setDockTerminal] = useState(true);
   const [root, setRoot] = useState("/");
+  // Escape/Tab/arrows do not exist on a touch keyboard, so the terminal can show a key bar.
+  const [keyBar, setKeyBar] = useState(storedKeyBar);
+  // The assistant is an add-on: it can float over the terminal or the file editor.
+  const [chatDock, setChatDock] = useState(false);
+  const [mods, setMods] = useState<Mods>(NO_MODS);
+  // The terminal data handler lives inside an effect, so it reads the modifiers from a ref.
+  const modsRef = useRef<Mods>(NO_MODS);
+  const [notice, setNotice] = useState("");
   const [trusted, setTrusted] = useState(false);
   const [hostKey, setHostKey] = useState<{
     address: string;
@@ -140,6 +174,44 @@ export function SshPage() {
       setTrustBusy(false);
     }
   }
+
+  const sendRaw = (data: string) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(
+      JSON.stringify({
+        type: "input",
+        dataB64: bytesToBase64(new TextEncoder().encode(data)),
+      }),
+    );
+  };
+  const clearMods = () => {
+    modsRef.current = NO_MODS;
+    setMods(NO_MODS);
+  };
+  const toggleKeyBar = (next: boolean) => {
+    setKeyBar(next);
+    try {
+      window.localStorage.setItem(KEY_BAR_STORAGE, next ? "1" : "0");
+    } catch {
+      /* private mode: the choice is simply not remembered */
+    }
+    // The terminal keeps its size until the bar is (un)mounted, so ask xterm to re-fit.
+    window.setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
+  };
+  const pressKey = (key: KeyButton) => {
+    sendRaw(sendKey(key, modsRef.current));
+    if (modsActive(modsRef.current)) clearMods();
+    termRef.current?.focus();
+  };
+  const pasteClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) sendRaw(text);
+    } catch {
+      setNotice("浏览器不允许读取剪贴板，可长按终端手动粘贴");
+    }
+  };
 
   useEffect(() => {
     const el = containerRef.current;
@@ -247,7 +319,14 @@ export function SshPage() {
     const onTermResize = term.onResize(() => sendResize());
     const onTermData = term.onData((s) => {
       if (ws.readyState !== WebSocket.OPEN) return;
-      const bytes = new TextEncoder().encode(s);
+      // Sticky Ctrl/Alt from the key bar also apply to the soft keyboard.
+      const pending = modsRef.current;
+      const data = modsActive(pending) ? applyMods(s, pending) : s;
+      if (modsActive(pending)) {
+        modsRef.current = NO_MODS;
+        setMods(NO_MODS);
+      }
+      const bytes = new TextEncoder().encode(data);
       ws.send(JSON.stringify({ type: "input", dataB64: bytesToBase64(bytes) }));
     });
 
@@ -413,6 +492,11 @@ export function SshPage() {
             : `连接失败：${error}`}
         </div>
       ) : null}
+      {notice ? (
+        <div className="mx-4 mt-3 workspace-notice" role="status">
+          {notice}
+        </div>
+      ) : null}
 
       {(!trusted || hostKey) && (
         <div className="host-key-prompt">
@@ -486,6 +570,17 @@ export function SshPage() {
             )}
           </button>
         ) : null}
+        {tab === "terminal" || docked ? (
+          <button
+            className="icon-btn workspace-dock-toggle"
+            title={keyBar ? "隐藏按键栏" : "显示 Esc/Tab/Ctrl 按键栏"}
+            aria-label={keyBar ? "隐藏按键栏" : "显示按键栏"}
+            aria-pressed={keyBar}
+            onClick={() => toggleKeyBar(!keyBar)}
+          >
+            <Keyboard size={17} />
+          </button>
+        ) : null}
       </div>
       <div className={`workspace-body${docked ? " docked" : ""}`}>
         <div
@@ -509,7 +604,21 @@ export function SshPage() {
             }}
           />
           <div className="terminal-pane">
-            <div ref={containerRef} className="h-full w-full" />
+            <div ref={containerRef} className="terminal-host" />
+            {keyBar ? (
+              <MobileKeyBar
+                mods={mods}
+                onMod={(next) => {
+                  modsRef.current = next;
+                  setMods(next);
+                  termRef.current?.focus();
+                }}
+                onSend={pressKey}
+                onPaste={() => void pasteClipboard()}
+                onHide={() => toggleKeyBar(false)}
+                disabled={status !== "connected"}
+              />
+            ) : null}
           </div>
         </div>
         {trusted && visited.files && (
@@ -527,6 +636,17 @@ export function SshPage() {
           </div>
         )}
       </div>
+      {trusted && tab !== "ai" ? (
+        <Suspense fallback={null}>
+          <AiDock
+            machineId={machineId}
+            initialRoot={root}
+            open={chatDock}
+            onToggle={setChatDock}
+            lifted={keyBar && (tab === "terminal" || docked)}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }
