@@ -5,6 +5,7 @@ import { connectUiWs } from "./ws";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, formatMoneyCents, pct } from "./format";
 import { fractionLevel, meterValue } from "./serverStats";
 import { UsageMeter } from "./UsageMeter";
+import { useDocumentTitle } from "./documentTitle";
 
 type LiveMetric = {
   at: number;
@@ -29,6 +30,7 @@ type PendingMachineUpdate = Pick<MachineSummary, "online" | "lastSeenAt"> & {
 
 export function DashboardPage() {
   const nav = useNavigate();
+  useDocumentTitle("控制台");
   const [machines, setMachines] = useState<MachineSummary[]>([]);
   const [latest, setLatest] = useState<Record<number, LiveMetric>>({});
   const [wsOk, setWsOk] = useState(false);

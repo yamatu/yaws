@@ -38,6 +38,8 @@ import {
 import { SplitHandle } from "./SplitHandle";
 import { SPLIT_DEFAULT, storedSplit } from "./splitter";
 import { workspaceError } from "./workspaceErrors";
+import { useDocumentTitle } from "./documentTitle";
+import { storedTab, tabKey, type WorkspaceTab } from "./workspaceMemory";
 const Files = lazy(() =>
   import("./FileWorkspace").then((m) => ({ default: m.FileWorkspace })),
 );
@@ -46,8 +48,25 @@ const AiDock = lazy(() =>
   import("./AiChatDock").then((m) => ({ default: m.AiChatDock })),
 );
 
-const KEY_BAR_STORAGE = "yaws.terminal.keys";
 const SPLIT_STORAGE = "yaws.workspace.split";
+const KEY_BAR_STORAGE = "yaws.terminal.keys";
+
+/** Which tab of the SSH workspace was last open on this machine. */
+function storedTabFor(machineId: number): WorkspaceTab {
+  try {
+    return storedTab(localStorage.getItem(tabKey(machineId)));
+  } catch {
+    return "terminal";
+  }
+}
+
+function rememberTab(machineId: number, tab: WorkspaceTab) {
+  try {
+    localStorage.setItem(tabKey(machineId), tab);
+  } catch {
+    // private mode
+  }
+}
 
 function storedSplitMain(): number {
   try {
@@ -86,14 +105,19 @@ export function SshPage() {
   const { id } = useParams();
   const machineId = Number(id);
   const [machine, setMachine] = useState<Machine | null>(null);
+  // The browser tab names the server that is connected.
+  useDocumentTitle(machine?.name ?? "SSH");
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<
     "idle" | "connecting" | "connected" | "closed"
   >("idle");
   const [termReady, setTermReady] = useState(false);
   const [connectNonce, setConnectNonce] = useState(0);
-  const [tab, setTab] = useState<"terminal" | "files" | "ai">("terminal");
-  const [visited, setVisited] = useState({ files: false, ai: false });
+  const [tab, setTab] = useState<WorkspaceTab>(() => storedTabFor(machineId));
+  const [visited, setVisited] = useState(() => {
+    const initial = storedTabFor(machineId);
+    return { files: initial === "files", ai: initial === "ai" };
+  });
   // While browsing or editing files the SSH session stays visible in a side panel, so
   // commands can be run next to the file that is being worked on.
   const [dockTerminal, setDockTerminal] = useState(true);
@@ -570,6 +594,7 @@ export function SshPage() {
             key={key}
             onClick={() => {
               setTab(key);
+              rememberTab(machineId, key);
               if (key !== "terminal")
                 setVisited((v) => ({ ...v, [key]: true }));
             }}

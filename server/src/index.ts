@@ -10,7 +10,7 @@ import Database from "better-sqlite3";
 import { loadEnv, parseTrustProxy } from "./env.js";
 import { openDb } from "./db.js";
 import { authMiddleware } from "./http.js";
-import { hashAgentKey, hashPassword, signToken, verifyPassword } from "./auth.js";
+import { hashAgentKey, hashPassword, needsRenewal, signToken, verifyPassword } from "./auth.js";
 import { attachWebSockets } from "./ws.js";
 import { z } from "zod";
 import { decryptText, encryptText } from "./crypto.js";
@@ -646,7 +646,20 @@ app.use("/api/certificates", requireAuth, requireAdmin, certificateRouter(db, ag
 }));
 
 app.get("/api/me", requireAuth, (req, res) => {
-  return res.json({ user: (req as any).user });
+  const tokenUser = (req as any).user as { id: number; exp?: number };
+  const row = db
+    .prepare("SELECT id, username, role, auth_version as version FROM users WHERE id = ?")
+    .get(tokenUser.id) as
+    | { id: number; username: string; role: string; version: number }
+    | undefined;
+  if (!row) return res.status(401).json({ error: "unauthorized" });
+  const user = { id: row.id, username: row.username, role: row.role };
+  // A login that is still in use slides its expiry forward instead of expiring
+  // while the operator is in the middle of something.
+  const renew = needsRenewal(tokenUser.exp)
+    ? signToken({ ...user, version: row.version }, env.JWT_SECRET)
+    : null;
+  return res.json(renew ? { user, token: renew } : { user });
 });
 
 function getSetting(key: string) {

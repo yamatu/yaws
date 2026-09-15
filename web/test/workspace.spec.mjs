@@ -58,9 +58,18 @@ browserTest(
     insertMetric.run(2, metricAt, 0.58, 2_200_000_000, 4_000_000_000, 24_000_000_000, 40_000_000_000);
     insertMetric.run(3, metricAt, 0.71, 2_900_000_000, 4_000_000_000, 39_000_000_000, 40_000_000_000);
     await page.goto(f.url + "/login");
+    // The browser tab names the page that is open instead of a bare product name.
+    await expect(page).toHaveTitle("登录 · YAWS");
     await page.getByPlaceholder("请输入用户名").fill("fixture");
     await page.getByPlaceholder("请输入密码").fill(f.password);
     await page.getByRole("button", { name: "登录", exact: true }).click();
+    // The login is cached: the token is kept and a reload restores the session
+    // instead of showing the form again.
+    expect(await page.evaluate(() => !!localStorage.getItem("yaws_token"))).toBe(true);
+    await page.reload();
+    await expect(page.getByRole("button", { name: "退出", exact: true })).toBeVisible();
+    await expect(page.getByPlaceholder("请输入密码")).toHaveCount(0);
+    await expect(page).toHaveTitle("控制台 · YAWS");
     // The home page meters must pick their colour from the load (green → yellow
     // → red, i.e. yellow from 50% and red from 70%) and look like frosted glass,
     // instead of painting every bar with the same fixed rainbow gradient.
@@ -278,11 +287,46 @@ browserTest(
     await page.locator("input[type=file]").setInputFiles({
       name: "browser-upload.txt",
       mimeType: "text/plain",
-      buffer: Buffer.from("browser upload"),
+      // Long enough to scroll, so the remembered scroll offset can be checked.
+      buffer: Buffer.from(
+        `${Array.from(
+          { length: 200 },
+          (_, i) => `line ${String(i + 1).padStart(3, "0")}`,
+        ).join("\n")}\n`,
+      ),
     });
     await expect(page.locator(".file-list")).toContainText(
       "browser-upload.txt",
     );
+    // Opening a file remembers the directory, the file, the caret and the scroll
+    // offset, so a long file can be picked up exactly where it was left.
+    await page
+      .getByRole("button", { name: "browser-upload.txt", exact: true })
+      .click();
+    // Wait for the editor to hold the new file before touching it: switching files
+    // mounts a fresh editor, and a keystroke sent to the old one is thrown away.
+    await expect(page.locator(".cm-content")).toContainText("line 001");
+    await page.locator(".cm-scroller").evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    const targetLine = page.locator(".cm-line").filter({ hasText: "line 180" });
+    await targetLine.click();
+    await page.waitForFunction(
+      () => {
+        const raw = localStorage.getItem("yaws.workspace.cursor.1");
+        if (!raw) return false;
+        const state = JSON.parse(raw)["/srv/app/browser-upload.txt"];
+        return Boolean(state) && state.scrollTop > 0;
+      },
+      null,
+      { timeout: 5000 },
+    );
+    expect(await page.evaluate(() => localStorage.getItem("yaws.ssh.tab.1"))).toBe(
+      "files",
+    );
+    expect(
+      await page.evaluate(() => localStorage.getItem("yaws.workspace.view.1")),
+    ).toContain("/srv/app/browser-upload.txt");
     await page.screenshot({
       path: "test-results/files-desktop.png",
       fullPage: true,
@@ -565,6 +609,43 @@ browserTest(
       path: "test-results/ping-desktop.png",
       fullPage: true,
     });
+    // Coming back to the same machine restores the tab, the file and the caret,
+    // so an edit can be continued exactly where it was left off.
+    await page.goto(f.url + "/app/machines/1/ssh");
+    await expect(page.locator(".workspace-header")).toContainText("已连接");
+    // The last tab of this machine comes back: the SSH part was used last.
+    await expect(
+      page.getByRole("tab", { name: "终端", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("tab", { name: "文件", exact: true }).click();
+    await expect(page.locator(".cm-activeLine")).toContainText("line 180");
+    expect(
+      await page.locator(".cm-scroller").evaluate((el) => el.scrollTop),
+    ).toBeGreaterThan(0);
+    await page.goto(f.url + "/app/machines/1/ssh");
+    await expect(
+      page.getByRole("tab", { name: "文件", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(".file-editor-pane")).toContainText(
+      "browser-upload.txt",
+    );
+    await expect(page.locator(".cm-activeLine")).toContainText("line 180");
+    expect(
+      await page.locator(".cm-scroller").evaluate((el) => el.scrollTop),
+    ).toBeGreaterThan(0);
+    await expect(page).toHaveTitle("Fixture 1 · YAWS");
+    // Signing out clears the cached login, and the form still offers the
+    // remembered username so only the password is left to type.
+    await page.goto(f.url + "/app");
+    await page.getByRole("button", { name: "退出", exact: true }).click();
+    await expect(page.getByPlaceholder("请输入用户名")).toHaveValue("fixture");
+    await expect(page.getByPlaceholder("请输入密码")).toHaveValue("");
+    expect(await page.evaluate(() => localStorage.getItem("yaws_token"))).toBe(null);
+    // An expired session says why it came back to the form.
+    await page.goto(f.url + "/login?expired=1");
+    await expect(page.locator(".yaws-alert-error")).toContainText(
+      "登录状态已过期",
+    );
     expect(failures).toEqual([]);
   },
 );
@@ -580,6 +661,8 @@ browserTest(
     await expect(
       page.getByRole("heading", { name: "机器出口延迟" }),
     ).toBeVisible();
+    // The tab title follows the page that is open.
+    await expect(page).toHaveTitle("延迟监控 · YAWS");
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

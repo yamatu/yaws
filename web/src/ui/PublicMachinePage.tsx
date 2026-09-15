@@ -4,11 +4,13 @@ import { apiFetch, type PublicMachineDetail, type UptimeSummary } from "./api";
 import { daysLeft, fmtTime, formatBps, formatBytes, pct } from "./format";
 import { fractionLevel, meterValue } from "./serverStats";
 import { UsageMeter } from "./UsageMeter";
+import { useDocumentTitle } from "./documentTitle";
 
 export function PublicMachinePage() {
   const { id } = useParams();
   const machineId = Number(id);
   const [data, setData] = useState<PublicMachineDetail | null>(null);
+  useDocumentTitle(data?.machine.name ?? "公开状态页");
   const [error, setError] = useState<string | null>(null);
   const lastRef = useRef<{ at: number; rx: number; tx: number } | null>(null);
   const [rxBps, setRxBps] = useState(0);

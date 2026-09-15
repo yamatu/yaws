@@ -1,8 +1,9 @@
 import { Link, Outlet, useNavigate } from "react-router-dom";
-import { clearToken } from "./auth";
+import { currentUser, forgetSession } from "./session";
 
 export function AppLayout() {
   const nav = useNavigate();
+  const user = currentUser();
   return (
     <div className="mx-auto max-w-6xl px-5 py-5">
       <div className="mb-6 flex flex-wrap items-center gap-2 border-b border-white/[0.1] px-1 py-3.5">
@@ -11,6 +12,11 @@ export function AppLayout() {
             YAWS
           </Link>
           <span className="ml-2.5 text-sm text-white/40">探针监控</span>
+          {user ? (
+            <span className="ml-2.5 text-xs text-white/35" title={user.role}>
+              已登录：{user.username}
+            </span>
+          ) : null}
         </div>
         <Link className="yaws-btn" to="machines/new">
           新增机器
@@ -24,7 +30,7 @@ export function AppLayout() {
         <button
           className="yaws-btn"
           onClick={() => {
-            clearToken();
+            forgetSession();
             nav("/login", { replace: true });
           }}
         >

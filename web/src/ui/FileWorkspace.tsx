@@ -12,6 +12,17 @@ import {
 import { apiFetch, apiFetchBlob } from "./api";
 import { getToken } from "./auth";
 import { workspaceError } from "./workspaceErrors";
+import {
+  cursorKey,
+  dirname,
+  isInside,
+  readCursor,
+  readView,
+  viewKey,
+  writeCursor,
+  writeView,
+  type CursorState,
+} from "./workspaceMemory";
 const Editor = lazy(() =>
   import("./WorkspaceEditor").then((m) => ({ default: m.WorkspaceEditor })),
 );
@@ -40,12 +51,60 @@ export function FileWorkspace({
   const [file, setFile] = useState<OpenFile | null>(null);
   const [content, setContent] = useState("");
   const [language, setLanguage] = useState<string | null>(null);
+  const [cursor, setCursor] = useState<CursorState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const upload = useRef<HTMLInputElement>(null);
   const request = useRef<AbortController | null>(null);
+  const contentRef = useRef("");
+  contentRef.current = content;
+  const fileRef = useRef<OpenFile | null>(null);
+  fileRef.current = file;
   const dirty = file != null && file.content !== content;
+
+  /** Remembers the directory and the file that was open on this machine. */
+  function rememberView(nextDir: string, nextFile: string | null) {
+    try {
+      localStorage.setItem(viewKey(machineId), writeView(nextDir, nextFile));
+    } catch {
+      // private mode
+    }
+  }
+
+  /** Remembers where the caret sits inside one file. */
+  function rememberCursor(path: string, state: CursorState) {
+    try {
+      const key = cursorKey(machineId);
+      localStorage.setItem(
+        key,
+        writeCursor(
+          localStorage.getItem(key),
+          path,
+          state,
+          contentRef.current.length,
+        ),
+      );
+    } catch {
+      // private mode
+    }
+  }
+
+  function storedCursor(path: string, length: number): CursorState | null {
+    try {
+      return readCursor(localStorage.getItem(cursorKey(machineId)), path, length);
+    } catch {
+      return null;
+    }
+  }
+
+  function storedView() {
+    try {
+      return readView(localStorage.getItem(viewKey(machineId)));
+    } catch {
+      return { dir: "/", file: null };
+    }
+  }
   useEffect(() => {
     const ac = new AbortController();
     void apiFetch<{
@@ -58,7 +117,15 @@ export function FileWorkspace({
       .catch((e: unknown) => {
         if (!ac.signal.aborted) setError(workspaceError(e));
       });
-    void browse("/");
+    // Re-open where the operator left off: the file that was open wins over the
+    // directory that was merely browsed, so the sidebar matches the editor.
+    const view = storedView();
+    if (view.file) {
+      void browse(dirname(view.file));
+      void open(view.file, { restore: true });
+    } else {
+      void browse(view.dir);
+    }
     return () => {
       ac.abort();
       request.current?.abort();
@@ -89,13 +156,16 @@ export function FileWorkspace({
       setPathInput(r.path);
       setEntries(r.entries);
       onRoot(r.path);
+      // Browsing elsewhere drops a remembered file that is not in this directory.
+      const opened = fileRef.current?.path ?? null;
+      rememberView(r.path, isInside(opened, r.path) ? opened : null);
     } catch (e) {
       if (!ac.signal.aborted) setError(workspaceError(e));
     } finally {
       if (!ac.signal.aborted) setBusy(false);
     }
   }
-  async function open(path: string) {
+  async function open(path: string, opts?: { restore?: boolean }) {
     if (dirty && !window.confirm("放弃当前文件未保存的修改？")) return;
     setBusy(true);
     setError("");
@@ -106,8 +176,13 @@ export function FileWorkspace({
       );
       setFile(r);
       setContent(r.content);
+      setCursor(storedCursor(r.path, r.content.length));
+      rememberView(dirname(r.path), r.path);
     } catch (e) {
-      setError(workspaceError(e));
+      // A remembered file may have been deleted since the last visit: drop it and
+      // keep the directory listing instead of showing a stale error.
+      if (opts?.restore) rememberView(dir, null);
+      else setError(workspaceError(e));
     } finally {
       setBusy(false);
     }
@@ -362,10 +437,13 @@ export function FileWorkspace({
         {file ? (
           <Suspense fallback={<div className="p-4">加载编辑器…</div>}>
             <Editor
+              key={file.path}
               path={file.path}
               value={content}
               onChange={setContent}
               onLanguage={setLanguage}
+              initialCursor={cursor}
+              onCursor={(state) => rememberCursor(file.path, state)}
             />
           </Suspense>
         ) : (

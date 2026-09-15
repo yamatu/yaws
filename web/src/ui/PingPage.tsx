@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { apiFetch } from "./api";
+import { useDocumentTitle } from "./documentTitle";
 import { LatencyChart, latency, type LatencySeries } from "./LatencyChart";
 import "./ping.css";
 
@@ -69,6 +70,7 @@ const ranges = [
 
 export function PingPage() {
   const [params] = useSearchParams();
+  useDocumentTitle("延迟监控");
   const [machines, setMachines] = useState<Source[]>([]);
   const [machinesLoaded, setMachinesLoaded] = useState(false);
   const [machineError, setMachineError] = useState("");

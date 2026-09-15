@@ -1,10 +1,11 @@
 import { createBrowserRouter, Navigate } from "react-router-dom";
-import { lazy, Suspense, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { AppLayout } from "./ui/AppLayout";
 import { LoginPage } from "./ui/LoginPage";
 import { PublicDashboardPage } from "./ui/PublicDashboardPage";
 import { PublicMachinePage } from "./ui/PublicMachinePage";
 import { getToken } from "./ui/auth";
+import { loadSession } from "./ui/session";
 const DashboardPage = lazy(() => import("./ui/DashboardPage").then((m) => ({ default: m.DashboardPage })));
 const MachinePage = lazy(() => import("./ui/MachinePage").then((m) => ({ default: m.MachinePage })));
 const MachineNewPage = lazy(() => import("./ui/MachineNewPage").then((m) => ({ default: m.MachineNewPage })));
@@ -14,9 +15,36 @@ const PingPage = lazy(() => import("./ui/PingPage").then((m) => ({ default: m.Pi
 const BastionPage = lazy(() => import("./ui/BastionPage").then((m) => ({ default: m.BastionPage })));
 const CertificatesPage = lazy(() => import("./ui/CertificatesPage").then((m) => ({ default: m.CertificatesPage })));
 
+/**
+ * A cached login is only trusted after the server confirms it, so an expired
+ * or revoked session lands on the login form instead of an empty dashboard.
+ */
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = getToken();
+  const [state, setState] = useState<"checking" | "ok" | "bad">(() =>
+    token ? "checking" : "bad",
+  );
+
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    loadSession()
+      .then(() => {
+        if (alive) setState("ok");
+      })
+      .catch(() => {
+        if (alive) setState("bad");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [token]);
+
   if (!token) return <Navigate to="/login" replace />;
+  if (state === "bad") return <Navigate to="/login?expired=1" replace />;
+  if (state === "checking") {
+    return <div className="p-5 text-white/50">正在恢复登录状态…</div>;
+  }
   return <Suspense fallback={<div className="p-5 text-white/50">加载中…</div>}>{children}</Suspense>;
 }
 

@@ -4,12 +4,14 @@ import { apiFetch, type PublicMachine } from "./api";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, pct } from "./format";
 import { fractionLevel, meterValue } from "./serverStats";
 import { UsageMeter } from "./UsageMeter";
+import { useDocumentTitle } from "./documentTitle";
 
 type ViewMode = "cards" | "list";
 type GroupKey = string; // "__all__" | "__ungrouped__" | groupName
 
 export function PublicDashboardPage() {
   const [machines, setMachines] = useState<PublicMachine[]>([]);
+  useDocumentTitle("公开状态页");
   const [error, setError] = useState<string | null>(null);
   const [speed, setSpeed] = useState<Record<number, { rxBps: number; txBps: number }>>({});
   const lastRef = useRef<Record<number, { at: number; rx: number; tx: number }>>({});

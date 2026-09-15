@@ -5,6 +5,7 @@ import { connectUiWs } from "./ws";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, formatMoneyCents, pct } from "./format";
 import { fractionLevel, meterValue } from "./serverStats";
 import { UsageMeter } from "./UsageMeter";
+import { useDocumentTitle } from "./documentTitle";
 import { getToken } from "./auth";
 
 export function MachinePage() {
@@ -15,6 +16,7 @@ export function MachinePage() {
   const createdMachine = loc?.state?.createdMachine as Machine | undefined;
   const initialMachine = createdMachine?.id === machineId ? createdMachine : null;
   const [machine, setMachine] = useState<Machine | null>(initialMachine);
+  useDocumentTitle(machine?.name ?? "机器详情");
   const [machineLoading, setMachineLoading] = useState(!initialMachine);
   const [machineLoadError, setMachineLoadError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<Metric[]>([]);

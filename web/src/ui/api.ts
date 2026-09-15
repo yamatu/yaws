@@ -1,6 +1,37 @@
-import { getToken } from "./auth";
+import { clearToken, getToken } from "./auth";
 
 export const API_BASE = "";
+
+/**
+ * A cached login the server no longer accepts must not leave the app showing
+ * empty pages: drop it and send the operator back to the login form with a
+ * hint, remembering where they were so they can carry on after signing in.
+ */
+function expiredLogin(path: string) {
+  if (path.startsWith("/api/auth/")) return; // a rejected password is a form error
+  if (!getToken()) return; // nothing cached, so nothing expired
+  clearToken();
+  if (typeof window === "undefined" || !window.location) return;
+  const { pathname, search } = window.location;
+  if (pathname === "/login") return;
+  const next = `${pathname}${search}`;
+  window.location.replace(
+    `/login?expired=1${next && next !== "/" ? `&next=${encodeURIComponent(next)}` : ""}`,
+  );
+}
+
+async function httpError(path: string, res: Response): Promise<Error> {
+  if (res.status === 401) expiredLogin(path);
+  let body: any = null;
+  try {
+    body = await res.json();
+  } catch {
+    // ignore
+  }
+  const err = new Error(body?.error ?? `http_${res.status}`);
+  (err as any).status = res.status;
+  return err;
+}
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
@@ -13,17 +44,7 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     ...init,
     headers,
   });
-  if (!res.ok) {
-    let body: any = null;
-    try {
-      body = await res.json();
-    } catch {
-      // ignore
-    }
-    const err = new Error(body?.error ?? `http_${res.status}`);
-    (err as any).status = res.status;
-    throw err;
-  }
+  if (!res.ok) throw await httpError(path, res);
   return (await res.json()) as T;
 }
 
@@ -36,17 +57,7 @@ export async function apiFetchText(path: string, init?: RequestInit): Promise<st
       ...(init?.headers ?? {}),
     },
   });
-  if (!res.ok) {
-    let body: any = null;
-    try {
-      body = await res.json();
-    } catch {
-      // ignore
-    }
-    const err = new Error(body?.error ?? `http_${res.status}`);
-    (err as any).status = res.status;
-    throw err;
-  }
+  if (!res.ok) throw await httpError(path, res);
   return await res.text();
 }
 
@@ -62,17 +73,7 @@ export async function apiFetchBlob(
       ...(init?.headers ?? {}),
     },
   });
-  if (!res.ok) {
-    let body: any = null;
-    try {
-      body = await res.json();
-    } catch {
-      // ignore
-    }
-    const err = new Error(body?.error ?? `http_${res.status}`);
-    (err as any).status = res.status;
-    throw err;
-  }
+  if (!res.ok) throw await httpError(path, res);
   const cd = res.headers.get("content-disposition") ?? "";
   const m = cd.match(/filename=\"?([^\";]+)\"?/i);
   const filename = m?.[1];

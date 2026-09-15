@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch, type Machine } from "./api";
+import { useDocumentTitle } from "./documentTitle";
 
 function defaultAgentWsUrl() {
   try {
@@ -14,6 +15,7 @@ function defaultAgentWsUrl() {
 
 export function MachineNewPage() {
   const nav = useNavigate();
+  useDocumentTitle("新增机器");
   const [name, setName] = useState("");
   const [groupName, setGroupName] = useState("");
   const [notes, setNotes] = useState("");

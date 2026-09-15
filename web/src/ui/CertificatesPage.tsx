@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "./api";
+import { useDocumentTitle } from "./documentTitle";
 import { fmtTime, daysLeft } from "./format";
 
 type Cert = { id:number; certPath:string; keyPath:string; domains:string[]; expiresAt:number|null; issuer:string; lastScanAt:number; lastRenewAt:number|null; status:string; lastError:string };
@@ -104,6 +105,7 @@ function parseDomainInput(text:string):string[] {
 }
 
 export function CertificatesPage() {
+  useDocumentTitle("证书管理");
   const [config,setConfig]=useState<Config|null>(null); const [email,setEmail]=useState("yamatu@qq.com");
   const [token,setToken]=useState(""); const [account,setAccount]=useState(""); const [autoRenew,setAutoRenew]=useState(true); const [autoRenewDays,setAutoRenewDays]=useState(30);
   const [globalKey,setGlobalKey]=useState(""); const [cfEmail,setCfEmail]=useState(""); const [caServer,setCaServer]=useState("letsencrypt"); const [useServerCreds,setUseServerCreds]=useState(false);

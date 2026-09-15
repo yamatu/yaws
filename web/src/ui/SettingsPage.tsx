@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch, apiFetchBlob } from "./api";
 import { getToken, setToken } from "./auth";
+import { useDocumentTitle } from "./documentTitle";
 
 type TelegramSettings = {
   enabled: boolean;
@@ -28,6 +29,7 @@ function telegramErrorToText(code: string) {
 
 export function SettingsPage() {
   const nav = useNavigate();
+  useDocumentTitle("账号设置");
   const [username, setUsername] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");

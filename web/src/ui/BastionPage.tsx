@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, type Machine } from "./api";
+import { useDocumentTitle } from "./documentTitle";
 type Session = { id: string; machineName: string; operator: string; destination: string; startedAt: number; status: string };
 
 export function BastionPage() {
+  useDocumentTitle("堡垒机");
   const [machines, setMachines] = useState<Machine[]>([]);
   const [query, setQuery] = useState("");
   const [sessions, setSessions] = useState<Session[]>([]);
