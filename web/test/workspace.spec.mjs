@@ -855,3 +855,163 @@ browserTest(
     expect(failures).toEqual([]);
   },
 );
+
+browserTest(
+  "several terminals run side by side and keep their own AI context",
+  async ({ page }) => {
+    const failures = [];
+    page.on("pageerror", (e) => failures.push(e.message));
+    await page.goto(f.url + "/login");
+    await page.getByPlaceholder("请输入用户名").fill("fixture");
+    await page.getByPlaceholder("请输入密码").fill(f.password);
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    // One model profile is enough: this test is about where each answer lands.
+    await page.evaluate(async (baseUrl) => {
+      const token = localStorage.getItem("yaws_token");
+      await fetch("/api/ai/profiles", {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          activeId: "multi",
+          profiles: [
+            {
+              id: "multi",
+              name: "多终端模型",
+              baseUrl,
+              protocol: "chat",
+              model: "fixture-model",
+              reasoning: "",
+              apiKey: "fixture-key",
+              allowPrivate: true,
+            },
+          ],
+        }),
+      });
+    }, f.modelUrl);
+    // Only the active pane is rendered, so every query is scoped to it.
+    const visible = page.locator(".remote-workspace:not([hidden])");
+    const chip = (name) => page.locator(".ssh-session").filter({ hasText: name });
+
+    // An already trusted server must not ask again: this spec also runs after the
+    // desktop spec, which trusts Fixture 1.
+    const knowsKey = (id) =>
+      !!f.db
+        .prepare("SELECT ssh_host_fingerprint as fp FROM machines WHERE id=?")
+        .get(id).fp;
+    const trust = async (id) => {
+      if (knowsKey(id)) return;
+      await visible
+        .getByRole("button", { name: "读取主机指纹", exact: true })
+        .click();
+      await visible.getByRole("button", { name: "确认并信任此指纹" }).click();
+    };
+    await page.goto(f.url + "/app/machines/1/ssh");
+    await trust(1);
+    await expect(visible.locator(".workspace-header")).toContainText("已连接");
+    // Session one asks the assistant something worth remembering.
+    await visible.getByRole("tab", { name: "AI", exact: true }).click();
+    await visible.getByLabel("问题").fill("[pre][run] 看一下磁盘");
+    await visible.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(visible.locator(".ai-answer").last()).toContainText(
+      "已生成配置修改与验证命令。",
+    );
+    // A second server joins from the strip without leaving the page.
+    await page
+      .getByRole("button", { name: "打开其他服务器的终端", exact: true })
+      .click();
+    const picker = page.getByRole("dialog", { name: "选择服务器" });
+    await expect(picker).toBeVisible();
+    await expect(
+      picker.locator(".ssh-picker-item").filter({ hasText: "Fixture 1" }),
+    ).toContainText("已打开");
+    await picker
+      .locator(".ssh-picker-item")
+      .filter({ hasText: "Fixture 2" })
+      .click();
+    await expect(picker).toHaveCount(0);
+    await expect(chip("Fixture 2")).toHaveCount(1);
+await expect(page.locator(".ssh-session")).toHaveCount(2);
+    await trust(2);
+    await expect(visible.locator(".workspace-header")).toContainText("Fixture 2");
+    await expect(visible.locator(".workspace-header")).toContainText("已连接");
+    // The second terminal has its own empty assistant: no context leaks across
+    // servers, which is exactly what broke when several terminals were open.
+    await visible.getByRole("tab", { name: "AI", exact: true }).click();
+    await expect(visible.locator(".ai-chat-empty")).toBeVisible();
+    await expect(visible.locator(".ai-answer")).toHaveCount(0);
+    // The background terminal is still mounted: its transcript is in the DOM
+    // (behind the hidden pane) instead of being thrown away on every switch.
+    await expect(
+      page.locator(".remote-workspace[hidden] .ai-answer").last(),
+    ).toContainText("已生成配置修改与验证命令。");
+    await expect(page.locator(".remote-workspace[hidden] .xterm")).toHaveCount(1);
+    // Going back to the first terminal keeps its transcript, its tab and its
+    // live connection — the background session was never torn down.
+    await chip("Fixture 1").getByRole("tab").click();
+    await expect(visible.locator(".workspace-header")).toContainText("Fixture 1");
+    await expect(visible.locator(".ai-answer").last()).toContainText(
+      "已生成配置修改与验证命令。",
+    );
+    await expect(chip("Fixture 1").locator(".bg-emerald-400")).toHaveCount(1);
+    await expect(chip("Fixture 2").locator(".bg-emerald-400")).toHaveCount(1);
+    await page.screenshot({
+      path: "test-results/terminals-desktop.png",
+      fullPage: true,
+    });
+    // Closing the background terminal leaves the visible one untouched.
+    await page
+      .getByRole("button", { name: "关闭 Fixture 2 的终端", exact: true })
+      .click();
+    await expect(page.locator(".ssh-session")).toHaveCount(1);
+    await expect(visible.locator(".workspace-header")).toContainText("Fixture 1");
+    // The open set survives a reload, together with the conversation.
+    await page.reload();
+    await expect(page.locator(".ssh-session")).toHaveCount(1);
+    await expect(visible.locator(".workspace-header")).toContainText("Fixture 1");
+    await expect(visible.locator(".workspace-header")).toContainText("已连接");
+    await expect(visible.locator(".ai-answer").last()).toContainText(
+      "已生成配置修改与验证命令。",
+    );
+    // A server whose key is already known must not flash the trust prompt while
+    // its key is being re-checked: the collapsing button used to swallow clicks.
+    await page.route("**/workspace/host-key", async (route) => {
+      await new Promise((done) => setTimeout(done, 700));
+      await route.continue();
+    });
+    await page.reload();
+    await page.waitForTimeout(250);
+    const flashed = await page.locator(".host-key-prompt").count();
+    await expect(visible.locator(".workspace-header")).toContainText("已连接");
+    await page.unroute("**/workspace/host-key");
+    expect(flashed).toBe(0);
+    // Everything else can be opened in one go and stays in the background.
+    await page
+      .getByRole("button", { name: "打开其他服务器的终端", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: /打开全部可连接的服务器/ })
+      .click();
+    await expect(page.locator(".ssh-session")).toHaveCount(3);
+    await expect(page.locator(".remote-workspace")).toHaveCount(3);
+    await expect(page.locator(".remote-workspace:not([hidden])")).toHaveCount(1);
+    // The bulk open lands on the first new server, which was trusted earlier.
+    await expect(visible.locator(".workspace-header")).toContainText("Fixture 2");
+    await expect(visible.locator(".workspace-header")).toContainText("已连接");
+    // The last server still has to be trusted, and only then does its dot go green.
+    await chip("Fixture 3").getByRole("tab").click();
+    await trust(3);
+    await expect(visible.locator(".workspace-header")).toContainText("Fixture 3");
+    await expect(visible.locator(".workspace-header")).toContainText("已连接");
+    for (const name of ["Fixture 1", "Fixture 2", "Fixture 3"])
+      await expect(chip(name).locator(".bg-emerald-400")).toHaveCount(1);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    expect(failures).toEqual([]);
+  },
+);

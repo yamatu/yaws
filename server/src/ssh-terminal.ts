@@ -75,7 +75,9 @@ export function terminalSocket(
   };
   const connectTimer = setTimeout(() => finish("connect_timeout", true), 20000);
   const idleTimer = setInterval(() => {
-    if (Date.now() - lastActivity > 30 * 60_000) finish("idle_timeout");
+    // Terminals are meant to stay open next to each other, so an idle one is
+    // only reclaimed after two hours instead of half an hour.
+    if (Date.now() - lastActivity > 120 * 60_000) finish("idle_timeout");
   }, 30000);
   const flush = () => {
     flushTimer = undefined;
@@ -111,8 +113,8 @@ export function terminalSocket(
     if (started) return finish("duplicate_connect", true);
     started = true;
     if (
-      sessions.size >= 32 ||
-      [...sessions.values()].filter((s) => s.userId === user.id).length >= 8
+      sessions.size >= 64 ||
+      [...sessions.values()].filter((s) => s.userId === user.id).length >= 24
     )
       return finish("session_limit", true);
     void (async () => {
