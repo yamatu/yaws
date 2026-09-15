@@ -28,6 +28,7 @@ const PurgeBody = z.object({
   scope: z.enum(["expired", "error", "expired_or_error"]),
   machineId: z.number().int().positive().optional(),
 });
+const RestoreBody = z.object({ machineId: z.number().int().positive().optional() });
 const IssueBody = z.object({
   domains: z.array(z.string().max(253)).min(1).max(30),
   certPath: z.string().max(900).optional(),
@@ -448,11 +449,16 @@ export function acmeScript(t: AcmeTarget) {
   return lines.join("\n");
 }
 
-function storeCertificate(db: Db, machineId: number, row: { path: string; keyPath: string; domains: string[]; expiresAt: number | null; issuer: string }) {
+function storeCertificate(db: Db, machineId: number, row: { path: string; keyPath: string; domains: string[]; expiresAt: number | null; issuer: string }, opts: { revive?: boolean } = {}) {
   // A scan that cannot see the private key (permissions, or the discovery
   // heuristics came up empty) must not erase a path we already know works:
   // that would disable the renew button for a certificate that was fine.
-  db.prepare(`INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(machine_id,cert_path) DO UPDATE SET key_path=CASE WHEN excluded.key_path != '' THEN excluded.key_path ELSE COALESCE(certificate_inventory.key_path,'') END,domains=excluded.domains,expires_at=excluded.expires_at,issuer=excluded.issuer,last_scan_at=excluded.last_scan_at,status=excluded.status,last_error=''`)
+  //
+  // `ignored_at` is the operator's decision to stop tracking a path: a scan must
+  // never clear it (otherwise a deleted record came back on the next scan), but
+  // a manual issuance is a fresh intent and revives the record.
+  const ignored = opts.revive ? "0" : "certificate_inventory.ignored_at";
+  db.prepare(`INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,last_error) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(machine_id,cert_path) DO UPDATE SET key_path=CASE WHEN excluded.key_path != '' THEN excluded.key_path ELSE COALESCE(certificate_inventory.key_path,'') END,domains=excluded.domains,expires_at=excluded.expires_at,issuer=excluded.issuer,last_scan_at=excluded.last_scan_at,status=excluded.status,last_error='',ignored_at=${ignored}`)
     .run(machineId, row.path, row.keyPath, JSON.stringify(row.domains), row.expiresAt, row.issuer, Date.now(), row.expiresAt && row.expiresAt < Date.now() ? "expired" : "ok", "");
 }
 
@@ -519,16 +525,22 @@ export function certificateRouter(db: Db, secret: string, env: CertSettings) {
   });
   router.get("/summary", (_req, res) => {
     const now = Date.now();
+    // Hidden (deleted) records stay out of the counters: the operator removed
+    // them, so "3 个证书 · 2 已到期" must not include them again.
     const rows = db.prepare(`SELECT machine_id as machineId, COUNT(*) as certificates,
       SUM(CASE WHEN expires_at IS NOT NULL AND expires_at < ? THEN 1 ELSE 0 END) as expired,
       SUM(CASE WHEN expires_at IS NOT NULL AND expires_at >= ? AND expires_at < ? THEN 1 ELSE 0 END) as expiring,
       MIN(expires_at) as nextExpiry
-      FROM certificate_inventory GROUP BY machine_id`).all(now, now, now + 15 * 86400000);
+      FROM certificate_inventory WHERE ignored_at = 0 GROUP BY machine_id`).all(now, now, now + 15 * 86400000);
     res.json({ summary: rows });
   });
   router.get("/machine/:machineId", (req, res) => {
     const id = machineId(req);
-    res.json({ certificates: db.prepare("SELECT id,cert_path as certPath,key_path as keyPath,domains,expires_at as expiresAt,issuer,last_scan_at as lastScanAt,last_renew_at as lastRenewAt,status,last_error as lastError FROM certificate_inventory WHERE machine_id=? ORDER BY expires_at ASC").all(id).map((r: any) => ({ ...r, domains: parseDomains(r.domains) })) });
+    // Deleted records are hidden by default; the UI asks for them explicitly to
+    // fill its "显示已隐藏" view instead of sharing the main list's query.
+    const includeIgnored = req.query.includeIgnored === "1" || req.query.includeIgnored === "true";
+    const rows = db.prepare(`SELECT id,cert_path as certPath,key_path as keyPath,domains,expires_at as expiresAt,issuer,last_scan_at as lastScanAt,last_renew_at as lastRenewAt,status,last_error as lastError,ignored_at as ignoredAt FROM certificate_inventory WHERE machine_id=?${includeIgnored ? "" : " AND ignored_at = 0"} ORDER BY expires_at ASC`).all(id) as any[];
+    res.json({ certificates: rows.map((r) => ({ ...r, domains: parseDomains(r.domains) })) });
   });
   router.post("/machine/:machineId/scan", async (req, res, next) => {
     const id = machineId(req); let client: any;
@@ -542,9 +554,13 @@ export function certificateRouter(db: Db, secret: string, env: CertSettings) {
       if (result.code !== 0 && !result.stdout) throw new WorkspaceError(502, `certificate_scan_failed:${(result.stderr || "remote scan failed").slice(-1000)}`);
       const parsed = parseScan(result.stdout);
       const rows = parsed.rows;
-      const seen = new Set((db.prepare("SELECT cert_path FROM certificate_inventory WHERE machine_id=?").all(id) as Array<{ cert_path: string }>).map((r) => r.cert_path));
-      let added = 0, updated = 0;
-      for (const r of rows) (seen.has(r.path) ? updated++ : added++);
+      const existing = db.prepare("SELECT cert_path, ignored_at FROM certificate_inventory WHERE machine_id=?").all(id) as Array<{ cert_path: string; ignored_at: number }>;
+      const seen = new Set(existing.map((r) => r.cert_path));
+      // A path the operator deleted must not be counted as "新增/更新": it is
+      // stored again (so a later restore has fresh data) but stays hidden.
+      const hidden = new Set(existing.filter((r) => r.ignored_at).map((r) => r.cert_path));
+      let added = 0, updated = 0, ignored = 0;
+      for (const r of rows) { if (hidden.has(r.path)) ignored++; else if (seen.has(r.path)) updated++; else added++; }
       let pruned = 0;
       const tx = db.transaction(() => {
         for (const r of rows) storeCertificate(db, id, r);
@@ -557,7 +573,7 @@ export function certificateRouter(db: Db, secret: string, env: CertSettings) {
       });
       tx();
       res.json({
-        ok: true, found: rows.length, added, updated, pruned, duplicates: parsed.duplicates,
+        ok: true, found: rows.length, added, updated, pruned, ignored, duplicates: parsed.duplicates,
         certificates: rows, info: parsed.info,
         warning: rows.length === 0 ? "未发现可解析证书。请确认 SSH 用户可读取证书目录，且服务器安装 openssl；如果 Nginx 使用自定义路径，请检查 nginx -T 权限。" : undefined,
       });
@@ -565,7 +581,7 @@ export function certificateRouter(db: Db, secret: string, env: CertSettings) {
   });
   router.post("/machine/:machineId/renew", async (req, res, next) => {
     const id = machineId(req); const parsed = RenewBody.safeParse(req.body); if (!parsed.success) return res.status(400).json({ error: "bad_request" });
-    const row = db.prepare("SELECT * FROM certificate_inventory WHERE id=? AND machine_id=?").get(parsed.data.id, id) as any;
+    const row = db.prepare("SELECT * FROM certificate_inventory WHERE id=? AND machine_id=? AND ignored_at=0").get(parsed.data.id, id) as any;
     if (!row) return res.status(404).json({ error: "certificate_not_found" });
     try { await renewStoredCertificate(db, secret, env, id, row); res.json({ ok: true, reloaded: true }); }
     catch (e) { db.prepare("UPDATE certificate_inventory SET status='error',last_error=? WHERE id=?").run(redactSecrets(String(e instanceof Error ? e.message : e), configSecrets(db, secret, env)).slice(-2000), row.id); next(phaseError("renew", e, configSecrets(db, secret, env))); }
@@ -596,36 +612,59 @@ export function certificateRouter(db: Db, secret: string, env: CertSettings) {
       client = await connectMachine(db, id, secret);
       const issued = await runAcme(client, { domains, certPath, keyPath, email: c.email, force: parsed.data.force !== false, reload, caServer: c.caServer }, c, "certificate_issue_failed");
       const finalDomains = issued.domains.length ? issued.domains : domains;
-      storeCertificate(db, id, { path: certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, issuer: "" });
+      storeCertificate(db, id, { path: certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, issuer: "" }, { revive: true });
       res.json({ ok: true, certPath, keyPath, domains: finalDomains, expiresAt: issued.expiresAt, reloaded: reload });
     } catch (e) { next(phaseError("issue", e, configSecrets(db, secret, env))); } finally { try { client?.end(); } catch {} }
   });
   // Remove one certificate from the inventory. Nothing is deleted on the server:
-  // the operator is dropping a dead path or an unwanted entry, and a later scan
-  // simply re-adds it if the file is still there.
+  // the operator is dropping a dead path or an unwanted entry. The row itself is
+  // kept as a tombstone (`ignored_at`) because a plain DELETE was undone by the
+  // next scan, which re-inserts every certificate it still finds on the machine.
   router.delete("/cert/:id", (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: "bad_certificate_id" });
-    const row = db.prepare("SELECT id, machine_id as machineId FROM certificate_inventory WHERE id=?").get(id) as { id: number; machineId: number } | undefined;
+    const row = db.prepare("SELECT id, machine_id as machineId, ignored_at as ignoredAt FROM certificate_inventory WHERE id=?").get(id) as { id: number; machineId: number; ignoredAt: number } | undefined;
     if (!row) return res.status(404).json({ error: "certificate_not_found" });
-    db.prepare("DELETE FROM certificate_inventory WHERE id=?").run(id);
+    // Deleting twice is a 404, exactly like a record that never existed.
+    if (row.ignoredAt) return res.status(404).json({ error: "certificate_not_found" });
+    db.prepare("UPDATE certificate_inventory SET ignored_at=? WHERE id=?").run(Date.now(), id);
     res.json({ ok: true, deleted: 1, machineId: row.machineId });
   });
-  // Bulk cleanup: "expired" drops records whose certificate has already lapsed,
-  // "error" drops rows whose last operation failed, and the combined scope does
-  // both. Deleted rows are no longer eligible for automatic renewal.
+  // Bulk cleanup: "expired" hides records whose certificate has already lapsed,
+  // "error" hides rows whose last operation failed, and the combined scope does
+  // both. Hidden rows are no longer eligible for automatic renewal, and they stay
+  // hidden across scans until the operator restores them.
   router.post("/purge", (req, res) => {
     const parsed = PurgeBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "bad_request" });
     const now = Date.now();
-    const where: string[] = [];
+    const where: string[] = ["ignored_at = 0"];
     const args: unknown[] = [];
     if (parsed.data.machineId) { where.push("machine_id=?"); args.push(parsed.data.machineId); }
     if (parsed.data.scope === "error") where.push("status='error'");
     else if (parsed.data.scope === "expired") { where.push("expires_at IS NOT NULL AND expires_at < ?"); args.push(now); }
     else { where.push("(status='error' OR (expires_at IS NOT NULL AND expires_at < ?))"); args.push(now); }
-    const deleted = db.prepare(`DELETE FROM certificate_inventory WHERE ${where.join(" AND ")}`).run(...args).changes;
+    // `now` is stored into `ignored_at`, the rest are the scope filters.
+    const deleted = db.prepare(`UPDATE certificate_inventory SET ignored_at=? WHERE ${where.join(" AND ")}`).run(now, ...args).changes;
     res.json({ ok: true, deleted });
+  });
+  // Undo for both of the above: bring a hidden record back into the list (and
+  // back into the renewal scheduler).
+  router.post("/cert/:id/restore", (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: "bad_certificate_id" });
+    const row = db.prepare("SELECT id, machine_id as machineId FROM certificate_inventory WHERE id=?").get(id) as { id: number; machineId: number } | undefined;
+    if (!row) return res.status(404).json({ error: "certificate_not_found" });
+    const restored = db.prepare("UPDATE certificate_inventory SET ignored_at=0 WHERE id=? AND ignored_at != 0").run(id).changes;
+    res.json({ ok: true, restored, machineId: row.machineId });
+  });
+  router.post("/restore", (req, res) => {
+    const parsed = RestoreBody.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ error: "bad_request" });
+    const restored = parsed.data.machineId
+      ? db.prepare("UPDATE certificate_inventory SET ignored_at=0 WHERE machine_id=? AND ignored_at != 0").run(parsed.data.machineId).changes
+      : db.prepare("UPDATE certificate_inventory SET ignored_at=0 WHERE ignored_at != 0").run().changes;
+    res.json({ ok: true, restored });
   });
   // Last line of defence for this router: an unexpected exception (SQLite
   // failure, driver error, malformed payload) must name itself instead of
@@ -637,6 +676,15 @@ export function certificateRouter(db: Db, secret: string, env: CertSettings) {
     next(new WorkspaceError(500, `certificate_internal_error:${errorDetail(err)}`));
   }) as unknown as RequestHandler);
   return router;
+}
+
+// The rows the scheduler is allowed to touch: already within the renewal window,
+// not mid-renewal, and not deleted by the operator.
+// Exported so the "a deleted certificate is never renewed" contract is testable
+// without waiting for the background timer.
+export function renewalCandidates(db: Db, withinDays: number, now = Date.now()) {
+  return db.prepare("SELECT id, machine_id as machineId, expires_at as expiresAt FROM certificate_inventory WHERE expires_at IS NOT NULL AND expires_at <= ? AND status != 'renewing' AND ignored_at = 0")
+    .all(now + withinDays * 86400000) as Array<{ id: number; machineId: number; expiresAt: number }>;
 }
 
 export function startCertificateScheduler(db: Db, secret: string, env: CertSettings) {
@@ -652,7 +700,7 @@ export function startCertificateScheduler(db: Db, secret: string, env: CertSetti
       // tick and let the operator finish configuring instead.
       if (!c.configured) return;
       const days = c.autoRenewDays;
-      const rows = db.prepare("SELECT id, machine_id as machineId, expires_at as expiresAt FROM certificate_inventory WHERE expires_at IS NOT NULL AND expires_at <= ? AND status != 'renewing'").all(Date.now() + days * 86400000) as Array<{id:number;machineId:number;expiresAt:number}>;
+      const rows = renewalCandidates(db, days);
       for (const row of rows) {
         db.prepare("UPDATE certificate_inventory SET status='renewing' WHERE id=?").run(row.id);
         try {

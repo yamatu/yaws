@@ -15,7 +15,7 @@ import { openDb } from "../dist/db.js";
 import { hashPassword, signToken } from "../dist/auth.js";
 import { authMiddleware } from "../dist/http.js";
 import { encryptText } from "../dist/crypto.js";
-import { acmeScript, certificateRouter, SCAN_SCRIPT, startCertificateScheduler } from "../dist/certificates.js";
+import { acmeScript, certificateRouter, renewalCandidates, SCAN_SCRIPT, startCertificateScheduler } from "../dist/certificates.js";
 import { fingerprint } from "../dist/ssh.js";
 
 const secret = "certificate-test-secret-0123456789";
@@ -649,6 +649,105 @@ test("a stored Global API Key and a custom CA server are used as configured", as
     assert.match(command, /--server/);
     assert.match(command, /zerossl/);
     assert.doesNotMatch(command, /CF_Token=/);
+  } finally { close(); }
+});
+
+// The reported symptom: deleting an expired certificate looked like it worked,
+// but the next scan found the same file on the machine and re-inserted the row —
+// so the record came back as if the deletion had never happened. Deletion now
+// leaves a tombstone (`ignored_at`) that scans respect.
+test("a deleted certificate stays deleted across scans, and can be restored", async () => {
+  const state = { count: 2 };
+  const { ssh, port, fp } = await startSsh({ onExec: (accept) => {
+    const stream = accept();
+    stream.write(scanOutput({ count: state.count }));
+    stream.exit(0);
+    stream.end();
+  } });
+  const { api, db, close } = await startApi({ ssh, port, fp });
+  try {
+    await api("/machine/1/scan", { method: "POST", body: "{}" });
+    const expired = (await api("/machine/1")).body.certificates.find((c) => c.certPath.endsWith("b.example.com.pem"));
+    assert.ok(expired, "the expired certificate is listed");
+    assert.equal((await api(`/cert/${expired.id}`, { method: "DELETE" })).body.deleted, 1);
+    assert.equal((await api("/machine/1")).body.certificates.length, 1);
+
+    // The file is still on the server, so the scan finds it again — it must not
+    // resurrect the row the operator removed.
+    const second = await api("/machine/1/scan", { method: "POST", body: "{}" });
+    assert.equal(second.body.found, 2);
+    assert.deepEqual(
+      { added: second.body.added, updated: second.body.updated, ignored: second.body.ignored },
+      { added: 0, updated: 1, ignored: 1 },
+    );
+    assert.equal((await api("/machine/1")).body.certificates.length, 1);
+    // Machine badges follow the visible list, not the tombstones.
+    const summary = (await api("/summary")).body.summary[0];
+    assert.equal(summary.certificates, 1);
+    assert.equal(summary.expired, 0);
+
+    // Hidden rows are what the "显示已隐藏" view renders, with fresh scan data.
+    const hidden = (await api("/machine/1?includeIgnored=1")).body.certificates;
+    assert.equal(hidden.length, 2);
+    const gone = hidden.find((c) => c.certPath.endsWith("b.example.com.pem"));
+    assert.ok(gone.ignoredAt > 0);
+    assert.equal(gone.status, "expired");
+    // A hidden row is not renewable and not deletable twice.
+    assert.equal((await api("/machine/1/renew", { method: "POST", body: JSON.stringify({ id: gone.id }) })).status, 404);
+    assert.equal((await api(`/cert/${gone.id}`, { method: "DELETE" })).status, 404);
+
+    // Restoring puts it back into the list and the renewal pool.
+    assert.equal((await api(`/cert/${gone.id}/restore`, { method: "POST" })).body.restored, 1);
+    assert.equal((await api("/machine/1")).body.certificates.length, 2);
+    assert.equal((await api("/summary")).body.summary[0].expired, 1);
+    // Restoring twice is a no-op, and unknown ids are still 404.
+    assert.equal((await api(`/cert/${gone.id}/restore`, { method: "POST" })).body.restored, 0);
+    assert.equal((await api("/cert/9999/restore", { method: "POST" })).status, 404);
+    assert.equal((await api("/cert/9999", { method: "DELETE" })).status, 404);
+
+    // The bulk cleanup hides rows the same way, so it also survives a rescan.
+    assert.equal((await api("/purge", { method: "POST", body: JSON.stringify({ scope: "expired", machineId: 1 }) })).body.deleted, 1);
+    assert.equal((await api("/machine/1")).body.certificates.length, 1);
+    await api("/machine/1/scan", { method: "POST", body: "{}" });
+    assert.equal((await api("/machine/1")).body.certificates.length, 1);
+    assert.equal((await api("/machine/1?includeIgnored=1")).body.certificates.length, 2);
+    // ...and one call undoes the whole bulk action.
+    assert.equal((await api("/restore", { method: "POST", body: JSON.stringify({ machineId: 1 }) })).body.restored, 1);
+    assert.equal((await api("/machine/1")).body.certificates.length, 2);
+    assert.equal((await api("/restore", { method: "POST", body: "{}" })).body.restored, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM certificate_inventory WHERE ignored_at != 0").get().n, 0);
+  } finally { close(); }
+});
+
+test("a deleted certificate is never a renewal candidate, and an issuance revives it", async () => {
+  const { ssh, port, fp } = await startSsh({ onExec: (accept) => {
+    const stream = accept();
+    stream.write("subject=CN=shop.example.com\nnotAfter=Jan 01 00:00:00 2030 GMT\n");
+    stream.exit(0);
+    stream.end();
+  } });
+  const { api, db, close } = await startApi({ ssh, port, fp, certEnv: cfEnv });
+  try {
+    const now = Date.now();
+    const insert = db.prepare("INSERT INTO certificate_inventory(machine_id,cert_path,key_path,domains,expires_at,issuer,last_scan_at,status,ignored_at) VALUES(1,?,?,?,?,'',?,'expired',?)");
+    insert.run("/etc/nginx/ssl/soon.pem", "/etc/nginx/ssl/soon.key", '["soon.example.com"]', now + 86400000, now, 0);
+    insert.run("/etc/nginx/ssl/gone.pem", "/etc/nginx/ssl/gone.key", '["gone.example.com"]', now - 86400000, now, now);
+    const candidates = renewalCandidates(db, 30);
+    assert.deepEqual(candidates.map((c) => c.id), [1], "only the visible certificate is eligible");
+
+    // Re-issuing a certificate for a path the operator had deleted is an explicit
+    // request for it, so the tombstone must not keep it hidden.
+    const res = await api("/machine/1/issue", { method: "POST", body: JSON.stringify({ domains: ["gone.example.com"], certPath: "/etc/nginx/ssl/gone.pem", keyPath: "/etc/nginx/ssl/gone.key" }) });
+    assert.equal(res.status, 200);
+    const visible = (await api("/machine/1")).body.certificates;
+    assert.deepEqual(visible.map((c) => c.certPath).sort(), ["/etc/nginx/ssl/gone.pem", "/etc/nginx/ssl/soon.pem"]);
+    assert.equal(visible.find((c) => c.certPath.endsWith("gone.pem")).ignoredAt, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM certificate_inventory").get().n, 2);
+    // The revived row carries the freshly issued expiry, so it is no longer due.
+    const revived = db.prepare("SELECT ignored_at, expires_at FROM certificate_inventory WHERE cert_path='/etc/nginx/ssl/gone.pem'").get();
+    assert.equal(revived.ignored_at, 0);
+    assert.equal(revived.expires_at, Date.parse("Jan 01 00:00:00 2030 GMT"));
+    assert.equal(renewalCandidates(db, 30).length, 1);
   } finally { close(); }
 });
 

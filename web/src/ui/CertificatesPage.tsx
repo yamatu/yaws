@@ -3,12 +3,12 @@ import { apiFetch } from "./api";
 import { useDocumentTitle } from "./documentTitle";
 import { fmtTime, daysLeft } from "./format";
 
-type Cert = { id:number; certPath:string; keyPath:string; domains:string[]; expiresAt:number|null; issuer:string; lastScanAt:number; lastRenewAt:number|null; status:string; lastError:string };
+type Cert = { id:number; certPath:string; keyPath:string; domains:string[]; expiresAt:number|null; issuer:string; lastScanAt:number; lastRenewAt:number|null; status:string; lastError:string; ignoredAt:number };
 type ScanInfo = { user?:string; uid?:string; openssl?:string; nginx?:string; sudo?:string; nginxConfig?:string; candidates?:string; certificates?:string; keyless?:string; skipped?:string };
 type Machine = { id:number; name:string; sshHost:string; sshPort:number; sshUser:string; sshAuthType:string; sshTrusted:number; credentials?:"ok"|"missing"|"undecryptable" };
 type MachineStat = { machineId:number; certificates:number; expired:number; expiring:number; nextExpiry:number|null };
 type Config = { email:string; cfTokenMasked:string; cfAccountId:string; cfKeyMasked:string; cfEmail:string; caServer:string; useServerCreds:boolean; autoRenew:boolean; autoRenewDays:number; configured:boolean };
-type ScanResult = { found:number; added:number; updated:number; pruned:number; duplicates?:number; warning?:string; info?:ScanInfo };
+type ScanResult = { found:number; added:number; updated:number; pruned:number; ignored?:number; duplicates?:number; warning?:string; info?:ScanInfo };
 type Notice = { kind:"ok"|"err"; text:string };
 type CertFilter = "all"|"ok"|"expiring"|"expired"|"error";
 
@@ -110,7 +110,7 @@ export function CertificatesPage() {
   const [token,setToken]=useState(""); const [account,setAccount]=useState(""); const [autoRenew,setAutoRenew]=useState(true); const [autoRenewDays,setAutoRenewDays]=useState(30);
   const [globalKey,setGlobalKey]=useState(""); const [cfEmail,setCfEmail]=useState(""); const [caServer,setCaServer]=useState("letsencrypt"); const [useServerCreds,setUseServerCreds]=useState(false);
   const [machines,setMachines]=useState<Machine[]>([]); const [stats,setStats]=useState<Record<number,MachineStat>>({});
-  const [selected,setSelected]=useState<number>(0); const [certs,setCerts]=useState<Cert[]>([]); const [filter,setFilter]=useState<CertFilter>("all");
+  const [selected,setSelected]=useState<number>(0); const [certs,setCerts]=useState<Cert[]>([]); const [filter,setFilter]=useState<CertFilter>("all"); const [showIgnored,setShowIgnored]=useState(false);
   const [scanInfoById,setScanInfoById]=useState<Record<number,ScanInfo>>({});
   const [busy,setBusy]=useState(false); const [scanningId,setScanningId]=useState<number>(0); const [notice,setNotice]=useState<Notice|null>(null);
   const [issueMachine,setIssueMachine]=useState<number>(0); const [issueDomains,setIssueDomains]=useState("");
@@ -121,7 +121,9 @@ export function CertificatesPage() {
   const loadSummary=()=>apiFetch<{summary:MachineStat[]}>("/api/certificates/summary").then(r=>setStats(Object.fromEntries(r.summary.map(s=>[s.machineId,s])))).catch(()=>{});
   const loadMachines=()=>apiFetch<{machines:Machine[]}>("/api/certificates/machines").then(r=>setMachines(r.machines));
   useEffect(()=>{ void Promise.all([loadConfig(),loadMachines(),loadSummary()]); },[]);
-  const refreshCerts=(id:number)=>apiFetch<{certificates:Cert[]}>(`/api/certificates/machine/${id}`).then(r=>setCerts(r.certificates));
+  // Deleted records are tombstones: they are fetched too so the "显示已隐藏" view
+  // can list (and restore) them without a second request.
+  const refreshCerts=(id:number)=>apiFetch<{certificates:Cert[]}>(`/api/certificates/machine/${id}?includeIgnored=1`).then(r=>setCerts(r.certificates));
   useEffect(()=>{ if(selected) void refreshCerts(selected).catch(()=>setCerts([])); },[selected]);
   // Jump straight into the first configured machine instead of an empty table.
   useEffect(()=>{ if(!selected&&machines.length) setSelected(machines[0].id); },[machines,selected]);
@@ -147,7 +149,7 @@ export function CertificatesPage() {
     await Promise.all([refreshCerts(id).catch(e=>{refreshError=friendlyError(e)}),loadSummary()]);
     if (!opts.silent) setNotice(refreshError
       ? {kind:"err",text:`扫描已完成（发现 ${r.found} 个证书），但刷新列表失败：${refreshError}`}
-      : {kind:"ok",text:r.warning??`扫描完成：发现 ${r.found} 个证书（新增 ${r.added} · 更新 ${r.updated}${r.pruned?` · 清理 ${r.pruned}`:""}${r.duplicates?` · 合并重复 ${r.duplicates}`:""}）`});
+      : {kind:"ok",text:r.warning??`扫描完成：发现 ${r.found} 个证书（新增 ${r.added} · 更新 ${r.updated}${r.ignored?` · 已隐藏 ${r.ignored}`:""}${r.pruned?` · 清理 ${r.pruned}`:""}${r.duplicates?` · 合并重复 ${r.duplicates}`:""}）`});
     return r;
   }
   // A machine with unusable credentials would only fail server-side; say why.
@@ -167,22 +169,36 @@ export function CertificatesPage() {
     setBusy(false);
   }
   async function renew(c:Cert){ if(!confirm(`确认申请并更新 ${c.domains.join(", ")}？将执行 acme.sh 续期、nginx -t 后重载 Nginx。`))return;setBusy(true);setNotice(null);try{await apiFetch(`/api/certificates/machine/${selected}/renew`,{method:"POST",body:JSON.stringify({id:c.id})});await Promise.all([refreshCerts(selected),loadSummary()]);setNotice({kind:"ok",text:"证书更新成功，Nginx 已重载"});}catch(e){setNotice({kind:"err",text:`更新失败：${friendlyError(e)}`});}finally{setBusy(false)}}
-  // Deleting a record only stops YAWS from tracking and renewing it; the files
-  // on the server stay untouched, so a rescan can bring the entry back.
+  // Deleting a record marks it hidden (a tombstone) instead of dropping the row:
+  // a plain DELETE was undone by the next scan, which re-inserted every
+  // certificate still found on the machine.
   async function removeCert(c:Cert){
-    if(!confirm(`删除 ${c.domains.join(", ")} 的证书记录？\n\n仅从主控清单中移除，不会删除服务器上的 ${c.certPath}\n删除后不会再自动续期；下次扫描到该文件时会重新出现。`))return;
+    if(!confirm(`删除 ${c.domains.join(", ")} 的证书记录？\n\n仅从主控清单中移除，不会删除服务器上的 ${c.certPath}，也不会执行任何远程命令。\n删除后不会再自动续期，而且再次扫描不会自动恢复；需要时可在「显示已隐藏」里恢复。`))return;
     setBusy(true);setNotice(null);
-    try{ await apiFetch(`/api/certificates/cert/${c.id}`,{method:"DELETE"}); await Promise.all([refreshCerts(selected),loadSummary()]); setNotice({kind:"ok",text:`已删除 ${c.domains.join(", ")} 的记录`}); }
+    try{ await apiFetch(`/api/certificates/cert/${c.id}`,{method:"DELETE"}); await Promise.all([refreshCerts(selected),loadSummary()]); setNotice({kind:"ok",text:`已删除 ${c.domains.join(", ")} 的记录（可在「显示已隐藏」中恢复）`}); }
     catch(e){ setNotice({kind:"err",text:`删除失败：${friendlyError(e)}`}); }
     finally{ setBusy(false); }
   }
-  // Bulk cleanup is scoped to the machine on screen, so the button can never
-  // remove another server's rows by surprise.
+  async function restore(c:Cert){
+    setBusy(true);setNotice(null);
+    try{ await apiFetch(`/api/certificates/cert/${c.id}/restore`,{method:"POST"}); await Promise.all([refreshCerts(selected),loadSummary()]); setNotice({kind:"ok",text:`已恢复 ${c.domains.join(", ")} 的记录`}); }
+    catch(e){ setNotice({kind:"err",text:`恢复失败：${friendlyError(e)}`}); }
+    finally{ setBusy(false); }
+  }
+  async function restoreAll(){
+    if(!selected) return;
+    setBusy(true);setNotice(null);
+    try{ const r=await apiFetch<{restored:number}>(`/api/certificates/restore`,{method:"POST",body:JSON.stringify({machineId:selected})}); await Promise.all([refreshCerts(selected),loadSummary()]); setNotice(r.restored?{kind:"ok",text:`已恢复 ${r.restored} 条记录`}:{kind:"err",text:"没有已隐藏的记录"}); }
+    catch(e){ setNotice({kind:"err",text:`恢复失败：${friendlyError(e)}`}); }
+    finally{ setBusy(false); }
+  }
+  // Bulk cleanup hides rows the same way a single delete does, so it survives the
+  // next scan too.
   async function purge(scope:"expired"|"error"|"expired_or_error"){
     const label=scope==="expired"?"所有已到期的":scope==="error"?"所有状态异常的":"所有已到期或异常的";
-    if(!selected||!confirm(`删除当前服务器上${label}证书记录？\n\n仅删除主控清单记录，不会删除服务器上的证书文件，也不会执行任何远程命令。\n删除后这些证书不再自动续期。`))return;
+    if(!selected||!confirm(`隐藏当前服务器上${label}证书记录？\n\n仅从主控清单中隐藏，不会删除服务器上的证书文件，也不会执行任何远程命令。\n隐藏后这些证书不再自动续期，再次扫描也不会自动恢复；可用「显示已隐藏」→「恢复全部」找回。`))return;
     setBusy(true);setNotice(null);
-    try{ const r=await apiFetch<{deleted:number}>(`/api/certificates/purge`,{method:"POST",body:JSON.stringify({scope,machineId:selected})}); await Promise.all([refreshCerts(selected),loadSummary()]); setNotice({kind:r.deleted?"ok":"err",text:r.deleted?`已删除 ${r.deleted} 条记录`:"没有符合条件的记录"}); }
+    try{ const r=await apiFetch<{deleted:number}>(`/api/certificates/purge`,{method:"POST",body:JSON.stringify({scope,machineId:selected})}); await Promise.all([refreshCerts(selected),loadSummary()]); setNotice({kind:r.deleted?"ok":"err",text:r.deleted?`已隐藏 ${r.deleted} 条记录（可在「显示已隐藏」中恢复）`:"没有符合条件的记录"}); }
     catch(e){ setNotice({kind:"err",text:`清理失败：${friendlyError(e)}`}); }
     finally{ setBusy(false); }
   }
@@ -211,9 +227,14 @@ export function CertificatesPage() {
   }
 
   const selectedMachine=machines.find(m=>m.id===selected);
-  const visible=certs.filter(c=>{ if(filter==="all") return true; return certState(c).key===filter; });
-  const expiredCount=certs.filter(c=>certState(c).key==="expired").length;
-  const errorCount=certs.filter(c=>c.status==="error").length;
+  // Hidden rows are tombstones for records the operator deleted; the purge
+  // counters must not include them (they are already gone from the operator's
+  // point of view, and the server excludes them from its own summary).
+  const ignoredCount=certs.filter(c=>c.ignoredAt).length;
+  const shown=certs.filter(c=>showIgnored||!c.ignoredAt);
+  const visible=shown.filter(c=>filter==="all"||certState(c).key===filter);
+  const expiredCount=certs.filter(c=>!c.ignoredAt&&certState(c).key==="expired").length;
+  const errorCount=certs.filter(c=>!c.ignoredAt&&c.status==="error").length;
   const lastScanAt=certs.length?Math.max(...certs.map(c=>c.lastScanAt||0)):0;
 
   return <div className="grid gap-4">
@@ -285,20 +306,28 @@ export function CertificatesPage() {
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-3"><div className="font-extrabold">证书清单{selectedMachine?` · ${selectedMachine.name}`:""}</div>{lastScanAt?<span className="text-xs text-white/40">上次扫描 {fmtTime(lastScanAt)}</span>:null}</div>
       <div className="flex flex-wrap items-center gap-2">{FILTERS.map(f=><button key={f.key} className={`yaws-tag ${filter===f.key?"yaws-tag-active":""}`} onClick={()=>setFilter(f.key)}>{f.label}</button>)}
         <span className="mx-1 hidden h-4 w-px bg-white/10 sm:block" />
-        <button className="yaws-tag" disabled={busy||!selected||!expiredCount} title={expiredCount?`删除当前服务器上 ${expiredCount} 条已到期记录（不会删除服务器文件）`:"当前服务器没有已到期的记录"} onClick={()=>purge("expired")}>清理已到期{expiredCount?`（${expiredCount}）`:""}</button>
-        <button className="yaws-tag" disabled={busy||!selected||!errorCount} title={errorCount?`删除当前服务器上 ${errorCount} 条异常记录`:"当前服务器没有异常记录"} onClick={()=>purge("error")}>清理异常{errorCount?`（${errorCount}）`:""}</button>
+        <button className="yaws-tag" disabled={busy||!selected||!expiredCount} title={expiredCount?`隐藏当前服务器上 ${expiredCount} 条已到期记录（不删除服务器文件，扫描后不会自动恢复）`:"当前服务器没有已到期的记录"} onClick={()=>purge("expired")}>隐藏已到期{expiredCount?`（${expiredCount}）`:""}</button>
+        <button className="yaws-tag" disabled={busy||!selected||!errorCount} title={errorCount?`隐藏当前服务器上 ${errorCount} 条异常记录（不删除服务器文件，扫描后不会自动恢复）`:"当前服务器没有异常记录"} onClick={()=>purge("error")}>隐藏异常{errorCount?`（${errorCount}）`:""}</button>
+        {ignoredCount||showIgnored?<>
+          <span className="mx-1 hidden h-4 w-px bg-white/10 sm:block" />
+          <button className={`yaws-tag ${showIgnored?"yaws-tag-active":""}`} disabled={!selected} title="已删除的记录不会再被扫描恢复，点这里查看或找回" onClick={()=>setShowIgnored(v=>!v)}>{showIgnored?"不显示已隐藏":"显示已隐藏"}{ignoredCount?`（${ignoredCount}）`:""}</button>
+        </>:null}
+        {showIgnored&&ignoredCount?<button className="yaws-tag" disabled={busy} title="把当前服务器上所有已隐藏的记录放回清单，并重新参与自动续期" onClick={()=>void restoreAll()}>恢复全部</button>:null}
       </div></div>
       <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="text-xs text-white/40"><tr><th className="p-2">域名</th><th className="p-2">证书路径</th><th className="p-2">到期时间</th><th className="p-2">状态</th><th className="p-2">操作</th></tr></thead><tbody>{visible.map(c=>{
-        const st=certState(c); const d=daysLeft(c.expiresAt);
-        return <tr key={c.id} className="border-t border-white/[.06]">
+        const st=certState(c); const d=daysLeft(c.expiresAt); const hidden=!!c.ignoredAt;
+        return <tr key={c.id} className={`border-t border-white/[.06]${hidden?" opacity-50":""}`}>
           <td className="p-2 text-white/85">{c.domains.join(", ")}{c.issuer?<div className="mt-0.5 max-w-xs truncate text-xs text-white/35" title={c.issuer}>{c.issuer}</div>:null}</td>
           <td className="max-w-xs p-2 font-mono text-xs text-white/50" title={c.certPath}><div className="truncate">{c.certPath}</div>{c.keyPath?<div className="truncate text-[11px] text-white/30" title={c.keyPath}>{c.keyPath}</div>:<div className="text-[11px] text-amber-300">未找到私钥，无法续期</div>}</td>
           <td className="p-2">{fmtTime(c.expiresAt)}{d!==null&&d>0?<span className={`ml-2 text-xs ${d<=EXPIRING_DAYS?"text-amber-300":"text-white/40"}`}>剩 {d} 天</span>:null}</td>
-          <td className="p-2"><span className={`yaws-badge ${st.cls}`}>{st.label}</span>{c.lastError?<div className="mt-1 max-w-xs truncate text-xs text-rose-300/80" title={c.lastError}>{c.lastError}</div>:null}</td>
-          <td className="whitespace-nowrap p-2"><button className="yaws-btn-primary text-xs" disabled={busy||!config?.configured||!c.keyPath} title={!c.keyPath?`未在服务器上找到与 ${c.certPath} 配对的私钥文件，无法续期；请检查该目录或重新扫描`:!config?.configured?"请先配置 Cloudflare":""} onClick={()=>renew(c)}>申请/更新</button><button className="yaws-btn ml-1 text-xs text-rose-300" disabled={busy} title={`从清单中删除该记录（不会删除服务器上的 ${c.certPath}）`} onClick={()=>removeCert(c)}>删除</button></td>
+          <td className="p-2">{hidden?<span className="yaws-badge border-white/15 text-white/55">已隐藏</span>:<span className={`yaws-badge ${st.cls}`}>{st.label}</span>}{c.lastError?<div className="mt-1 max-w-xs truncate text-xs text-rose-300/80" title={c.lastError}>{c.lastError}</div>:null}</td>
+          <td className="whitespace-nowrap p-2">{hidden
+            ? <button className="yaws-btn text-xs" disabled={busy} title="放回清单，并重新参与自动续期" onClick={()=>void restore(c)}>恢复</button>
+            : <><button className="yaws-btn-primary text-xs" disabled={busy||!config?.configured||!c.keyPath} title={!c.keyPath?`未在服务器上找到与 ${c.certPath} 配对的私钥文件，无法续期；请检查该目录或重新扫描`:!config?.configured?"请先配置 Cloudflare":""} onClick={()=>renew(c)}>申请/更新</button><button className="yaws-btn ml-1 text-xs text-rose-300" disabled={busy} title={`从清单中删除该记录（不会删除服务器上的 ${c.certPath}，扫描后也不会自动恢复）`} onClick={()=>removeCert(c)}>删除</button></>}</td>
         </tr>;})}</tbody></table>
         {!certs.length?<div className="p-8 text-center text-sm text-white/40">{selectedMachine?"暂无记录，点击「扫描证书」开始扫描":"请先选择一台服务器"}</div>:null}
-        {certs.length&&!visible.length?<div className="p-8 text-center text-sm text-white/40">当前筛选下没有证书</div>:null}</div>
+        {certs.length&&!visible.length?<div className="p-8 text-center text-sm text-white/40">{ignoredCount&&!showIgnored?`当前筛选下没有证书；这台服务器还有 ${ignoredCount} 条已隐藏的记录，点上方「显示已隐藏」可查看或恢复`:"当前筛选下没有证书"}</div>:null}
+        {ignoredCount&&showIgnored?<div className="px-2 pb-2 text-xs text-white/35">已隐藏的记录是之前删除的证书：它们不再自动续期，扫描也不会自动恢复；点「恢复」放回清单。</div>:null}</div>
     </div>
   </div>;
 }

@@ -222,6 +222,7 @@ function migrate(db: Db) {
       last_renew_at INTEGER,
       status TEXT NOT NULL DEFAULT 'ok',
       last_error TEXT NOT NULL DEFAULT '',
+      ignored_at INTEGER NOT NULL DEFAULT 0,
       UNIQUE(machine_id, cert_path)
     );
     CREATE INDEX IF NOT EXISTS idx_certificate_inventory_machine ON certificate_inventory(machine_id, expires_at);
@@ -229,6 +230,9 @@ function migrate(db: Db) {
 
   ensureColumns(db, "certificate_inventory", [
     { name: "key_path", sql: "ALTER TABLE certificate_inventory ADD COLUMN key_path TEXT NOT NULL DEFAULT ''" },
+    // Deleting a record only stops YAWS tracking it; without this flag the next
+    // scan re-inserted the row and the deletion looked ignored.
+    { name: "ignored_at", sql: "ALTER TABLE certificate_inventory ADD COLUMN ignored_at INTEGER NOT NULL DEFAULT 0" },
   ]);
 
   ensureColumns(db, "machines", [
