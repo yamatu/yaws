@@ -23,7 +23,7 @@ test("a broken or oversized stored list never breaks the workspace", () => {
   assert.deepEqual(parseSessions(null), []);
   assert.deepEqual(parseSessions("{oops"), []);
   assert.deepEqual(parseSessions("[2,2,5]"), [2, 5]);
-  const many = Array.from({ length: 30 }, (_, i) => i + 1);
+  const many = Array.from({ length: MAX_SESSIONS + 8 }, (_, i) => i + 1);
   assert.deepEqual(sanitizeSessions(many), many.slice(0, MAX_SESSIONS));
   assert.equal(parseSessions(JSON.stringify(many)).length, MAX_SESSIONS);
 });
@@ -36,6 +36,16 @@ test("opening a terminal appends it once and honours the tab limit", () => {
   assert.deepEqual(addSession(full, 99), full);
   assert.equal(sessionRoom(full), 0);
   assert.equal(sessionRoom([1, 2]), MAX_SESSIONS - 2);
+});
+
+test("a whole fleet opens at once with one click", () => {
+  // "Open every server" has to fit a normal fleet: a strip that caps out in the
+  // middle of the list silently leaves servers closed.
+  const fleet = Array.from({ length: 24 }, (_, i) => i + 1);
+  let ids = [];
+  for (const id of fleet) ids = addSession(ids, id);
+  assert.deepEqual(ids, fleet);
+  assert.equal(sessionRoom(ids), MAX_SESSIONS - fleet.length);
 });
 
 test("a deep link always opens, even when the strip is full", () => {

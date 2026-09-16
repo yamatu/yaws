@@ -113,8 +113,8 @@ export function terminalSocket(
     if (started) return finish("duplicate_connect", true);
     started = true;
     if (
-      sessions.size >= 64 ||
-      [...sessions.values()].filter((s) => s.userId === user.id).length >= 24
+      sessions.size >= 128 ||
+      [...sessions.values()].filter((s) => s.userId === user.id).length >= 48
     )
       return finish("session_limit", true);
     void (async () => {

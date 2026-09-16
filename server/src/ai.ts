@@ -36,6 +36,8 @@ import {
 
 const Config = AIConfigSchema;
 export type { AIConfig };
+/** Runaway guard only: the run ends when the model stops calling tools. */
+const MAX_TOOL_CALLS = 48;
 const ProfilesBody = z.object({
   profiles: z.array(AIProfileInputSchema).min(1).max(MAX_PROFILES),
   activeId: z.string().max(64).default(""),
@@ -375,8 +377,7 @@ export function aiRouter(db: Db, secret: string) {
         );
         responses.push({ role: "user", content: body.prompt });
         let answer = "";
-        let exhausted = false;
-        for (let step = 0; step < 8; step++) {
+        for (;;) {
           if (signal.aborted) throw new WorkspaceError(499, "cancelled");
           let calls: Array<z.infer<typeof Call>> = [];
           if (config.protocol === "chat") {
@@ -453,7 +454,7 @@ export function aiRouter(db: Db, secret: string) {
           }
           if (!calls.length) break;
           for (const call of calls) {
-            if (trace.length >= 24)
+            if (trace.length >= MAX_TOOL_CALLS)
               throw new WorkspaceError(429, "ai_tool_limit");
             let output: unknown;
             try {
@@ -561,11 +562,7 @@ export function aiRouter(db: Db, secret: string) {
               output: text,
             });
           }
-          if (step === 7) exhausted = true;
         }
-        if (exhausted)
-          answer +=
-            "\n已达到本次分析步数上限，请查看已生成建议后继续提交任务。";
         db.prepare(
           "UPDATE ai_runs SET status='completed', result=? WHERE id=?",
         ).run(

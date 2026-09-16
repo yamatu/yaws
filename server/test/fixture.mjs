@@ -338,10 +338,14 @@ export async function harness(port = 0) {
     let calls = [];
     const marker = lastUserText(history, chat);
     const markdown = marker.includes("[md]");
+    // `[loop]` keeps asking for tools: a long task has to finish in one answer
+    // instead of stopping at some step limit.
+    const loop = marker.includes("[loop]");
     // A model that narrates first would send content *and* tool_calls together,
     // which makes the assistant bubble arrive before the steps it describes.
     const preamble = marker.includes("[pre]") ? "我先看一下磁盘占用。" : "";
-    if (markdown) calls = [];
+    if (loop && count < 12) calls = [{ name: "list_files", args: { path: "/srv/app" } }];
+    else if (markdown) calls = [];
     else if (/\[(run|write|danger|file|list|stats|log|secret|many)\]/.test(marker))
       calls = markerCalls(marker, count);
     else if (count === 0)

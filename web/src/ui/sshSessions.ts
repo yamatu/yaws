@@ -6,7 +6,13 @@
  * These helpers are pure (no storage, no DOM) so the ordering rules can be
  * tested without a browser. The caller owns localStorage and React state.
  */
-export const MAX_SESSIONS = 12;
+/**
+ * The strip holds one session per server, so the bound is high enough that a
+ * whole fleet opens at once with one click ("open every server"). The server
+ * keeps the real limit (per user / in total) and reports `session_limit` when
+ * more than one browser window opens terminals.
+ */
+export const MAX_SESSIONS = 32;
 export const SESSIONS_KEY = "yaws.ssh.sessions";
 
 /** Machine ids only: positive integers, unique, in the order tabs are shown. */

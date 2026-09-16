@@ -182,7 +182,14 @@ const Rename = z.object({
   title: z.string().trim().min(1).max(120),
 });
 
-export const MAX_CHAT_STEPS = 8;
+/**
+ * No step limit: the assistant keeps working until the model stops asking for
+ * tools, so a long task is finished in one answer instead of being cut off with
+ * "step limit reached". This is only a runaway guard — 60 tool calls in a single
+ * answer is already far beyond any real task — next to the 5 minute timeout and
+ * the context size limit.
+ */
+export const MAX_TOOL_CALLS = 60;
 export const MAX_TOOL_OUTPUT = 12_000;
 export const CHAT_TIMEOUT_MS = 300_000;
 
@@ -641,7 +648,6 @@ async function turn(options: TurnOptions): Promise<string> {
 
   let answer = "";
   let contextBytes = 0;
-  let exhausted = false;
   const runTool = async (name: string, raw: string): Promise<unknown> => {
     const id = randomUUID();
     let args: Record<string, unknown>;
@@ -684,7 +690,7 @@ async function turn(options: TurnOptions): Promise<string> {
     }
   };
 
-  for (let step = 0; step < MAX_CHAT_STEPS; step++) {
+  for (;;) {
     if (signal.aborted) throw new WorkspaceError(499, "cancelled");
     let calls: Array<z.infer<typeof Internals>> = [];
     if (config.protocol === "chat") {
@@ -753,7 +759,7 @@ async function turn(options: TurnOptions): Promise<string> {
     }
     if (!calls.length) break;
     for (const call of calls) {
-      if (options.trace.length > 40)
+      if (options.trace.length >= MAX_TOOL_CALLS)
         throw new WorkspaceError(429, "ai_tool_limit");
       const output = await runTool(call.function.name, call.function.arguments);
       const text = clip(JSON.stringify(output));
@@ -766,12 +772,6 @@ async function turn(options: TurnOptions): Promise<string> {
         output: text,
       });
     }
-    if (step === MAX_CHAT_STEPS - 1) exhausted = true;
-  }
-  if (exhausted) {
-    const note = "\n（已达到本次分析步数上限，继续提问我可以接着处理。）";
-    answer += note;
-    emit({ type: "delta", text: note });
   }
   if (!answer.trim()) answer = "已完成。";
   return answer;

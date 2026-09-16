@@ -271,6 +271,22 @@ test("ai chat", async (t) => {
     assert.ok(run.trace.length > 0);
   });
 
+  await t.test("a long run finishes in one answer", async () => {
+    // Twelve tool rounds: with the old eight-step cap this answer ended with
+    // "已达到本次分析步数上限…" instead of the result.
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[loop] 把目录都看一遍",
+      autoRun: "read",
+    });
+    assert.equal(turn.status, 200, turn.body);
+    assert.equal(toolsOf(turn).length, 12);
+    const answer = turn.events.find((e) => e.type === "answer").text;
+    assert.equal(answer, "已生成配置修改与验证命令。");
+    assert.equal(/步数上限|分析步数/.test(turn.body), false);
+    assert.equal(turn.events.at(-1).type, "done");
+  });
+
   await t.test("mutating commands wait for the operator", async () => {
     const before = f.commands.length;
     const turn = await chat(f, {

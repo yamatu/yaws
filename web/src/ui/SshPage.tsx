@@ -162,6 +162,14 @@ export function SshPage() {
     }
     setIds(next);
     setPicker(false);
+    // Every connectable server opens in one go; only a completely full strip can
+    // leave some behind, and then the operator is told exactly how many.
+    const skipped = closed.length - added;
+    setError(
+      skipped
+        ? `已打开 ${added} 台，还有 ${skipped} 台没打开：最多同时打开 ${MAX_SESSIONS} 个终端，请先关闭不用的终端`
+        : "",
+    );
     const first = next[ids.length];
     if (first) navigate(`/app/machines/${first}/ssh`, { replace: true });
   }
