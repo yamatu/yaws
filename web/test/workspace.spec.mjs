@@ -391,14 +391,22 @@ browserTest(
     await page.getByRole("button", { name: "AI 设置", exact: true }).click();
     await page.getByLabel("模型配置", { exact: true }).selectOption("主力模型");
     await expect(page.locator(".ai-settings")).toHaveCount(0);
-    await page.getByLabel("问题").fill("[pre][run] 看一下磁盘");
+    await page.getByLabel("问题").fill("[slow][pre][run] 看一下磁盘");
     await page.getByRole("button", { name: "发送", exact: true }).click();
-    await expect(page.locator(".ai-bubble")).toContainText("[pre][run] 看一下磁盘");
+    // The status line describes the whole run, not just the last tool call.
+    const status = page.locator(".ai-chat-working");
+    await expect(status).toContainText("第 1 步 · 正在思考…");
+    await expect(page.locator(".ai-bubble")).toContainText("[slow][pre][run] 看一下磁盘");
     await expect(page.locator(".ai-tool")).toContainText("df -h /");
     await expect(page.locator(".ai-tool-state")).toContainText("完成");
+    // A finished step is not a finished answer: the model still has to read
+    // what the tool returned, so the status keeps saying that it works on it.
+    await expect(status).toContainText("第 2 步 · 已执行命令 df -h /，继续分析");
     await expect(page.locator(".ai-answer")).toContainText(
       "已生成配置修改与验证命令。",
     );
+    // Only the end of the stream reports a finished run, together with its time.
+    await expect(status).toContainText("已完成 · 用时");
     // The model streamed a sentence before it called the tool, so the assistant
     // entry was created first — the transcript still lists the finished step
     // above the answer, and the answer closes the turn.
@@ -911,13 +919,25 @@ browserTest(
     await page.goto(f.url + "/app/machines/1/ssh");
     await trust(1);
     await expect(visible.locator(".workspace-header")).toContainText("已连接");
-    // Session one asks the assistant something worth remembering.
+    // Session one asks the assistant something worth remembering. The slow
+    // marker leaves time to read the live status, and to stop a run halfway.
     await visible.getByRole("tab", { name: "AI", exact: true }).click();
-    await visible.getByLabel("问题").fill("[pre][run] 看一下磁盘");
+    await visible.getByLabel("问题").fill("[slow][run] 看一下磁盘");
     await visible.getByRole("button", { name: "发送", exact: true }).click();
+    const live = visible.locator(".ai-chat-working");
+    await expect(live).toContainText("第 1 步 · 正在思考…");
     await expect(visible.locator(".ai-answer").last()).toContainText(
       "已生成配置修改与验证命令。",
     );
+    await expect(live).toContainText("已完成 · 用时");
+    await expect(live).toHaveAttribute("data-tone", "ok");
+    // Cancelling is its own outcome, not a finished answer.
+    await visible.getByLabel("问题").fill("[slow][run] 再看一次磁盘");
+    await visible.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(live).toContainText("正在思考");
+    await visible.getByRole("button", { name: "停止", exact: true }).click();
+    await expect(live).toContainText("已停止 · 用时");
+    await expect(visible.locator(".ai-chat .yaws-alert-error")).toContainText("已停止");
     // A second server joins from the strip without leaving the page.
     await page
       .getByRole("button", { name: "打开其他服务器的终端", exact: true })

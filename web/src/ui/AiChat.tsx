@@ -22,6 +22,15 @@ import {
 } from "lucide-react";
 import { diffLines } from "diff";
 import { apiFetch } from "./api";
+import {
+  type Progress,
+  acceptEvent,
+  failProgress,
+  progressLabel,
+  progressTone,
+  startProgress,
+  stopProgress,
+} from "./aiProgress";
 import { getToken } from "./auth";
 import { workspaceError } from "./workspaceErrors";
 import { ConversationPicker } from "./ConversationPicker";
@@ -178,7 +187,11 @@ export function AiChat({
     model: "",
   });
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
-  const [working, setWorking] = useState("");
+  const [progress, setProgress] = useState<Progress | null>(null);
+  // The clock is kept in a ref so the ticking status line does not re-render
+  // the whole transcript; `busy` drives the visible updates.
+  const clock = useRef({ start: 0, end: 0 });
+  const [, setTick] = useState(0);
   const controller = useRef<AbortController | null>(null);
   const transcript = useRef<HTMLDivElement | null>(null);
   const counter = useRef(0);
@@ -275,6 +288,7 @@ export function AiChat({
         }
         setEntries(restored);
         setConversationId(id);
+        setProgress(null);
         if (data.conversation.root) setRoot(data.conversation.root);
         try {
           localStorage.setItem(chatKey(machineId), id);
@@ -301,10 +315,20 @@ export function AiChat({
     };
   }, [machineId, loadConversations, openConversation]);
 
+  // Scroll on transcript changes and when a step starts — never on a clock tick:
+  // the timer must not yank the view back while the operator reads back.
   useEffect(() => {
     const node = transcript.current;
     if (node) node.scrollTop = node.scrollHeight;
-  }, [entries, working]);
+  }, [entries, progress?.kind, progress?.step]);
+
+  // One shared clock for the run: it stops ticking when the stream is over.
+  useEffect(() => {
+    if (!busy) return;
+    setTick((v) => v + 1);
+    const timer = setInterval(() => setTick((v) => v + 1), 500);
+    return () => clearInterval(timer);
+  }, [busy]);
 
   function newChat() {
     controller.current?.abort();
@@ -312,7 +336,8 @@ export function AiChat({
     setConversationId("");
     setError("");
     setNotice("");
-    setWorking("");
+    setProgress(null);
+    clock.current = { start: 0, end: 0 };
     try {
       localStorage.removeItem(chatKey(machineId));
     } catch {
@@ -454,6 +479,7 @@ export function AiChat({
   }
 
   function handleEvent(event: Record<string, any>) {
+    setProgress((old) => acceptEvent(old, event));
     if (event.type === "start") {
       setConversationId(event.conversationId);
       if (event.profile?.name || event.model)
@@ -474,7 +500,6 @@ export function AiChat({
         copy[index] = { key: copy[index].key, kind: "tool", tool };
         return copy;
       });
-      setWorking(TOOL_STATE[tool.state]);
     } else if (event.type === "proposal") {
       const proposal = event.proposal as Proposal;
       setEntries((old) => {
@@ -539,7 +564,8 @@ export function AiChat({
     setNotice("");
     push({ key: nextKey(), kind: "user", text: message });
     setBusy(true);
-    setWorking("正在思考…");
+    setProgress(startProgress());
+    clock.current = { start: Date.now(), end: 0 };
     const ac = new AbortController();
     controller.current = ac;
     try {
@@ -592,9 +618,11 @@ export function AiChat({
       const aborted =
         ac.signal.aborted || (e as Error)?.name === "AbortError";
       setError(aborted ? "已停止" : workspaceError(e));
+      setProgress((old) => (aborted ? stopProgress(old) : failProgress(old)));
     } finally {
+      // The run clock stops here: the status line keeps the final duration.
+      clock.current.end = clock.current.end || Date.now();
       setBusy(false);
-      setWorking("");
       controller.current = null;
     }
   }
@@ -662,6 +690,10 @@ export function AiChat({
   const pending = entries.filter(
     (entry) => entry.kind === "proposal" && entry.proposal.status === "pending",
   ).length;
+  // The elapsed time freezes as soon as the stream is over.
+  const elapsed = clock.current.start
+    ? Math.max(0, (clock.current.end || Date.now()) - clock.current.start)
+    : 0;
 
   return (
     <div className={`ai-chat${compact ? " compact" : ""}`}>
@@ -1059,8 +1091,18 @@ export function AiChat({
             </section>
           );
         })}
-        {busy ? <div className="ai-chat-working">{working || "处理中…"}</div> : null}
       </div>
+      {/* The live status is chrome, not transcript content: keeping it outside
+          leaves the answer as the element that closes the turn. */}
+      {progress ? (
+        <div
+          className="ai-chat-working"
+          data-tone={progressTone(progress)}
+          title={progressLabel(progress, elapsed, pending)}
+        >
+          {progressLabel(progress, elapsed, pending)}
+        </div>
+      ) : null}
       {error && (
         <div role="alert" className="yaws-alert-error">
           {error}

@@ -360,6 +360,10 @@ export async function harness(port = 0) {
       function: { name: call.name, arguments: JSON.stringify(call.args) },
     }));
     const answer = markdown ? MD_ANSWER : "已生成配置修改与验证命令。";
+    // `[slow]` keeps the model thinking long enough for a browser test to read
+    // the live status line before the answer arrives.
+    if (marker.includes("[slow]"))
+      await new Promise((done) => setTimeout(done, 1200));
     res.setHeader("content-type", "application/json");
     res.end(
       JSON.stringify(

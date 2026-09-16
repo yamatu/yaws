@@ -88,6 +88,7 @@
 .stat-footer { display: grid; gap: 3px; padding: 10px 12px 14px; font-size: 11px; color: #8d97a2; border-top: 1px solid #2c3238; margin-top: 10px; overflow-wrap: anywhere; }
 .spin { animation: yaws-spin 1s linear infinite; }
 @keyframes yaws-spin { to { transform: rotate(360deg); } }
+@keyframes yaws-blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 .host-key-prompt { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 18px; background: #302d23; border-bottom: 1px solid #786642; font-size: 13px; }
 .host-key-prompt code { overflow-wrap: anywhere; min-width: 0; }
 .workspace-tab-body { flex: 1; min-height: 0; overflow: auto; }
@@ -135,6 +136,7 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-chat.compact .ai-chat-meta .yaws-input, .ai-chat.compact .ai-chat-meta .yaws-select { flex: 1; width: auto; min-width: 0; }
 .ai-chat.compact .ai-chat-session { flex: 1 1 40%; }
 .ai-chat.compact .ai-chat-hint, .ai-chat.compact .ai-chat-clear { display: none; }
+.ai-chat.compact .ai-chat-working { padding: 6px 10px; }
 /* Opening the profile editor covers the transcript instead of squeezing it. */
 .ai-chat.compact .ai-settings { position: absolute; inset: 0; z-index: 5; max-height: none; align-content: start; background: #181b1f; }
 /* …and the header stays opaque above it so the form scrolls behind it. */
@@ -262,7 +264,11 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-tag { flex: 0 0 auto; padding: 1px 7px; border-radius: 999px; background: #2c3238; color: #a8b2bd; font-size: 11px; }
 .ai-tag.ok,.ai-tag.applied { background: #183528; color: #86efac; }
 .ai-tag.failed { background: #462329; color: #fda4af; }
-.ai-chat-working { font-size: 12px; color: #7dd3fc; }
+.ai-chat-working { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 6px 12px; border-top: 1px solid #2c3238; background: #171c21; font-size: 12px; color: #7dd3fc; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ai-chat-working[data-tone="busy"]::before { content: ""; flex: 0 0 auto; width: 6px; height: 6px; border-radius: 999px; background: currentColor; animation: yaws-blink 1.1s ease-in-out infinite; }
+.ai-chat-working[data-tone="ok"] { color: #6ee7b7; }
+.ai-chat-working[data-tone="warn"] { color: #fcd34d; }
+.ai-chat-working[data-tone="bad"] { color: #fda4af; }
 .ai-chat-pending { padding: 7px 12px; background: #3b2f10; color: #fcd34d; font-size: 12px; }
 .ai-chat-composer { flex: 0 0 auto; display: grid; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid #373c43; }
 .ai-chat-meta { display: flex; flex-wrap: wrap; gap: 10px; }
