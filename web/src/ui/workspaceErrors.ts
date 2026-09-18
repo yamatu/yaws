@@ -14,6 +14,8 @@ const errors: Record<string, string> = {
   ai_failed: "AI 请求失败，请检查接口设置或稍后重试",
   ai_context_limit: "读取的内容过多，请缩小问题范围",
   ai_tool_limit: "本轮操作过多，请再追问一次继续处理",
+  ai_timeout: "本轮运行时间过长已自动结束，可继续提问接着处理",
+  cancelled: "本轮已取消",
   bad_tool_arguments: "AI 生成的参数无效，请换个说法再试",
   proposal_already_handled: "这条操作已经被处理过了",
   proposal_not_applied: "只有已应用的修改才能撤销",
@@ -59,7 +61,6 @@ const errors: Record<string, string> = {
   model_http_401: "AI 密钥无效",
   model_http_400: "AI 接口拒绝请求，请检查模型、协议和推理级别",
   model_http_404: "AI 接口路径或模型不存在",
-  cancelled: "操作已取消",
   file_path_changed: "文件路径发生变化，请重新生成方案",
 };
 export function workspaceError(error: unknown) {

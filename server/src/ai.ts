@@ -37,7 +37,9 @@ import {
 const Config = AIConfigSchema;
 export type { AIConfig };
 /** Runaway guard only: the run ends when the model stops calling tools. */
-const MAX_TOOL_CALLS = 48;
+const MAX_TOOL_CALLS = 200;
+/** A slow reasoning model may need a few minutes for one completion. */
+const MODEL_TIMEOUT_MS = 300_000;
 const ProfilesBody = z.object({
   profiles: z.array(AIProfileInputSchema).min(1).max(MAX_PROFILES),
   activeId: z.string().max(64).default(""),
@@ -101,7 +103,7 @@ export async function modelRequest(
         path: endpoint.pathname,
         method: "POST",
         signal,
-        timeout: 120000,
+        timeout: MODEL_TIMEOUT_MS,
         headers: {
           Host: endpoint.host,
           "content-type": "application/json",
@@ -342,7 +344,7 @@ export function aiRouter(db: Db, secret: string) {
       remotePath(body.root);
       const signal = AbortSignal.any([
         requestSignal(res),
-        AbortSignal.timeout(240000),
+        AbortSignal.timeout(600_000),
       ]);
       const runId = randomUUID();
       let root = body.root;

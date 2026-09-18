@@ -259,7 +259,10 @@ export function AiChat({
     })();
     return () => {
       ac.abort();
-      controller.current?.abort();
+      // The chat run is deliberately left alone: collapsing the floating panel
+      // or switching tabs unmounts this component, and killing the request there
+      // made the assistant look "cancelled" halfway through real work. The run
+      // finishes on the server and the transcript is reloaded next time.
     };
   }, [applyProfiles]);
 

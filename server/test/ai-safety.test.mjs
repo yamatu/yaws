@@ -39,6 +39,17 @@ test("inspection commands are classified as read", () => {
     "openssl x509 -noout -text -in /etc/ssl/cert.pem",
     "ip addr show",
     "ps aux | grep -c nginx",
+    // Chained inspections used to count as a mutation because of && / ;.
+    "df -h && free -m",
+    "cd /etc/nginx && nginx -t",
+    "cat /etc/hosts; uptime",
+    "ls -la /srv/app || echo missing",
+    "docker ps && docker stats --no-stream",
+    "echo $(date)",
+    "whoami",
+    "echo $(whoami)",
+    "journalctl -u nginx -n 20 | tail -n 5",
+    "cd /var/log && du -sh ./*",
   ])
     assert.equal(classifyCommand(command), "read", command);
 });
@@ -68,10 +79,14 @@ test("mutations are classified as write and need approval", () => {
     "ip link set eth0 down",
     "mount -o remount,rw /",
     "dd if=/dev/zero of=/tmp/blob bs=1M count=10",
-    "echo $(whoami)",
     "tee /etc/motd",
     "yes | rm -i /tmp/x",
     "TOP=1 systemctl status nginx",
+    // An unknown substitution or a background job is never an inspection.
+    "echo $(some-unknown-tool)",
+    "foo=$(cp /etc/hosts /tmp/x) ls",
+    "sleep 1 & ls",
+    "cat /etc/hosts > /tmp/copy",
   ])
     assert.equal(classifyCommand(command), "write", command);
 });

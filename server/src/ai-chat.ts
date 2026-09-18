@@ -185,13 +185,27 @@ const Rename = z.object({
 /**
  * No step limit: the assistant keeps working until the model stops asking for
  * tools, so a long task is finished in one answer instead of being cut off with
- * "step limit reached". This is only a runaway guard — 60 tool calls in a single
- * answer is already far beyond any real task — next to the 5 minute timeout and
- * the context size limit.
+ * "step limit reached". The numbers left here are only runaway guards, not a
+ * budget the operator ever sees: 200 tool calls and 30 minutes are far beyond
+ * any real investigation and only stop a model that loops forever.
  */
-export const MAX_TOOL_CALLS = 60;
+export const MAX_TOOL_CALLS = 200;
 export const MAX_TOOL_OUTPUT = 12_000;
-export const CHAT_TIMEOUT_MS = 300_000;
+export const CHAT_TIMEOUT_MS = 30 * 60_000;
+/**
+ * A slow model can leave the NDJSON stream silent for minutes. A periodic ping
+ * keeps proxies and browsers from treating an idle connection as dead and
+ * aborting a run that is still working.
+ */
+export const CHAT_HEARTBEAT_MS = 15_000;
+/** How many completed turns are replayed into the next question. */
+export const CHAT_HISTORY_TURNS = 20;
+/**
+ * Character budget for the replayed history. The newest turns are kept first,
+ * so a chat that has been going for a long time still remembers what was just
+ * discussed instead of flooding the model with old answers.
+ */
+export const CHAT_HISTORY_BUDGET = 80_000;
 
 export function decodeField(secret: string, text: string): string {
   const value = decryptText(text, secret);
@@ -405,7 +419,7 @@ export function chatRouter(deps: ChatDeps) {
     if (!conversation) throw new WorkspaceError(404, "not_found");
     const runs = db
       .prepare(
-        "SELECT id, prompt, result, status, trace, created_at as createdAt FROM ai_runs WHERE conversation_id = ? ORDER BY created_at ASC LIMIT 200",
+        "SELECT id, prompt, result, status, trace, created_at as createdAt FROM ai_runs WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 200",
       )
       .all(conversation.id) as Array<{
       id: string;
@@ -519,7 +533,12 @@ export function chatRouter(deps: ChatDeps) {
       res.setHeader("x-accel-buffering", "no");
       res.flushHeaders?.();
       const emit = (event: Record<string, unknown>) => {
-        if (!res.writableEnded) res.write(`${JSON.stringify(event)}\n`);
+        if (res.writableEnded || res.destroyed) return;
+        try {
+          res.write(`${JSON.stringify(event)}\n`);
+        } catch {
+          // The operator navigated away mid-write; the abort listener handles it.
+        }
       };
       const trace: ToolEvent[] = [];
       const emitTool = (event: ToolEvent) => {
@@ -528,6 +547,11 @@ export function chatRouter(deps: ChatDeps) {
         else trace.push(event);
         emit({ type: "tool", tool: event });
       };
+      const heartbeat = setInterval(
+        () => emit({ type: "ping", at: Date.now() }),
+        CHAT_HEARTBEAT_MS,
+      );
+      heartbeat.unref?.();
       emit({
         type: "start",
         runId,
@@ -537,10 +561,11 @@ export function chatRouter(deps: ChatDeps) {
         model: config.model,
       });
 
-      const signal = AbortSignal.any([
-        requestSignal(res),
-        AbortSignal.timeout(CHAT_TIMEOUT_MS),
-      ]);
+      // Keep the two reasons apart: a timeout is the guard firing, a client
+      // abort means the operator navigated away, and they deserve different
+      // wording instead of the same "cancelled".
+      const timeout = AbortSignal.timeout(CHAT_TIMEOUT_MS);
+      const signal = AbortSignal.any([requestSignal(res), timeout]);
       try {
         const answer = await turn({
           deps,
@@ -578,14 +603,28 @@ export function chatRouter(deps: ChatDeps) {
           proposals: readProposals(db, secret, runId),
         });
       } catch (e) {
-        const code = e instanceof WorkspaceError ? e.status : 500;
-        const error = e instanceof WorkspaceError ? e.message : "ai_failed";
+        const timedOut = timeout.aborted;
+        const code = timedOut
+          ? 504
+          : e instanceof WorkspaceError
+            ? e.status
+            : 500;
+        const error = timedOut
+          ? "ai_timeout"
+          : e instanceof WorkspaceError
+            ? e.message
+            : "ai_failed";
         db.prepare(
-          "UPDATE ai_runs SET status='failed', trace=? WHERE id=?",
-        ).run(encryptText(JSON.stringify(trace), secret), runId);
+          "UPDATE ai_runs SET status=?, trace=? WHERE id=?",
+        ).run(
+          timedOut ? "failed" : signal.aborted ? "cancelled" : "failed",
+          encryptText(JSON.stringify(trace), secret),
+          runId,
+        );
         emit({ type: "error", error, status: code });
         emit({ type: "done", runId, conversationId, proposals: readProposals(db, secret, runId) });
       } finally {
+        clearInterval(heartbeat);
         active.delete(userId);
         if (!res.writableEnded) res.end();
       }
@@ -620,9 +659,13 @@ async function turn(options: TurnOptions): Promise<string> {
 
   const previous = db
     .prepare(
-      "SELECT prompt, result FROM ai_runs WHERE conversation_id = ? AND id <> ? AND status = 'completed' ORDER BY created_at DESC LIMIT 6",
+      "SELECT prompt, result FROM ai_runs WHERE conversation_id = ? AND id <> ? AND status = 'completed' ORDER BY created_at DESC, rowid DESC LIMIT ?",
     )
-    .all(options.conversationId, options.runId) as Array<{
+    .all(
+      options.conversationId,
+      options.runId,
+      CHAT_HISTORY_TURNS,
+    ) as Array<{
     prompt: string;
     result: string;
   }>;
@@ -635,13 +678,25 @@ async function turn(options: TurnOptions): Promise<string> {
     "Prefer showing the operator the exact command or diff instead of a long explanation. Do not use interactive commands (vi, top without -b, tail -f).",
   ].join("\n");
 
+  // `previous` is newest first; keep the recent turns that fit the budget and
+  // drop the rest, so a long conversation cannot bury the current question.
+  const history: Array<{ prompt: string; result: string }> = [];
+  let historyBytes = 0;
+  for (const row of previous) {
+    const prompt = decodeField(secret, row.prompt);
+    const result = decodeField(secret, row.result);
+    const size = prompt.length + result.length;
+    if (history.length && historyBytes + size > CHAT_HISTORY_BUDGET) break;
+    historyBytes += size;
+    history.push({ prompt, result });
+  }
   const messages: unknown[] = [{ role: "system", content: system }];
   const responses: unknown[] = [];
-  for (const row of previous.reverse()) {
-    messages.push({ role: "user", content: decodeField(secret, row.prompt) });
-    messages.push({ role: "assistant", content: decodeField(secret, row.result) });
-    responses.push({ role: "user", content: decodeField(secret, row.prompt) });
-    responses.push({ role: "assistant", content: decodeField(secret, row.result) });
+  for (const row of history.reverse()) {
+    messages.push({ role: "user", content: row.prompt });
+    messages.push({ role: "assistant", content: row.result });
+    responses.push({ role: "user", content: row.prompt });
+    responses.push({ role: "assistant", content: row.result });
   }
   messages.push({ role: "user", content: message });
   responses.push({ role: "user", content: message });

@@ -367,7 +367,9 @@ export async function runCommand(
   const abort = () => ctrl.abort();
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) ctrl.abort();
-  const timer = setTimeout(abort, 30000);
+  // Package managers and restarts can take a while; the command is still
+  // bounded, but generously enough not to cut a slow but healthy run short.
+  const timer = setTimeout(abort, 120_000);
   const client = await connectMachine(db, id, secret, ctrl.signal).catch(
     (e: unknown) => {
       clearTimeout(timer);

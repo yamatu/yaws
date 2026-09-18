@@ -499,6 +499,30 @@ test("ai chat", async (t) => {
     );
   });
 
+  await t.test("long conversations keep earlier turns in reach", async () => {
+    const opening = await chat(f, {
+      root: "/srv/app",
+      message: "[md] 第1轮问题",
+      autoRun: "read",
+    });
+    const id = opening.events.find((e) => e.type === "start").conversationId;
+    for (let i = 2; i <= 8; i++)
+      await chat(f, {
+        root: "/srv/app",
+        message: `[md] 第${i}轮问题`,
+        autoRun: "read",
+        conversationId: id,
+      });
+    const prompts = f.modelRequests
+      .at(-1)
+      .messages.filter((m) => m.role === "user")
+      .map((m) => m.content);
+    // The old six-turn window would have dropped the first question.
+    assert.equal(prompts.length, 8);
+    assert.equal(prompts[0], "[md] 第1轮问题");
+    assert.equal(prompts.at(-1), "[md] 第8轮问题");
+  });
+
   await t.test("chat is admin-only and validates input", async () => {
     const viewer = await fetch(`${f.url}/api/ai/machines/1/chat`, {
       method: "POST",

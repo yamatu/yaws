@@ -17,14 +17,14 @@ export const READ_ONLY_COMMANDS = new Set([
   "dirname", "which", "type", "pwd", "tree", "du", "df", "lsblk", "blkid", "lsof",
   "fuser", "mount", "findmnt", "getent", "nproc", "lscpu", "lsmod", "lsusb", "lspci",
   "ps", "pgrep", "pstree", "top", "free", "uptime", "vmstat", "iostat", "mpstat",
-  "sar", "who", "w", "id", "groups", "last", "lastlog", "uname", "hostname",
+  "sar", "who", "w", "whoami", "id", "groups", "last", "lastlog", "uname", "hostname",
   "hostnamectl", "date", "cal", "printenv", "echo", "printf", "true", "false",
   "test", "sleep", "seq", "yes", "sed", "awk", "find", "tar", "journalctl",
   "dmesg", "netstat", "ss", "ip", "ifconfig", "route", "arp", "dig", "nslookup",
   "host", "ping", "ping6", "curl", "wget", "nc", "ncat", "traceroute", "mtr",
   "systemctl", "service", "docker", "podman", "kubectl", "nginx", "apachectl",
   "caddy", "certbot", "git", "crontab", "iptables", "ufw", "smartctl", "sensors",
-  "nvidia-smi", "openssl",
+  "nvidia-smi", "openssl", "cd",
 ]);
 
 /** Wrappers and interpreters: everything after them is invisible to the analysis. */
@@ -96,9 +96,21 @@ const SUBVERSIVE: RegExp[] = [
   /\bRuntime\.getRuntime\b/,
 ];
 
-const AMPERSAND = /(^|\s)&\s*$|&&/;
-const SHELL_SYNTAX = /[\n\r`;&]|\$\(|\$\{|\|\||[<>]/;
 const SAFE_REDIRECT = /\d?>>?\s*\/dev\/null|<+\s*\/dev\/null|&>\s*\/dev\/null|2>&1/g;
+
+/**
+ * `$(...)` and backticks. The inner command of a substitution is classified on
+ * its own, so `echo $(date)` stays read-only while `echo $(rm -rf /)` does not;
+ * nested parens are left behind by the pattern and make the whole command a
+ * mutation, which is the safe default.
+ */
+const SUBSTITUTION_SOURCE = /\$\(([^()]*)\)|`([^`]*)`/.source;
+
+/** A fresh global regex per call: classification recurses into substitutions. */
+const substitutionRegex = () => new RegExp(SUBSTITUTION_SOURCE, "g");
+
+/** Top-level separators between independent commands. */
+const SEPARATORS = /&&|\|\||[;\n|]/;
 
 /** Human readable one-liner for the transcript. */
 export function commandSummary(command: string, max = 160): string {
@@ -212,33 +224,55 @@ function flagsAllowed(head: string, args: string[]): boolean {
   }
 }
 
-function segmentIsReadOnly(segment: string): boolean {
+function segmentClass(segment: string): CommandClass {
   const parts = segment.trim().split(/\s+/).filter(Boolean);
-  if (!parts.length) return false;
+  if (!parts.length) return "read";
+  // A trailing `&` detaches the command: treat it as a mutation so it can never
+  // slip through as an inspection.
+  if (/(^|\s)&\s*$/.test(segment)) return "write";
   const head = parts[0].replace(/^.*\//, "");
-  if (WRAPPERS.has(head) || !READ_ONLY_COMMANDS.has(head)) return false;
-  return flagsAllowed(head, parts.slice(1));
+  if (DANGEROUS_HEADS.has(head)) return "dangerous";
+  if (WRAPPERS.has(head) || !READ_ONLY_COMMANDS.has(head)) return "write";
+  return flagsAllowed(head, parts.slice(1)) ? "read" : "write";
+}
+
+/** Classifies the inner command of every substitution in `command`. */
+function substitutionClass(command: string): CommandClass {
+  let worst: CommandClass = "read";
+  const pattern = substitutionRegex();
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(command))) {
+    const inner = classifyCommand(match[1] ?? match[2] ?? "");
+    if (inner === "dangerous") return "dangerous";
+    if (inner === "write") worst = "write";
+  }
+  return worst;
 }
 
 export function classifyCommand(command: string): CommandClass {
   const raw = command.trim();
   if (!raw) return "write";
   if (DANGEROUS.some((re) => re.test(raw))) return "dangerous";
-  const flat = withoutSafeRedirects(raw);
-  const heads = flat
-    .split("|")
-    .map((segment) => segment.trim().split(/\s+/)[0] ?? "")
-    .map((token) => token.replace(/^.*\//, ""))
-    .filter(Boolean);
-  if (heads.some((head) => DANGEROUS_HEADS.has(head))) return "dangerous";
-  if (SUBVERSIVE.some((re) => re.test(flat))) return "write";
-  if (SHELL_SYNTAX.test(flat) || AMPERSAND.test(flat)) return "write";
+  if (SUBVERSIVE.some((re) => re.test(raw))) return "write";
+  const substituted = substitutionClass(raw);
+  if (substituted === "dangerous") return "dangerous";
+  const flat = withoutSafeRedirects(raw.replace(substitutionRegex(), " "));
+  // Anything still redirectional or substitutive can hide a mutation.
+  if (/[`<>]/.test(flat) || /\$\(/.test(flat)) return "write";
+  // A lone `&` backgrounds the command, so it never counts as an inspection.
+  if (/(^|[^&])&([^&]|$)/.test(flat)) return "write";
   const segments = flat
-    .split("|")
-    .map((s) => s.trim())
+    .split(SEPARATORS)
+    .map((segment) => segment.trim())
     .filter(Boolean);
   if (!segments.length) return "write";
-  return segments.every(segmentIsReadOnly) ? "read" : "write";
+  let kind: CommandClass = substituted;
+  for (const segment of segments) {
+    const next = segmentClass(segment);
+    if (next === "dangerous") return "dangerous";
+    if (next === "write") kind = "write";
+  }
+  return kind;
 }
 
 export function isDangerousCommand(command: string): boolean {
