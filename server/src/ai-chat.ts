@@ -33,6 +33,13 @@ import {
 import type { AIConfig, LoadedProfile } from "./ai-profiles.js";
 import type { ModelDelta, ModelTurn } from "./ai.js";
 import type { McpManager, MappedMcpTool } from "./mcp.js";
+import {
+  expandExtensionPrompt,
+  type ExtensionGuardResult,
+  type ExtensionManager,
+  type LoadedExtensionTool,
+  type LoadedExtensions,
+} from "./extensions.js";
 
 export type ChatTool = {
   name: string;
@@ -287,6 +294,12 @@ export function toolDetail(name: string, args: Record<string, unknown>): string 
     const sep = rest.indexOf("__");
     return sep > 0 ? `${rest.slice(0, sep)} · ${rest.slice(sep + 2)}` : name;
   }
+  if (name.startsWith("ext__")) {
+    const rest = name.slice(5);
+    const sep = rest.indexOf("__");
+    return sep > 0 ? `${rest.slice(0, sep)} · ${rest.slice(sep + 2)}` : name;
+  }
+  if (name === "read_skill") return String(args.name ?? "");
   if (name === "run_command" || name === "read_log")
     return commandSummary(String(args.command ?? ""));
   if (name === "server_stats") return "读取 CPU / 内存 / 磁盘 / 进程";
@@ -310,6 +323,8 @@ export type ChatDeps = {
   ) => Promise<ModelTurn>;
   /** Mounted MCP servers; absent means MCP is disabled. */
   mcp?: McpManager;
+  /** Installed extension packages; absent means extensions are disabled. */
+  extensions?: ExtensionManager;
 };
 
 export function chatRouter(deps: ChatDeps) {
@@ -574,6 +589,7 @@ export function chatRouter(deps: ChatDeps) {
           machineId,
           userId,
           mcpByName: new Map<string, MappedMcpTool>(),
+          extByName: new Map<string, LoadedExtensionTool>(),
           runId,
           conversationId,
           machineName: machine.name,
@@ -654,10 +670,12 @@ type TurnOptions = {
   signal: AbortSignal;
   /** namespaced MCP tool name -> server/tool mapping for this turn. */
   mcpByName: Map<string, MappedMcpTool>;
+  /** namespaced extension tool name -> definition for this turn. */
+  extByName: Map<string, LoadedExtensionTool>;
 };
 
 async function turn(options: TurnOptions): Promise<string> {
-  const { deps, emit, emitTool, checkpoint, root, message, autoRun, config, signal } =
+  const { deps, emit, emitTool, checkpoint, root, autoRun, config, signal } =
     options;
   const { db, secret } = deps;
 
@@ -668,6 +686,20 @@ async function turn(options: TurnOptions): Promise<string> {
     : { tools: [] as MappedMcpTool[], errors: [] as string[] };
   options.mcpByName.clear();
   for (const tool of mapped.tools) options.mcpByName.set(tool.name, tool);
+  // Extension packages add more tools on top, plus skills and prompt templates.
+  // A package that fails to load is reported and skipped, never fatal.
+  const extensions = deps.extensions
+    ? await deps.extensions.load()
+    : ({
+        tools: [],
+        skills: [],
+        prompts: [],
+        notes: [],
+        guards: [],
+        errors: [],
+      } as LoadedExtensions);
+  options.extByName.clear();
+  for (const tool of extensions.tools) options.extByName.set(tool.name, tool);
   const toolDefs: ChatTool[] = [
     ...CHAT_TOOLS,
     ...mapped.tools.map((tool) => ({
@@ -675,7 +707,32 @@ async function turn(options: TurnOptions): Promise<string> {
       description: tool.description,
       parameters: tool.parameters,
     })),
+    ...extensions.tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    })),
+    // Skills are instructions, not actions: the model lists them in the system
+    // prompt and pulls the full text in only when the task matches.
+    ...(extensions.skills.length
+      ? [
+          {
+            name: "read_skill",
+            description:
+              "Read the full instructions of one of the skills listed in the system prompt.",
+            parameters: {
+              type: "object",
+              properties: { name: { type: "string", description: "Skill name." } },
+              required: ["name"],
+              additionalProperties: false,
+            },
+          },
+        ]
+      : []),
   ];
+  // `/name args` typed by the operator expands from the installed templates,
+  // for the current question and for the history the model re-reads.
+  const message = expandExtensionPrompt(extensions.prompts, options.message);
 
   const previous = db
     .prepare(
@@ -707,6 +764,21 @@ async function turn(options: TurnOptions): Promise<string> {
     ...(mapped.errors.length
       ? [`These MCP servers are unavailable this turn: ${mapped.errors.join("; ")}.`]
       : []),
+    ...extensions.notes,
+    ...(extensions.tools.length
+      ? [
+          "Tools whose names start with ext__ come from installed extension packages; call them like any other tool.",
+        ]
+      : []),
+    ...(extensions.skills.length
+      ? [
+          "Installed extension skills bundle extra instructions. When a task matches one, call read_skill with its name and follow it:",
+          ...extensions.skills.map((skill) => `- ${skill.name}: ${skill.description}`),
+        ]
+      : []),
+    ...(extensions.errors.length
+      ? [`These extension packages failed to load: ${extensions.errors.join("; ")}.`]
+      : []),
   ].join("\n");
 
   // `previous` is newest first; keep the recent turns that fit the budget and
@@ -719,7 +791,7 @@ async function turn(options: TurnOptions): Promise<string> {
     const size = prompt.length + result.length;
     if (history.length && historyBytes + size > CHAT_HISTORY_BUDGET) break;
     historyBytes += size;
-    history.push({ prompt, result });
+    history.push({ prompt: expandExtensionPrompt(extensions.prompts, prompt), result });
   }
   const messages: unknown[] = [{ role: "system", content: system }];
   const responses: unknown[] = [];
@@ -737,12 +809,18 @@ async function turn(options: TurnOptions): Promise<string> {
   const runTool = async (name: string, raw: string): Promise<unknown> => {
     const id = randomUUID();
     let args: Record<string, unknown>;
-    const mcpTool = options.mcpByName.get(name);
+    // Built-in tools share one small argument vocabulary. MCP servers,
+    // extension packages and read_skill publish their own JSON schema, so their
+    // arguments are passed through instead of being stripped by that filter.
+    const foreign =
+      options.mcpByName.has(name) ||
+      options.extByName.has(name) ||
+      name === "read_skill";
     try {
       const parsed = JSON.parse(raw || "{}") as unknown;
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
         throw new Error("bad_tool_arguments");
-      args = mcpTool
+      args = foreign
         ? (parsed as Record<string, unknown>)
         : z
             .object({
@@ -757,6 +835,29 @@ async function turn(options: TurnOptions): Promise<string> {
       return { error: "bad_tool_arguments" };
     }
     const detail = toolDetail(name, args);
+    // Extension tool_call guards see every tool, built-in or not, so a package
+    // can veto a dangerous command before it ever reaches the server. A guard
+    // that throws is a bug in that package, never a reason to fail the turn.
+    for (const guard of extensions.guards) {
+      let verdict: ExtensionGuardResult;
+      try {
+        verdict = await guard({ name, args });
+      } catch {
+        continue;
+      }
+      if (verdict && verdict.block) {
+        const reason = verdict.reason || "blocked_by_extension";
+        emitTool({
+          id,
+          name,
+          detail,
+          state: "error",
+          output: reason,
+          purpose: args.purpose as string,
+        });
+        return { error: "blocked_by_extension", detail: reason };
+      }
+    }
     emitTool({ id, name, detail, state: "running", purpose: args.purpose as string });
     try {
       const result = await execute(name, args, {
@@ -903,6 +1004,53 @@ async function execute(
   const finish = (state: ToolEvent["state"], output: string, extra: Partial<ToolEvent> = {}) => {
     emitTool({ id, name, detail, state, output, ...extra });
   };
+
+  if (name === "read_skill") {
+    const loaded = options.deps.extensions
+      ? await options.deps.extensions.load()
+      : null;
+    const skill = loaded?.skills.find(
+      (item) => item.name === String(args.name ?? ""),
+    );
+    if (!skill) {
+      finish("error", "skill_not_found", { auto: true, readOnly: true });
+      return { error: "skill_not_found", detail: String(args.name ?? "") };
+    }
+    options.addContext(Buffer.byteLength(skill.content));
+    finish("ok", clip(skill.content, 6000), {
+      auto: true,
+      readOnly: true,
+      purpose: skill.packageName,
+    });
+    return {
+      skill: skill.name,
+      instructions: clip(skill.content, MAX_TOOL_OUTPUT),
+    };
+  }
+
+  if (name.startsWith("ext__")) {
+    const tool = options.extByName.get(name);
+    if (!tool || !options.deps.extensions) return { error: "unknown_tool" };
+    try {
+      const result = await options.deps.extensions.call(name, args);
+      options.addContext(Buffer.byteLength(result.text));
+      finish(result.isError ? "error" : "ok", clip(result.text, 8000), {
+        auto: true,
+        readOnly: tool.readOnly,
+        purpose: result.packageName,
+      });
+      return {
+        extension: result.packageName,
+        tool: tool.toolName,
+        isError: result.isError,
+        output: clip(result.text, MAX_TOOL_OUTPUT),
+      };
+    } catch (e) {
+      const text = e instanceof WorkspaceError ? e.message : (e as Error).message;
+      finish("error", text, { auto: true, purpose: tool.packageName });
+      return { error: "extension_call_failed", detail: text };
+    }
+  }
 
   if (name.startsWith("mcp__")) {
     const mapped = options.mcpByName.get(name);

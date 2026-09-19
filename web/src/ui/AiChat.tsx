@@ -36,6 +36,7 @@ import { getToken } from "./auth";
 import { workspaceError } from "./workspaceErrors";
 import { ConversationPicker } from "./ConversationPicker";
 import { McpSettings } from "./McpSettings";
+import { ExtensionSettings } from "./ExtensionSettings";
 import { Markdown } from "./MarkdownView";
 import { orderTurnEntries } from "./chatOrder";
 import { cacheStats } from "./aiUsage";
@@ -1047,6 +1048,7 @@ export function AiChat({
             </>
           ) : null}
           <McpSettings />
+          <ExtensionSettings />
         </form>
       )}
       <div className="ai-chat-transcript" ref={transcript}>

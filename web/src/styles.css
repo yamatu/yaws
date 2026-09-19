@@ -248,6 +248,22 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .mcp-notice { grid-column: 1 / -1; margin: 0; font-size: 12px; color: #86efac; }
 .mcp-error { grid-column: 1 / -1; margin: 0; font-size: 12px; color: #fda4af; overflow-wrap: anywhere; }
 .mcp-settings textarea.yaws-input { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+/* Extension packages reuse the MCP panel styling, with a card per package. */
+.ext-settings .ext-install-row { grid-template-columns: minmax(0,1fr) auto; }
+.ext-list { grid-column: 1 / -1; display: grid; gap: 8px; }
+.ext-card { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid #2c3238; border-radius: 8px; background: #1b2026; }
+.ext-card.off { opacity: .6; }
+.ext-card-head { display: flex; align-items: center; gap: 8px; }
+.ext-card-title { flex: 1; display: grid; gap: 2px; min-width: 0; padding: 0; border: 0; background: none; text-align: left; color: inherit; cursor: pointer; }
+.ext-card-title strong { font-size: 13px; color: #e6ebf1; }
+.ext-source { font-size: 11px; color: #8d97a2; overflow-wrap: anywhere; }
+.ext-counts { font-size: 11px; color: #8d97a2; }
+.ext-detail { display: grid; gap: 4px; }
+.ext-tool-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 12px; color: #b5bec8; }
+.ext-tool-list li { display: grid; grid-template-columns: 14px minmax(0,auto) minmax(0,1fr) auto; gap: 6px; align-items: baseline; }
+.ext-tool-list code { font-size: 11px; color: #e6ebf1; overflow-wrap: anywhere; }
+.ext-tool-list em { font-style: normal; font-size: 11px; color: #8d97a2; }
+.ext-error { grid-column: 1 / -1; margin: 0; font-size: 12px; color: #fda4af; overflow-wrap: anywhere; }
 .yaws-btn.danger { border-color: #7f1d1d; color: #fda4af; }
 .ai-chat-transcript { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
 /* Message rows always keep their natural height: a tall tool card or diff must

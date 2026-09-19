@@ -113,6 +113,28 @@ function markerCalls(text, count) {
   return [];
 }
 
+/**
+ * `[tool:NAME]` calls any tool by name and `[skill:NAME]` reads an extension
+ * skill, so tests can reach tools the fixture does not know about (MCP and
+ * extension packages) without a marker per tool.
+ */
+function genericCalls(text, count) {
+  if (count > 0) return [];
+  const skill = /\[skill:([^\]]+)\]/.exec(text);
+  if (skill) return [{ name: "read_skill", args: { name: skill[1] } }];
+  const tool = /\[tool:([A-Za-z0-9_-]+)(?:\s+(\{[^\]]*\}))?\]/.exec(text);
+  if (!tool) return [];
+  let args = {};
+  if (tool[2]) {
+    try {
+      args = JSON.parse(tool[2]);
+    } catch {
+      args = {};
+    }
+  }
+  return [{ name: tool[1], args }];
+}
+
 function lastUserText(history, chat) {
   for (let i = history.length - 1; i >= 0; i--) {
     const item = history[i];
@@ -348,6 +370,8 @@ export async function harness(port = 0) {
     else if (markdown) calls = [];
     else if (/\[(run|write|danger|file|list|stats|log|secret|many)\]/.test(marker))
       calls = markerCalls(marker, count);
+    else if (/\[tool:[A-Za-z0-9_-]+|\[skill:[^\]]+\]/.test(marker))
+      calls = genericCalls(marker, count);
     else if (count === 0)
       calls = [{ name: "read_file", args: { path: "/srv/app/config.json" } }];
     else if (count === 1)

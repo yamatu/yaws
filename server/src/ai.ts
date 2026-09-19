@@ -1,6 +1,7 @@
 import { Router } from "express";
 import https from "node:https";
 import http from "node:http";
+import path from "node:path";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { lookup } from "node:dns/promises";
 import { randomUUID } from "node:crypto";
@@ -19,6 +20,8 @@ import {
 } from "./files.js";
 import { route, audit, requestSignal } from "./workspace.js";
 import { chatRouter } from "./ai-chat.js";
+import { ExtensionManager } from "./extensions.js";
+import { dataDir, extensionsDir, loadEnv } from "./env.js";
 import { secretPath } from "./ai-safety.js";
 import {
   AIConfigSchema,
@@ -60,6 +63,15 @@ const McpBody = z.object({
   servers: z.array(MCPServerSchema).max(50),
 });
 const McpTestBody = z.object({ server: MCPServerSchema });
+const ExtensionInstallBody = z.object({ source: z.string().min(1).max(500) });
+const ExtensionRef = z.object({ id: z.string().min(1).max(48) });
+const ExtensionsBody = z.object({
+  packages: z
+    .array(
+      z.object({ id: z.string().min(1).max(48), enabled: z.boolean() }),
+    )
+    .max(100),
+});
 export function publicAddress(address: string) {
   try {
     return ipaddr.process(address).range() === "unicast";
@@ -706,6 +718,10 @@ export function aiRouter(db: Db, secret: string) {
   const router = Router({ mergeParams: true });
   const active = new Set<number>();
   const mcp = new McpManager(db, secret);
+  // Extension packages are checked out under the data directory so a backup of
+  // `data/` keeps them, next to the SQLite file that lists them.
+  const extensionRoot = extensionsDir(loadEnv());
+  const extensions = new ExtensionManager(db, secret, extensionRoot);
   db.prepare("UPDATE ai_runs SET status='failed' WHERE status='running'").run();
   db.prepare(
     "UPDATE ai_proposals SET status='failed' WHERE status='applying'",
@@ -773,6 +789,83 @@ export function aiRouter(db: Db, secret: string) {
         // Surface why the handshake failed instead of a bare 500.
         throw new WorkspaceError(502, (e as Error).message || "mcp_test_failed");
       }
+    }),
+  );
+  // Extension packages: pi-style bundles that add tools, skills and prompt
+  // templates. Install/uninstall is admin-only (the whole AI router is).
+  const extensionState = async () => {
+    const loaded = await extensions.load();
+    const owned = (packageId: string, list: Array<{ packageId: string; name: string }>) =>
+      list.filter((item) => item.packageId === packageId).map((item) => item.name);
+    return {
+      directory: extensionRoot,
+      packages: extensions.packages(false).map((entry) => ({
+        ...entry,
+        tools: owned(entry.id, loaded.tools),
+        skills: owned(entry.id, loaded.skills),
+        prompts: owned(entry.id, loaded.prompts),
+      })),
+      tools: loaded.tools.map((tool) => ({
+        name: tool.name,
+        title: tool.title,
+        description: tool.description,
+        readOnly: tool.readOnly,
+        packageId: tool.packageId,
+        packageName: tool.packageName,
+      })),
+      skills: loaded.skills.map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        packageId: skill.packageId,
+        packageName: skill.packageName,
+      })),
+      prompts: loaded.prompts.map((prompt) => ({
+        name: prompt.name,
+        description: prompt.description,
+        packageId: prompt.packageId,
+        packageName: prompt.packageName,
+      })),
+      errors: loaded.errors,
+    };
+  };
+  router.get(
+    "/extensions",
+    route(async (_req, res) => {
+      res.json(await extensionState());
+    }),
+  );
+  router.post(
+    "/extensions/install",
+    route(async (req, res) => {
+      const { source } = ExtensionInstallBody.parse(req.body);
+      await extensions.install(source);
+      res.json(await extensionState());
+    }),
+  );
+  router.post(
+    "/extensions/remove",
+    route(async (req, res) => {
+      const { id } = ExtensionRef.parse(req.body);
+      extensions.remove(id);
+      res.json(await extensionState());
+    }),
+  );
+  router.put(
+    "/extensions",
+    route(async (req, res) => {
+      const body = ExtensionsBody.parse(req.body);
+      extensions.setEnabled(
+        new Map(body.packages.map((entry) => [entry.id, entry.enabled])),
+      );
+      res.json(await extensionState());
+    }),
+  );
+  // Re-reads every package from disk, for after editing one in place.
+  router.post(
+    "/extensions/reload",
+    route(async (_req, res) => {
+      extensions.invalidate();
+      res.json(await extensionState());
     }),
   );
   router.get("/settings", (_req, res) => {
@@ -1095,6 +1188,7 @@ export function aiRouter(db: Db, secret: string) {
       stream: (config, body, signal, onDelta) =>
         streamModel(config, body as Record<string, unknown>, signal, onDelta),
       mcp,
+      extensions,
     }),
   );
   router.get("/machines/:id/runs", (req, res) => {

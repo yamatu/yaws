@@ -72,6 +72,19 @@ const errors: Record<string, string> = {
   mcp_call_failed: "调用 MCP 工具失败",
   mcp_invalid_tool_list: "MCP 服务返回的工具列表无法解析",
   mcp_no_response: "MCP 服务没有返回结果",
+  extension_source_invalid:
+    "扩展包来源无效，请填写本地目录、npm:包名 或 git:仓库地址",
+  extension_package_missing: "找不到扩展包目录或入口文件",
+  duplicate_extension: "这个扩展包来源已经安装过了",
+  extension_limit: "安装的扩展包太多了，请先移除不用的",
+  extension_not_found: "扩展包不存在或已被移除",
+  extension_tool_not_found: "扩展工具不存在，请重新加载扩展",
+  extension_no_activate: "扩展包没有可加载的入口或清单",
+  extension_timeout: "扩展工具执行超时",
+  extension_install_timeout: "扩展包安装超时，请检查网络",
+  extension_call_failed: "调用扩展工具失败",
+  blocked_by_extension: "扩展包拦截了这个操作",
+  skill_not_found: "技能不存在，请重新加载扩展",
 };
 export function workspaceError(error: unknown) {
   const text = error instanceof Error ? error.message : "请求失败";
@@ -84,5 +97,23 @@ export function workspaceError(error: unknown) {
   if (text.startsWith("mcp_rpc")) return "MCP 服务返回错误";
   if (text.startsWith("spawn "))
     return "无法启动 MCP 服务，请检查启动命令是否存在";
+  if (text.startsWith("extension_install_failed")) {
+    const detail = text.slice("extension_install_failed".length).replace(/^:\s*/, "");
+    return detail ? `扩展包安装失败：${detail}` : "扩展包安装失败";
+  }
+  if (text.startsWith("extension_unloadable")) {
+    const detail = text.slice("extension_unloadable".length).replace(/^:\s*/, "");
+    return detail ? `扩展包无法加载：${detail}` : "扩展包无法加载";
+  }
+  if (text.startsWith("extension_tool_invalid")) {
+    const detail = text.slice("extension_tool_invalid".length).replace(/^:\s*/, "");
+    return detail ? `扩展工具定义无效：${detail}` : "扩展工具定义无效";
+  }
+  if (text.startsWith("extension_no_activate")) {
+    const detail = text.slice("extension_no_activate".length).replace(/^:\s*/, "");
+    return detail
+      ? `扩展包没有可加载的内容：${detail}`
+      : "扩展包没有可加载的入口或清单";
+  }
   return text;
 }

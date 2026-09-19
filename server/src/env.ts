@@ -1,9 +1,12 @@
 import { z } from "zod";
+import path from "node:path";
 
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3001),
   DATABASE_PATH: z.string().default("./data/yaws.sqlite"),
+  /** Where installed extension packages are checked out (default: next to the DB). */
+  EXTENSIONS_DIR: z.string().optional(),
   JWT_SECRET: z.string().min(16).default("dev-secret-change-me-please"),
   BOOTSTRAP_TOKEN: z.string().optional(),
   AGENT_KEY_SECRET: z.string().min(16).optional(),
@@ -27,6 +30,21 @@ const EnvSchema = z.object({
 });
 
 export type Env = z.infer<typeof EnvSchema>;
+
+/**
+ * Directory that holds the SQLite database and the data this app generates next
+ * to it (installed extension packages, for example).
+ */
+export function dataDir(env: Env): string {
+  return path.dirname(path.resolve(env.DATABASE_PATH));
+}
+
+/** Directory holding installed extension packages, overridable for tests. */
+export function extensionsDir(env: Env): string {
+  return env.EXTENSIONS_DIR
+    ? path.resolve(env.EXTENSIONS_DIR)
+    : path.join(dataDir(env), "extensions");
+}
 
 /**
  * Translate the TRUST_PROXY setting into the value express accepts. Accepts a hop count
