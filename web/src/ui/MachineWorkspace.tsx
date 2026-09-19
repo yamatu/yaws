@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { apiFetch } from "./api";
@@ -122,6 +122,7 @@ export function MachineWorkspace({
   hidden?: boolean;
   onStatus?: (machineId: number, status: SshStatus) => void;
 }) {
+  const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<SshStatus>("idle");
   const [termReady, setTermReady] = useState(false);
@@ -649,6 +650,9 @@ export function MachineWorkspace({
             machineId={machineId}
             connected={status === "connected"}
             trusted={trusted}
+            onOpen={(target) =>
+              navigate(`/app/machines/${target}/ssh`, { replace: true })
+            }
             send={(command) => {
               if (command.endsWith("\r")) {
                 wsRef.current?.send(

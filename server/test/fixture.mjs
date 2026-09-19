@@ -1,6 +1,7 @@
 import express from "express";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { generateKeyPairSync } from "node:crypto";
@@ -200,6 +201,10 @@ export async function harness(port = 0) {
     publicKeyEncoding: { type: "spki", format: "pem" },
   }).privateKey;
   const clients = new Set();
+  // direct-tcpip channels a jump host was asked to open, and a switch to make
+  // the fixture refuse them the way `AllowTcpForwarding no` does.
+  const tunnels = [];
+  let denyTunnels = false;
   const commands = [];  // Scripts the panel piped into `install.sh` over SSH stdin, plus a hook so a
   // test can decide what the remote installer answers.
   const installs = [];
@@ -230,6 +235,22 @@ export async function harness(port = 0) {
         ? ctx.accept()
         : ctx.reject(),
     );
+    client.on("tcpip", (accept, reject, info) => {
+      tunnels.push(`${info.destIP}:${info.destPort}`);
+      if (denyTunnels) return reject();
+      const stream = accept();
+      const upstream = net.connect(Number(info.destPort), info.destIP);
+      upstream.on("connect", () => {
+        stream.pipe(upstream).pipe(stream);
+      });
+      const fail = () => {
+        stream.end();
+        upstream.destroy();
+      };
+      upstream.on("error", fail);
+      stream.on("error", fail);
+      stream.on("close", () => upstream.destroy());
+    });
     client.on("ready", () =>
       client.on("session", (accept) => {
         const session = accept();
@@ -764,6 +785,10 @@ export async function harness(port = 0) {
     modelUrl,
     files,
     commands,
+    tunnels,
+    setDenyTunnels(value) {
+      denyTunnels = value;
+    },
     installs,
     env: agentEnv,
     agentBinDir,

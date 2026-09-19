@@ -49,6 +49,7 @@ import {
   toggleHost,
   type HostOption,
 } from "./aiHosts";
+import { FloatingPanel } from "./FloatingPanel";
 import type { Conversation } from "./conversations";
 
 type Profile = {
@@ -217,6 +218,9 @@ export function AiChat({
   const [hosts, setHosts] = useState<number[]>([]);
   const [hostOptions, setHostOptions] = useState<HostOption[]>([]);
   const [hostOpen, setHostOpen] = useState(false);
+  // The picker is drawn in a portal anchored to this button; an in-flow menu is
+  // clipped by the dock's overflow.
+  const hostButton = useRef<HTMLButtonElement | null>(null);
   const [session, setSession] = useState<{ name: string; model: string }>({
     name: "",
     model: "",
@@ -1397,6 +1401,7 @@ export function AiChat({
           <div className="ai-meta-hosts">
             <button
               type="button"
+              ref={hostButton}
               className="ai-host-toggle"
               aria-label="选择主机"
               aria-expanded={hostOpen}
@@ -1408,7 +1413,12 @@ export function AiChat({
               {hostSummary(hosts, hostOptions.length || 1)}
             </button>
             {hostOpen ? (
-              <div className="ai-host-menu">
+              <FloatingPanel
+                anchor={hostButton.current}
+                className="ai-host-menu"
+                label="选择主机"
+                onClose={() => setHostOpen(false)}
+              >
                 <div className="ai-host-row">
                   <Check size={13} />
                   <span className="ai-host-name">
@@ -1439,7 +1449,7 @@ export function AiChat({
                 <p className="ai-host-note">
                   勾选的主机会随本轮问题一起提交。只读检查可以一次跑多台；修改类操作仍然一台一张确认卡片。
                 </p>
-              </div>
+              </FloatingPanel>
             ) : null}
           </div>
           {session.model ? (

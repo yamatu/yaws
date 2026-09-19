@@ -12,6 +12,7 @@ import {
 import { apiFetch } from "./api";
 import { workspaceError } from "./workspaceErrors";
 import { ServerStatsPanel } from "./ServerStatsPanel";
+import { InternalHosts } from "./InternalHosts";
 type Shortcut = { id: number; name: string; command: string };
 
 const OPEN_KEY = "yaws.shortcuts.open";
@@ -30,11 +31,14 @@ export function SshShortcuts({
   connected,
   trusted,
   send,
+  onOpen,
 }: {
   machineId: number;
   connected: boolean;
   trusted: boolean;
   send: (command: string) => void;
+  /** Opens another machine's terminal (used by the internal-host list). */
+  onOpen?: (machineId: number) => void;
 }) {
   const base = `/api/machines/${machineId}/workspace/shortcuts`;
   const [items, setItems] = useState<Shortcut[]>([]),
@@ -218,6 +222,10 @@ export function SshShortcuts({
             </div>
           ))}
       </div>
+      <InternalHosts
+        machineId={machineId}
+        onOpen={(target) => onOpen?.(target)}
+      />
       <ServerStatsPanel machineId={machineId} enabled={trusted} />
     </aside>
   );

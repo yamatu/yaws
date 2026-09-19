@@ -17,7 +17,7 @@ import { decryptText, encryptText } from "./crypto.js";
 import { createPingService } from "./ping.js";
 import { workspaceRouter } from "./workspace.js";
 import { aiRouter } from "./ai.js";
-import { WorkspaceError, shellQuote } from "./ssh.js";
+import { assertVia, detachViaChildren, WorkspaceError, shellQuote } from "./ssh.js";
 import { certificateRouter, startCertificateScheduler } from "./certificates.js";
 import { agentBinaryHandler } from "./agent-release.js";
 import { agentInstallRouter } from "./agent-install.js";
@@ -1136,6 +1136,8 @@ app.get("/api/machines", requireAuth, (_req, res) => {
         ssh_auth_type as sshAuthType,
         CASE WHEN ssh_password_enc != '' THEN 1 ELSE 0 END as sshHasPassword,
         CASE WHEN ssh_key_enc != '' THEN 1 ELSE 0 END as sshHasKey,
+        via_machine_id as viaMachineId,
+        (SELECT name FROM machines v WHERE v.id = machines.via_machine_id) as viaName,
         expires_at as expiresAt,
         purchase_amount_cents as purchaseAmountCents,
         billing_cycle as billingCycle,
@@ -1159,6 +1161,8 @@ app.get("/api/machines", requireAuth, (_req, res) => {
         sshAuthType: (rest.sshAuthType ?? "password") as any,
         sshHasPassword: !!rest.sshHasPassword,
         sshHasKey: !!rest.sshHasKey,
+        viaMachineId: Number(rest.viaMachineId ?? 0),
+        viaName: rest.viaName ?? "",
         monthTraffic: periodKey
           ? { month: periodKey, startAt: periodStartAt, endAt: periodEndAt, rxBytes: periodRxBytes ?? 0, txBytes: periodTxBytes ?? 0 }
           : { month: b.periodKey, startAt: b.startAt, endAt: b.endAt, rxBytes: 0, txBytes: 0 },
@@ -1194,6 +1198,8 @@ app.get(/^\/api\/machines\/(?<id>\d+)$/, requireAuth, (req, res) => {
         machines.ssh_auth_type as sshAuthType,
         CASE WHEN machines.ssh_password_enc != '' THEN 1 ELSE 0 END as sshHasPassword,
         CASE WHEN machines.ssh_key_enc != '' THEN 1 ELSE 0 END as sshHasKey,
+        machines.via_machine_id as viaMachineId,
+        (SELECT name FROM machines v WHERE v.id = machines.via_machine_id) as viaName,
         machines.expires_at as expiresAt,
         machines.purchase_amount_cents as purchaseAmountCents,
         machines.billing_cycle as billingCycle,
@@ -1224,6 +1230,8 @@ app.get(/^\/api\/machines\/(?<id>\d+)$/, requireAuth, (req, res) => {
       sshAuthType: (rest.sshAuthType ?? "password") as any,
       sshHasPassword: !!rest.sshHasPassword,
       sshHasKey: !!rest.sshHasKey,
+      viaMachineId: Number(rest.viaMachineId ?? 0),
+      viaName: rest.viaName ?? "",
       monthTraffic: periodKey
         ? { month: periodKey, startAt: periodStartAt, endAt: periodEndAt, rxBytes: periodRxBytes ?? 0, txBytes: periodTxBytes ?? 0 }
         : { month: b.periodKey, startAt: b.startAt, endAt: b.endAt, rxBytes: 0, txBytes: 0 },
@@ -1262,6 +1270,8 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
          m.ssh_auth_type as sshAuthType,
          CASE WHEN m.ssh_password_enc != '' THEN 1 ELSE 0 END as sshHasPassword,
          CASE WHEN m.ssh_key_enc != '' THEN 1 ELSE 0 END as sshHasKey,
+         m.via_machine_id as viaMachineId,
+         (SELECT name FROM machines v WHERE v.id = m.via_machine_id) as viaName,
          m.expires_at as expiresAt,
          m.purchase_amount_cents as purchaseAmountCents,
          m.billing_cycle as billingCycle,
@@ -1309,6 +1319,8 @@ app.get("/api/machines/summary", requireAuth, (_req, res) => {
       sshAuthType: (r.sshAuthType ?? "password") as any,
       sshHasPassword: !!r.sshHasPassword,
       sshHasKey: !!r.sshHasKey,
+      viaMachineId: Number(r.viaMachineId ?? 0),
+      viaName: r.viaName ?? "",
       expiresAt: r.expiresAt ?? null,
       purchaseAmountCents: r.purchaseAmountCents,
       billingCycle: r.billingCycle,
@@ -1392,6 +1404,10 @@ app.post("/api/machines", requireAuth, asyncRoute(async (req, res) => {
   const sshAuthType = body.data.sshAuthType ?? "password";
   const sshPasswordEnc = body.data.sshPassword ? encryptText(body.data.sshPassword, agentKeySecret) : "";
   const sshKeyEnc = body.data.sshPrivateKey ? encryptText(body.data.sshPrivateKey, agentKeySecret) : "";
+  const viaMachineId = body.data.viaMachineId ?? 0;
+  // Validated before the row exists: a bad relay setting must not leave a
+  // half-created machine behind.
+  assertVia(db, 0, viaMachineId);
 
   const nextSortOrder =
     (db.prepare("SELECT COALESCE(MAX(sort_order), 0) as m FROM machines WHERE deleted_at IS NULL").get() as any)?.m + 1;
@@ -1402,11 +1418,12 @@ app.post("/api/machines", requireAuth, asyncRoute(async (req, res) => {
          group_name,
          agent_key_hash, agent_key_enc, agent_ws_url,
          ssh_host, ssh_port, ssh_user, ssh_auth_type, ssh_password_enc, ssh_key_enc,
+         via_machine_id,
          expires_at, purchase_amount_cents, billing_cycle, auto_renew,
          billing_anchor_day,
          created_at, updated_at, online
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
     )
     .run(
       body.data.name,
@@ -1423,6 +1440,7 @@ app.post("/api/machines", requireAuth, asyncRoute(async (req, res) => {
       sshAuthType,
       sshPasswordEnc,
       sshKeyEnc,
+      viaMachineId,
       body.data.expiresAt ?? null,
       Math.max(0, Math.round((body.data.purchaseAmount ?? 0) * 100)),
       body.data.billingCycle ?? "month",
@@ -1458,6 +1476,10 @@ app.post("/api/machines", requireAuth, asyncRoute(async (req, res) => {
       sshAuthType,
       sshHasPassword: !!body.data.sshPassword,
       sshHasKey: !!body.data.sshPrivateKey,
+      viaMachineId,
+      viaName: viaMachineId
+        ? ((db.prepare("SELECT name FROM machines WHERE id = ?").get(viaMachineId) as any)?.name ?? "")
+        : "",
       expiresAt: body.data.expiresAt ?? null,
       purchaseAmountCents: Math.max(0, Math.round((body.data.purchaseAmount ?? 0) * 100)),
       billingCycle: body.data.billingCycle ?? "month",
@@ -1514,6 +1536,7 @@ app.put("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
   const hasSshKey = Object.prototype.hasOwnProperty.call(req.body ?? {}, "sshPrivateKey");
   const sshPasswordEnc = hasSshPassword ? (body.data.sshPassword ? encryptText(body.data.sshPassword, agentKeySecret) : "") : null;
   const sshKeyEnc = hasSshKey ? (body.data.sshPrivateKey ? encryptText(body.data.sshPrivateKey, agentKeySecret) : "") : null;
+  if (body.data.viaMachineId != null) assertVia(db, id, body.data.viaMachineId);
 
   db.prepare(
     `UPDATE machines
@@ -1530,6 +1553,7 @@ app.put("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
          ssh_auth_type = COALESCE(?, ssh_auth_type),
          ssh_password_enc = CASE WHEN ? THEN ? ELSE ssh_password_enc END,
          ssh_key_enc = CASE WHEN ? THEN ? ELSE ssh_key_enc END,
+         via_machine_id = COALESCE(?, via_machine_id),
          expires_at = CASE WHEN ? THEN ? ELSE expires_at END,
          billing_anchor_day = CASE WHEN billing_anchor_day = 0 AND ? THEN COALESCE(?, billing_anchor_day) ELSE billing_anchor_day END,
          purchase_amount_cents = COALESCE(?, purchase_amount_cents),
@@ -1553,6 +1577,8 @@ app.put("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
     sshPasswordEnc,
     hasSshKey ? 1 : 0,
     sshKeyEnc,
+    // 0 is a value, not "leave as is": clearing a relay has to be possible.
+    body.data.viaMachineId ?? null,
     hasExpiresAt ? 1 : 0,
     body.data.expiresAt ?? null,
     hasExpiresAt ? 1 : 0,
@@ -1576,6 +1602,9 @@ app.delete("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
 
   wsHub.closeAgent(id);
   db.prepare("UPDATE ping_monitors SET enabled=0 WHERE machine_id=?").run(id);
+  // Machines that were reached through this one fall back to a direct
+  // connection instead of keeping a relay that no longer exists.
+  detachViaChildren(db, id);
   db.prepare("UPDATE machines SET online = 0, deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL").run(
     Date.now(),
     Date.now(),
@@ -1798,6 +1827,7 @@ const MachineCreateSchema = z.object({
   sshAuthType: z.enum(["password", "key"]).optional(),
   sshPassword: z.string().max(4096).optional(),
   sshPrivateKey: z.string().max(20000).optional(),
+  viaMachineId: z.number().int().min(0).optional(),
   expiresAt: z.number().int().nullable().optional(),
   purchaseAmount: z.number().nonnegative().max(1_000_000_000).optional(),
   billingCycle: z.enum(["month", "quarter", "half_year", "year", "two_year", "three_year"]).optional(),
@@ -1816,6 +1846,7 @@ const MachineUpdateSchema = z.object({
   sshAuthType: z.enum(["password", "key"]).optional(),
   sshPassword: z.string().max(4096).optional(),
   sshPrivateKey: z.string().max(20000).optional(),
+  viaMachineId: z.number().int().min(0).optional(),
   expiresAt: z.number().int().nullable().optional(),
   purchaseAmount: z.number().nonnegative().max(1_000_000_000).optional(),
   billingCycle: z.enum(["month", "quarter", "half_year", "year", "two_year", "three_year"]).optional(),

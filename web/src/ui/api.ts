@@ -103,6 +103,9 @@ export type Machine = {
   sshAuthType?: "password" | "key";
   sshHasPassword?: boolean;
   sshHasKey?: boolean;
+  /** Machine id this host is reached through (0/absent = direct). */
+  viaMachineId?: number;
+  viaName?: string;
   expiresAt: number | null;
   purchaseAmountCents: number;
   billingCycle: "month" | "quarter" | "half_year" | "year" | "two_year" | "three_year";

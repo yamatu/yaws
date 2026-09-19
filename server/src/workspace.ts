@@ -7,7 +7,7 @@ import express, {
 import { z } from "zod";
 import type { Db } from "./db.js";
 import type { AuthedRequest } from "./http.js";
-import { address, inspectHost, sshMachine, WorkspaceError } from "./ssh.js";
+import { address, inspectMachine, sshMachine, WorkspaceError } from "./ssh.js";
 import {
   withFiles,
   lockedWrite,
@@ -87,7 +87,9 @@ export function workspaceRouter(db: Db, secret: string) {
         const machine = sshMachine(db, id(req));
         res.json({
           address: address(machine),
-          fingerprint: await inspectHost(machine),
+          // Read over the machine's relays when it has any, otherwise the
+          // fingerprint of an internal host could never be trusted.
+          fingerprint: await inspectMachine(db, id(req), secret),
         });
       } finally {
         inspections.delete(id(req));

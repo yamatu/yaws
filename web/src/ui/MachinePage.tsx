@@ -8,6 +8,7 @@ import { UsageMeter } from "./UsageMeter";
 import { useDocumentTitle } from "./documentTitle";
 import { getToken } from "./auth";
 import { AgentInstall } from "./AgentInstall";
+import { viaCandidates, viaNames } from "./sshVia";
 
 export function MachinePage() {
   const { id } = useParams();
@@ -45,6 +46,9 @@ export function MachinePage() {
   const [editSshPrivateKey, setEditSshPrivateKey] = useState("");
   const [clearSshPassword, setClearSshPassword] = useState(false);
   const [clearSshKey, setClearSshKey] = useState(false);
+  const [editVia, setEditVia] = useState<number>(0);
+  // Other machines, used to offer possible SSH relays for this one.
+  const [allMachines, setAllMachines] = useState<Machine[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -80,6 +84,7 @@ export function MachinePage() {
         setEditSshPort(Number(m.sshPort ?? 22));
         setEditSshUser((m.sshUser ?? "").trim());
         setEditSshAuthType((m.sshAuthType ?? "password") as any);
+        setEditVia(Number(m.viaMachineId ?? 0));
         setEditSshPassword("");
         setEditSshPrivateKey("");
         setClearSshPassword(false);
@@ -91,8 +96,7 @@ export function MachinePage() {
         setMachineLoadError(e?.message ?? "加载失败");
       });
 
-    void apiFetch<{ metrics: Metric[] }>(`/api/machines/${machineId}/metrics?limit=300`, { signal: ac.signal })
-      .then((res) => {
+    void apiFetch<{ metrics: Metric[] }>(`/api/machines/${machineId}/metrics?limit=300`, { signal: ac.signal })      .then((res) => {
         if (!alive) return;
         setMetrics((current) => {
           const byTime = new Map<number, Metric>();
@@ -109,6 +113,12 @@ export function MachinePage() {
     )
       .then((res) => {
         if (alive) setMonthRows(res.rows);
+      })
+      .catch(() => {});
+
+    void apiFetch<{ machines: Machine[] }>("/api/machines", { signal: ac.signal })
+      .then((res) => {
+        if (alive) setAllMachines(res.machines);
       })
       .catch(() => {});
 
@@ -367,6 +377,11 @@ export function MachinePage() {
           <span className="yaws-badge border-teal-400/20 bg-teal-500/8 text-teal-300/80">
             账期流量：RX {formatBytes(machine.monthTraffic?.rxBytes ?? 0)} · TX {formatBytes(machine.monthTraffic?.txBytes ?? 0)}
           </span>
+          {viaNames(allMachines, machine.id).length ? (
+            <span className="yaws-badge border-sky-400/20 bg-sky-500/8 text-sky-300/80">
+              {`经由 ${viaNames(allMachines, machine.id).join(" → ")}`}
+            </span>
+          ) : null}
         </div>
 
         {machine.notes ? <div className="mt-3 whitespace-pre-wrap text-sm text-white/50">{machine.notes}</div> : null}
@@ -768,6 +783,26 @@ export function MachinePage() {
                 )}
 
                 <div className="mt-2 text-xs text-white/50">提示：SSH 连接由主控发起，请确保主控能访问该 Host:Port。</div>
+                <div className="mt-3">
+                  <div className="mb-1 text-xs text-white/40">
+                    中转主机（内网机器只能被某台服务器访问时选择）
+                  </div>
+                  <select
+                    className="yaws-select w-full text-sm"
+                    value={editVia}
+                    onChange={(e) => setEditVia(Number(e.target.value))}
+                  >
+                    <option value={0}>直连（默认）</option>
+                    {viaCandidates(allMachines, machineId, editVia).map((host) => (
+                      <option key={host.id} value={host.id}>
+                        {host.name} (#{host.id})
+                      </option>
+                    ))}
+                  </select>
+                  <div className="mt-1 text-xs text-white/35">
+                    选择后，终端、文件、探针安装都会先 SSH 到中转主机再由它转发；两台主机的主机指纹都需要确认。
+                  </div>
+                </div>
               </div>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <div>
@@ -831,6 +866,7 @@ export function MachinePage() {
                           sshPort: editSshPort,
                           sshUser: editSshUser,
                           sshAuthType: editSshAuthType,
+                          viaMachineId: editVia,
                           ...(clearSshPassword ? { sshPassword: "" } : editSshPassword ? { sshPassword: editSshPassword } : {}),
                           ...(clearSshKey ? { sshPrivateKey: "" } : editSshPrivateKey ? { sshPrivateKey: editSshPrivateKey } : {}),
                           expiresAt,
@@ -850,6 +886,9 @@ export function MachinePage() {
                               sshPort: editSshPort,
                               sshUser: editSshUser,
                               sshAuthType: editSshAuthType,
+                              viaMachineId: editVia,
+                              viaName:
+                                allMachines.find((x) => x.id === editVia)?.name ?? "",
                               sshHasPassword: clearSshPassword ? false : editSshPassword ? true : !!prev.sshHasPassword,
                               sshHasKey: clearSshKey ? false : editSshPrivateKey ? true : !!prev.sshHasKey,
                               expiresAt,

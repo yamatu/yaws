@@ -255,6 +255,10 @@ function migrate(db: Db) {
     { name: "ssh_auth_type", sql: "ALTER TABLE machines ADD COLUMN ssh_auth_type TEXT NOT NULL DEFAULT 'password'" },
     { name: "ssh_password_enc", sql: "ALTER TABLE machines ADD COLUMN ssh_password_enc TEXT NOT NULL DEFAULT ''" },
     { name: "ssh_key_enc", sql: "ALTER TABLE machines ADD COLUMN ssh_key_enc TEXT NOT NULL DEFAULT ''" },
+    // SSH relay: the machine this one is reached through, 0 for a direct
+    // connection. Internal hosts without a route of their own borrow one from
+    // a public jump host this way.
+    { name: "via_machine_id", sql: "ALTER TABLE machines ADD COLUMN via_machine_id INTEGER NOT NULL DEFAULT 0" },
     { name: "expires_at", sql: "ALTER TABLE machines ADD COLUMN expires_at INTEGER" },
     {
       name: "purchase_amount_cents",
