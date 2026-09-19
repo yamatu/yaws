@@ -35,6 +35,7 @@ import {
 import { getToken } from "./auth";
 import { workspaceError } from "./workspaceErrors";
 import { ConversationPicker } from "./ConversationPicker";
+import { McpSettings } from "./McpSettings";
 import { Markdown } from "./MarkdownView";
 import { orderTurnEntries } from "./chatOrder";
 import type { Conversation } from "./conversations";
@@ -74,9 +75,15 @@ type Proposal = {
   summary: string;
   result: { output?: string; code?: number | null; backup?: string | null } | null;
 };
+type Usage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
 type Entry =
   | { key: string; kind: "user"; text: string }
   | { key: string; kind: "assistant"; text: string }
+  | { key: string; kind: "thinking"; text: string }
   | { key: string; kind: "tool"; tool: Tool }
   | { key: string; kind: "proposal"; proposal: Proposal }
   | { key: string; kind: "error"; text: string };
@@ -198,6 +205,9 @@ export function AiChat({
     model: "",
   });
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
+  const [openThinking, setOpenThinking] = useState<Record<string, boolean>>({});
+  // Tokens reported by the provider for the last answer; shown after it ends.
+  const [usage, setUsage] = useState<Usage | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   // A run that is still going on the server after this view left, e.g. the
   // floating panel was collapsed mid-answer. We poll it until it finishes
@@ -300,6 +310,7 @@ export function AiChat({
       }
       setEntries(restored);
       setConversationId(id);
+      setUsage(null);
       if (data.conversation.root) setRoot(data.conversation.root);
       try {
         localStorage.setItem(chatKey(machineId), id);
@@ -421,6 +432,7 @@ export function AiChat({
     setError("");
     setNotice("");
     setProgress(null);
+    setUsage(null);
     setFollowing(false);
     clock.current = { start: 0, end: 0 };
     try {
@@ -597,6 +609,22 @@ export function AiChat({
         copy[index] = { key: copy[index].key, kind: "proposal", proposal };
         return copy;
       });
+    } else if (event.type === "thinking") {
+      // Reasoning streams on its own channel: it is shown apart from the answer
+      // so a model that thinks out loud cannot be mistaken for a reply.
+      const text = String(event.text ?? "");
+      if (text)
+        setEntries((old) => {
+          const copy = old.slice();
+          const last = copy[copy.length - 1];
+          if (last?.kind === "thinking") {
+            copy[copy.length - 1] = { ...last, text: last.text + text };
+            return copy;
+          }
+          return [...copy, { key: nextKey(), kind: "thinking", text }];
+        });
+    } else if (event.type === "usage") {
+      setUsage(event.usage as Usage);
     } else if (event.type === "delta") {
       setEntries((old) => {
         const copy = old.slice();
@@ -651,6 +679,7 @@ export function AiChat({
     push({ key: nextKey(), kind: "user", text: message });
     setBusy(true);
     setProgress(startProgress());
+    setUsage(null);
     clock.current = { start: Date.now(), end: 0 };
     const ac = new AbortController();
     controller.current = ac;
@@ -1017,6 +1046,7 @@ export function AiChat({
               </div>
             </>
           ) : null}
+          <McpSettings />
         </form>
       )}
       <div className="ai-chat-transcript" ref={transcript}>
@@ -1085,6 +1115,32 @@ export function AiChat({
                 </button>
                 {open && entry.tool.output ? (
                   <pre className="ai-tool-out">{entry.tool.output}</pre>
+                ) : null}
+              </div>
+            );
+          }
+          if (entry.kind === "thinking") {
+            // Open while it is the newest thing on screen, collapsed once the
+            // answer it produced starts to arrive.
+            const open =
+              openThinking[entry.key] ??
+              (busy && entry.key === ordered[ordered.length - 1]?.key);
+            return (
+              <div key={entry.key} className="ai-thinking">
+                <button
+                  type="button"
+                  className="ai-thinking-head"
+                  aria-expanded={open}
+                  onClick={() =>
+                    setOpenThinking((old) => ({ ...old, [entry.key]: !open }))
+                  }
+                >
+                  {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  <Sparkles size={13} />
+                  <span>思考过程</span>
+                </button>
+                {open ? (
+                  <div className="ai-thinking-text">{entry.text}</div>
                 ) : null}
               </div>
             );
@@ -1187,6 +1243,12 @@ export function AiChat({
           title={progressLabel(progress, elapsed, pending)}
         >
           {progressLabel(progress, elapsed, pending)}
+        </div>
+      ) : null}
+      {usage && !busy ? (
+        <div className="ai-usage">
+          输入 {usage.promptTokens} · 输出 {usage.completionTokens} · 共{" "}
+          {usage.totalTokens} tokens
         </div>
       ) : null}
       {error && (

@@ -58,12 +58,31 @@ const errors: Record<string, string> = {
   command_output_limit: "远程命令输出过多",
   forbidden: "仅管理员可用",
   model_network_error: "AI 接口连接失败或超时",
+  model_invalid_json: "AI 接口返回了无法解析的数据",
+  model_response_too_large: "AI 返回的内容过大，已中断",
+  model_timeout: "AI 接口响应超时",
   model_http_401: "AI 密钥无效",
   model_http_400: "AI 接口拒绝请求，请检查模型、协议和推理级别",
   model_http_404: "AI 接口路径或模型不存在",
   file_path_changed: "文件路径发生变化，请重新生成方案",
+  mcp_command_required: "请填写 MCP 服务的启动命令",
+  mcp_url_invalid: "MCP 服务地址无效，需要 http(s) 地址",
+  duplicate_mcp_server: "存在重复的 MCP 服务标识",
+  mcp_server_not_found: "MCP 服务不存在或已被删除",
+  mcp_call_failed: "调用 MCP 工具失败",
+  mcp_invalid_tool_list: "MCP 服务返回的工具列表无法解析",
+  mcp_no_response: "MCP 服务没有返回结果",
 };
 export function workspaceError(error: unknown) {
   const text = error instanceof Error ? error.message : "请求失败";
-  return errors[text] ?? text;
+  if (errors[text]) return errors[text];
+  // MCP failures carry dynamic detail (method, exit code, HTTP status).
+  if (text.startsWith("mcp_timeout")) return "MCP 服务响应超时";
+  if (text.startsWith("mcp_http_"))
+    return `MCP 服务返回 HTTP ${text.slice("mcp_http_".length)}`;
+  if (text.startsWith("mcp_exit")) return "MCP 服务进程已退出";
+  if (text.startsWith("mcp_rpc")) return "MCP 服务返回错误";
+  if (text.startsWith("spawn "))
+    return "无法启动 MCP 服务，请检查启动命令是否存在";
+  return text;
 }

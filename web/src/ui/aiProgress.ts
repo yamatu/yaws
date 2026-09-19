@@ -115,6 +115,12 @@ export function acceptEvent(prev: Progress | null, event: Event): Progress | nul
       last: "error",
     };
   }
+  if (kind === "thinking") {
+    // Reasoning resumed for another step. A run that is already writing its
+    // answer or waiting for the operator must not slip back to "thinking".
+    if (prev.kind === "writing" || prev.kind === "waiting") return prev;
+    return { ...prev, kind: "thinking", last: "" };
+  }
   if (kind === "delta" || kind === "answer")
     return prev.kind === "writing" ? prev : { ...prev, kind: "writing", last: "" };
   if (kind === "error") return { ...prev, kind: "failed", last: "" };

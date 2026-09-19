@@ -234,7 +234,20 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-profile-dot { width: 7px; height: 7px; border-radius: 50%; background: #86efac; }
 .ai-profile-warn { width: 14px; height: 14px; border-radius: 50%; background: #78511a; color: #fcd34d; font-size: 10px; line-height: 14px; text-align: center; }
 .ai-profile-keynote { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: #8d97a2; }
-.ai-settings-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; }
+.ai-settings-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+/* MCP servers panel: a full-width block inside the AI settings grid. */
+.mcp-settings { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 4px; padding-top: 12px; border-top: 1px solid #2c3238; }
+.ai-chat.compact .mcp-settings { grid-template-columns: minmax(0,1fr); }
+.mcp-hint { grid-column: 1 / -1; margin: 0; font-size: 11px; color: #8d97a2; }
+.mcp-pairs { grid-column: 1 / -1; display: grid; gap: 6px; }
+.mcp-pairs-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: #b5bec8; }
+.mcp-pair-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.4fr) 28px; gap: 6px; align-items: center; }
+.mcp-pair-row .icon-btn { width: 28px; height: 28px; padding: 0; }
+.mcp-tools { grid-column: 1 / -1; font-size: 12px; color: #b5bec8; }
+.mcp-tools .ai-chips { margin-top: 6px; }
+.mcp-notice { grid-column: 1 / -1; margin: 0; font-size: 12px; color: #86efac; }
+.mcp-error { grid-column: 1 / -1; margin: 0; font-size: 12px; color: #fda4af; overflow-wrap: anywhere; }
+.mcp-settings textarea.yaws-input { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .yaws-btn.danger { border-color: #7f1d1d; color: #fda4af; }
 .ai-chat-transcript { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
 /* Message rows always keep their natural height: a tall tool card or diff must
@@ -261,6 +274,12 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-tool-state.error { color: #fda4af; }
 .ai-tool-state.awaiting { color: #fcd34d; }
 .ai-tool-out { max-height: 260px; margin: 0; padding: 8px 10px; border-top: 1px solid #333a41; background: #111417; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
+.ai-thinking { border: 1px dashed #3a4149; border-radius: 6px; background: #191d22; overflow: hidden; }
+.ai-thinking-head { display: flex; align-items: center; gap: 6px; width: 100%; padding: 5px 9px; border: 0; background: none; color: #93a1b0; font-size: 12px; text-align: left; cursor: pointer; }
+.ai-thinking-head:hover { background: #20252b; }
+.ai-thinking-head:focus-visible { outline: 2px solid #38bdf8; outline-offset: -2px; }
+.ai-thinking-text { max-height: 240px; padding: 6px 10px 8px; border-top: 1px dashed #3a4149; color: #8d97a2; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
+.ai-usage { flex: 0 0 auto; padding: 3px 12px 6px; background: #171c21; color: #6b7681; font-size: 11px; font-variant-numeric: tabular-nums; }
 .ai-tag { flex: 0 0 auto; padding: 1px 7px; border-radius: 999px; background: #2c3238; color: #a8b2bd; font-size: 11px; }
 .ai-tag.ok,.ai-tag.applied { background: #183528; color: #86efac; }
 .ai-tag.failed { background: #462329; color: #fda4af; }

@@ -7,6 +7,7 @@ const user = (id) => ({ key: id, kind: "user" });
 const answer = (id) => ({ key: id, kind: "assistant", text: id });
 const tool = (id) => ({ key: id, kind: "tool", tool: { id } });
 const proposal = (id) => ({ key: id, kind: "proposal", proposal: { id } });
+const thinking = (id) => ({ key: id, kind: "thinking", text: id });
 
 const keys = (entries) => entries.map((entry) => entry.key);
 
@@ -48,6 +49,19 @@ test("a transcript without user messages still lists steps first", () => {
     keys(orderTurnEntries([answer("a1"), tool("t1"), tool("t2")])),
     ["t1", "t2", "a1"],
   );
+});
+
+test("reasoning reads with the steps, above the answer", () => {
+  // The model thinks, then acts, then thinks again: all of it belongs to the
+  // turn's steps, and the answer closes the turn.
+  const ordered = orderTurnEntries([
+    user("u1"),
+    thinking("k1"),
+    tool("t1"),
+    thinking("k2"),
+    answer("a1"),
+  ]);
+  assert.deepEqual(keys(ordered), ["u1", "k1", "t1", "k2", "a1"]);
 });
 
 test("entries are never dropped and the input is not mutated", () => {

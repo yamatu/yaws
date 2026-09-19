@@ -512,6 +512,108 @@ test("ai chat", async (t) => {
     assert.equal(turn.events.at(-1).type, "done");
   });
 
+  await t.test("the answer streams in as the model writes it", async () => {
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[sse][md] 总结磁盘情况",
+      autoRun: "read",
+    });
+    assert.equal(turn.status, 200, turn.body);
+    assert.equal(
+      f.modelRequests.at(-1).stream,
+      true,
+      "the chat call asks the model to stream",
+    );
+    const deltas = turn.events.filter((e) => e.type === "delta");
+    assert.ok(
+      deltas.length > 3,
+      `expected many token deltas, got ${deltas.length}`,
+    );
+    const streamed = deltas.map((e) => e.text).join("");
+    assert.equal(
+      streamed,
+      turn.events.find((e) => e.type === "answer").text,
+      "the deltas add up to the final answer",
+    );
+    // Reasoning travels on its own channel so it never mixes with the answer.
+    const thinking = turn.events
+      .filter((e) => e.type === "thinking")
+      .map((e) => e.text)
+      .join("");
+    assert.equal(thinking, "先看一下磁盘。");
+    assert.equal(streamed.includes("先看一下磁盘"), false);
+    const usage = turn.events.find((e) => e.type === "usage");
+    assert.equal(usage.usage.promptTokens, 21);
+    assert.equal(usage.usage.completionTokens, 8);
+    assert.equal(usage.usage.totalTokens, 29);
+    assert.equal(turn.events.at(-1).type, "done");
+  });
+
+  await t.test("tool calls are reassembled from streamed fragments", async () => {
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[sse][run] 看一下磁盘",
+      autoRun: "read",
+    });
+    const tool = toolsOf(turn)[0];
+    assert.equal(tool.name, "run_command");
+    assert.equal(tool.detail, "df -h /");
+    assert.equal(tool.state, "ok", turn.body);
+    assert.ok(
+      turn.events.some((e) => e.type === "toolcall" && e.name === "run_command"),
+      "the tool name is surfaced while its arguments stream",
+    );
+    assert.equal(turn.events.at(-1).type, "done");
+  });
+
+  await t.test("a streaming gateway that rejects stream_options still works", async () => {
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[strict][sse][md] 换个端点再试",
+      autoRun: "read",
+    });
+    assert.equal(turn.status, 200, turn.body);
+    const answer = turn.events.find((e) => e.type === "answer");
+    assert.match(answer.text, /磁盘排查结论/);
+    // The retry drops the optional field, so no usage is reported and none is faked.
+    assert.equal(turn.events.some((e) => e.type === "usage"), false);
+    assert.equal(turn.events.at(-1).type, "done");
+  });
+
+  await t.test("the responses protocol streams the same way", async () => {
+    assert.equal(
+      (await request(f, "/api/ai/settings", "PUT", {
+        ...settings(f),
+        protocol: "responses",
+      })).status,
+      200,
+    );
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[sse][run] 用 responses 协议看一下磁盘",
+      autoRun: "read",
+    });
+    assert.equal(turn.status, 200, turn.body);
+    const tool = toolsOf(turn)[0];
+    assert.equal(tool.name, "run_command");
+    assert.equal(tool.detail, "df -h /");
+    assert.equal(tool.state, "ok", turn.body);
+    const deltas = turn.events.filter((e) => e.type === "delta");
+    assert.ok(deltas.length > 3, turn.body);
+    assert.equal(
+      deltas.map((e) => e.text).join(""),
+      turn.events.find((e) => e.type === "answer").text,
+    );
+    assert.ok(turn.events.some((e) => e.type === "thinking"));
+    assert.equal(turn.events.at(-1).type, "done");
+    assert.ok(Array.isArray(f.modelRequests.at(-1).input));
+    // Leave the chat protocol active for the tests that follow.
+    assert.equal(
+      (await request(f, "/api/ai/settings", "PUT", settings(f))).status,
+      200,
+    );
+  });
+
   await t.test("conversations keep their history", async () => {
     const first = await chat(f, {
       root: "/srv/app",

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import https from "node:https";
 import http from "node:http";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import { lookup } from "node:dns/promises";
 import { randomUUID } from "node:crypto";
 import ipaddr from "ipaddr.js";
@@ -33,6 +34,16 @@ import {
   type AIConfig,
   type LoadedProfile,
 } from "./ai-profiles.js";
+import {
+  MCPServerSchema,
+  McpManager,
+  mergeMcpSecrets,
+  mcpServerError,
+  probeMcpServer,
+  publicMcpServers,
+  readMcpServers,
+  writeMcpServers,
+} from "./mcp.js";
 
 const Config = AIConfigSchema;
 export type { AIConfig };
@@ -45,6 +56,10 @@ const ProfilesBody = z.object({
   activeId: z.string().max(64).default(""),
 });
 const ProfileRef = z.object({ id: z.string().trim().min(1).max(64) });
+const McpBody = z.object({
+  servers: z.array(MCPServerSchema).max(50),
+});
+const McpTestBody = z.object({ server: MCPServerSchema });
 export function publicAddress(address: string) {
   try {
     return ipaddr.process(address).range() === "unicast";
@@ -52,11 +67,21 @@ export function publicAddress(address: string) {
     return false;
   }
 }
-export async function modelRequest(
+type ModelTarget = {
+  endpoint: URL;
+  hostname: string;
+  address: { address: string; family: number };
+};
+
+/**
+ * Validates the configured endpoint and resolves it to one public address.
+ * Shared by the buffered and streaming callers so both apply the same SSRF
+ * checks: https required, no credentials in the URL, public DNS only.
+ */
+async function modelTarget(
   config: AIConfig,
-  body: unknown,
   signal: AbortSignal,
-): Promise<unknown> {
+): Promise<ModelTarget> {
   const endpoint = new URL(config.baseUrl);
   if (
     endpoint.username ||
@@ -75,29 +100,46 @@ export async function modelRequest(
   if (!endpoint.pathname.replace(/\/$/, "").endsWith(suffix))
     endpoint.pathname = endpoint.pathname.replace(/\/$/, "") + suffix;
   const hostname = endpoint.hostname.replace(/^\[|\]$/g, "");
-  const addresses = await new Promise<
-    Array<{ address: string; family: number }>
-  >((resolve, reject) => {
-    const abort = () => reject(new WorkspaceError(499, "cancelled"));
-    if (signal.aborted) return abort();
-    signal.addEventListener("abort", abort, { once: true });
-    void lookup(hostname, { all: true })
-      .then(resolve, () => reject(new WorkspaceError(502, "model_dns_failed")))
-      .finally(() => signal.removeEventListener("abort", abort));
-  });
+  const addresses = await new Promise<Array<{ address: string; family: number }>>(
+    (resolve, reject) => {
+      const abort = () => reject(new WorkspaceError(499, "cancelled"));
+      if (signal.aborted) return abort();
+      signal.addEventListener("abort", abort, { once: true });
+      void lookup(hostname, { all: true })
+        .then(resolve, () => reject(new WorkspaceError(502, "model_dns_failed")))
+        .finally(() => signal.removeEventListener("abort", abort));
+    },
+  );
   if (
     !addresses.length ||
     (!config.allowPrivate && addresses.some((a) => !publicAddress(a.address)))
   )
     throw new WorkspaceError(403, "private_ai_endpoint_blocked");
-  const payload = Buffer.from(JSON.stringify(body));
-  return new Promise((resolve, reject) => {
-    const selected = addresses[0];
+  return { endpoint, hostname, address: addresses[0] };
+}
+
+type ModelResponseHandler = (
+  response: IncomingMessage,
+  request: ClientRequest,
+  resolve: () => void,
+  reject: (error: unknown) => void,
+) => void;
+
+/** One POST to the model endpoint; the caller owns the response body. */
+function modelPost(
+  target: ModelTarget,
+  config: AIConfig,
+  payload: Buffer,
+  signal: AbortSignal,
+  onResponse: ModelResponseHandler,
+): Promise<void> {
+  const { endpoint, hostname, address } = target;
+  return new Promise<void>((resolve, reject) => {
     const request = (endpoint.protocol === "https:" ? https : http).request(
       {
         protocol: endpoint.protocol,
-        hostname: selected.address,
-        family: selected.family,
+        hostname: address.address,
+        family: address.family,
         port: endpoint.port || undefined,
         servername: hostname,
         path: endpoint.pathname,
@@ -108,36 +150,13 @@ export async function modelRequest(
           Host: endpoint.host,
           "content-type": "application/json",
           "content-length": String(payload.length),
+          accept: "text/event-stream, application/json",
           ...(config.apiKey
             ? { authorization: `Bearer ${config.apiKey}` }
             : {}),
         },
       },
-      (response) => {
-        let size = 0;
-        const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => {
-          size += chunk.length;
-          if (size > 2 * 1024 * 1024) {
-            request.destroy();
-            reject(new WorkspaceError(413, "model_response_too_large"));
-          } else chunks.push(chunk);
-        });
-        response.on("end", () => {
-          if ((response.statusCode ?? 500) >= 300)
-            return reject(
-              new WorkspaceError(502, `model_http_${response.statusCode}`),
-            );
-          try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-          } catch {
-            reject(new WorkspaceError(502, "model_invalid_json"));
-          }
-        });
-        response.on("error", () =>
-          reject(new WorkspaceError(502, "model_network_error")),
-        );
-      },
+      (response) => onResponse(response, request, resolve, reject),
     );
     request.on("timeout", () => request.destroy(new Error("model_timeout")));
     request.on("error", () =>
@@ -150,6 +169,407 @@ export async function modelRequest(
     );
     request.end(payload);
   });
+}
+
+export async function modelRequest(
+  config: AIConfig,
+  body: unknown,
+  signal: AbortSignal,
+): Promise<unknown> {
+  const target = await modelTarget(config, signal);
+  const payload = Buffer.from(JSON.stringify(body));
+  let result: unknown;
+  await modelPost(
+    target,
+    config,
+    payload,
+    signal,
+    (response, request, resolve, reject) => {
+      let size = 0;
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > 2 * 1024 * 1024) {
+          request.destroy();
+          reject(new WorkspaceError(413, "model_response_too_large"));
+        } else chunks.push(chunk);
+      });
+      response.on("end", () => {
+        if ((response.statusCode ?? 500) >= 300)
+          return reject(
+            new WorkspaceError(502, `model_http_${response.statusCode}`),
+          );
+        try {
+          result = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          resolve();
+        } catch {
+          reject(new WorkspaceError(502, "model_invalid_json"));
+        }
+      });
+      response.on("error", () =>
+        reject(new WorkspaceError(502, "model_network_error")),
+      );
+    },
+  );
+  return result;
+}
+
+/** Token usage normalized across the chat and responses protocols. */
+export type ModelUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
+export type ModelToolCall = {
+  id: string;
+  name: string;
+  arguments: string;
+};
+
+/** One completed model message, assembled from the stream. */
+export type ModelTurn = {
+  content: string;
+  reasoning: string;
+  toolCalls: ModelToolCall[];
+  usage: ModelUsage | null;
+  /** Responses protocol: the output items to replay as history. */
+  output: unknown[];
+};
+
+/**
+ * The same event shape pi streams from the model: text, reasoning and tool-call
+ * fragments as they arrive, plus usage. The chat endpoint forwards these instead
+ * of waiting for the whole completion, so the answer appears token by token.
+ */
+export type ModelDelta =
+  | { type: "text"; text: string }
+  | { type: "thinking"; text: string }
+  /** A tool call was announced; its arguments keep streaming afterwards. */
+  | { type: "toolcall"; index: number; name: string }
+  | { type: "usage"; usage: ModelUsage };
+
+function normalizeUsage(raw: unknown): ModelUsage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const pick = (...keys: string[]) => {
+    for (const key of keys) {
+      const number = Number(value[key]);
+      if (Number.isFinite(number) && number > 0) return number;
+    }
+    return 0;
+  };
+  const promptTokens = pick("prompt_tokens", "input_tokens");
+  const completionTokens = pick("completion_tokens", "output_tokens");
+  const totalTokens = pick("total_tokens") || promptTokens + completionTokens;
+  if (!promptTokens && !completionTokens && !totalTokens) return null;
+  return { promptTokens, completionTokens, totalTokens };
+}
+
+/** Joins the text of assistant message items in a responses `output` array. */
+function textFromOutput(output: unknown[]): string {
+  const parts: string[] = [];
+  for (const item of output as Array<{
+    type?: string;
+    content?: Array<{ text?: string }> | null;
+  }>) {
+    if (!item || item.type !== "message") continue;
+    for (const part of item.content ?? [])
+      if (typeof part.text === "string" && part.text) parts.push(part.text);
+  }
+  return parts.join("");
+}
+
+/**
+ * Streams one completion, calling `onDelta` per fragment and resolving with the
+ * assembled message.
+ *
+ * Works with both protocols: chat completions read `choices[].delta`, the
+ * responses API reads `response.output_text.delta` / `response.function_call_*`
+ * events and the authoritative `response.completed` payload. Providers that
+ * ignore `stream` and answer with plain JSON are handled by the buffered
+ * fallback, so nothing regresses for an endpoint that cannot stream.
+ */
+export async function streamModel(
+  config: AIConfig,
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+  onDelta: (delta: ModelDelta) => void,
+): Promise<ModelTurn> {
+  const target = await modelTarget(config, signal);
+  const chat = config.protocol === "chat";
+
+  const attempt = async (extra: Record<string, unknown>): Promise<ModelTurn> => {
+    const payload = Buffer.from(
+      JSON.stringify({ ...body, stream: true, ...extra }),
+    );
+    const text: string[] = [];
+    const reasoning: string[] = [];
+    const calls = new Map<number, ModelToolCall>();
+    const funcs = new Map<
+      string,
+      { index: number; call: ModelToolCall }
+    >();
+    const output: unknown[] = [];
+    let usage: ModelUsage | null = null;
+
+    const usageFrom = (raw: unknown) => {
+      const value = normalizeUsage(raw);
+      if (!value) return;
+      usage = value;
+      onDelta({ type: "usage", usage: value });
+    };
+    const pushText = (value: string) => {
+      if (!value) return;
+      text.push(value);
+      onDelta({ type: "text", text: value });
+    };
+    const pushThinking = (value: string) => {
+      if (!value) return;
+      reasoning.push(value);
+      onDelta({ type: "thinking", text: value });
+    };
+
+    const applyChat = (chunk: any) => {
+      if (chunk?.usage) usageFrom(chunk.usage);
+      const choice = Array.isArray(chunk?.choices) ? chunk.choices[0] : null;
+      const delta = choice?.delta ?? choice?.message ?? null;
+      if (delta) {
+        if (typeof delta.content === "string") pushText(delta.content);
+        const think = delta.reasoning_content ?? delta.reasoning;
+        if (typeof think === "string") pushThinking(think);
+        for (const [position, call] of (
+          Array.isArray(delta.tool_calls) ? delta.tool_calls : []
+        ).entries()) {
+          const index = Number.isInteger(call?.index) ? call.index : position;
+          const slot = calls.get(index) ?? { id: "", name: "", arguments: "" };
+          if (typeof call?.id === "string" && call.id) slot.id = call.id;
+          const fn = call?.function ?? {};
+          if (typeof fn.name === "string" && fn.name) {
+            slot.name = fn.name;
+            onDelta({ type: "toolcall", index, name: slot.name });
+          }
+          if (typeof fn.arguments === "string" && fn.arguments)
+            slot.arguments += fn.arguments;
+          calls.set(index, slot);
+        }
+      }
+    };
+
+    const applyResponses = (event: any) => {
+      if (event?.usage) usageFrom(event.usage);
+      switch (event?.type) {
+        case "response.output_text.delta":
+          pushText(String(event.delta ?? ""));
+          return;
+        case "response.reasoning_summary_text.delta":
+        case "response.reasoning_text.delta":
+          pushThinking(String(event.delta ?? ""));
+          return;
+        case "response.output_item.added": {
+          const item = event.item;
+          if (item?.type !== "function_call") return;
+          const index = Number.isInteger(event.output_index)
+            ? event.output_index
+            : funcs.size;
+          const id = String(item.id ?? `call_${index}`);
+          funcs.set(id, {
+            index,
+            call: {
+              id: String(item.call_id || item.id || `call_${index}`),
+              name: String(item.name ?? ""),
+              arguments: String(item.arguments ?? ""),
+            },
+          });
+          onDelta({ type: "toolcall", index, name: String(item.name ?? "") });
+          return;
+        }
+        case "response.function_call_arguments.delta": {
+          const slot = funcs.get(String(event.item_id ?? ""));
+          if (slot) slot.call.arguments += String(event.delta ?? "");
+          return;
+        }
+        case "response.function_call_arguments.done": {
+          const slot = funcs.get(String(event.item_id ?? ""));
+          if (slot && typeof event.arguments === "string")
+            slot.call.arguments = event.arguments;
+          return;
+        }
+        case "response.output_item.done": {
+          const item = event.item as { type?: string } | null;
+          if (!item || item.type === "function_call") return;
+          if (Number.isInteger(event.output_index))
+            output[event.output_index] = item;
+          else output.push(item);
+          return;
+        }
+        case "response.completed": {
+          const completed = event.response;
+          if (completed?.usage) usageFrom(completed.usage);
+          if (Array.isArray(completed?.output)) {
+            output.length = 0;
+            output.push(...completed.output);
+          }
+          return;
+        }
+        default:
+          return;
+      }
+    };
+
+    const applyBuffered = (parsed: any) => {
+      if (chat) {
+        const message = parsed?.choices?.[0]?.message ?? {};
+        if (typeof message.content === "string") pushText(message.content);
+        const think = message.reasoning_content ?? message.reasoning;
+        if (typeof think === "string") pushThinking(think);
+        for (const [index, call] of (
+          Array.isArray(message.tool_calls) ? message.tool_calls : []
+        ).entries())
+          calls.set(index, {
+            id: String(call?.id ?? `call_${index}`),
+            name: String(call?.function?.name ?? ""),
+            arguments: String(call?.function?.arguments ?? "{}"),
+          });
+        usageFrom(parsed?.usage);
+        return;
+      }
+      const items = Array.isArray(parsed?.output) ? parsed.output : [];
+      output.push(...items);
+      for (const [index, item] of items.entries()) {
+        if (item?.type !== "function_call") continue;
+        funcs.set(String(item.id ?? `call_${index}`), {
+          index,
+          call: {
+            id: String(item.call_id || item.id || `call_${index}`),
+            name: String(item.name ?? ""),
+            arguments: String(item.arguments ?? "{}"),
+          },
+        });
+      }
+      pushText(textFromOutput(items));
+      usageFrom(parsed?.usage);
+    };
+
+    await modelPost(
+      target,
+      config,
+      payload,
+      signal,
+      (response, request, resolve, reject) => {
+        const status = response.statusCode ?? 500;
+        if (status >= 300) {
+          request.destroy();
+          return reject(new WorkspaceError(502, `model_http_${status}`));
+        }
+        const contentType = String(response.headers["content-type"] ?? "");
+        // The endpoint ignored `stream` and answered with one JSON body.
+        if (!contentType.includes("text/event-stream")) {
+          let size = 0;
+          const chunks: Buffer[] = [];
+          response.on("data", (chunk: Buffer) => {
+            size += chunk.length;
+            if (size > 2 * 1024 * 1024) {
+              request.destroy();
+              reject(new WorkspaceError(413, "model_response_too_large"));
+            } else chunks.push(chunk);
+          });
+          response.on("end", () => {
+            try {
+              applyBuffered(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+              resolve();
+            } catch {
+              reject(new WorkspaceError(502, "model_invalid_json"));
+            }
+          });
+          response.on("error", () =>
+            reject(new WorkspaceError(502, "model_network_error")),
+          );
+          return;
+        }
+        let buffer = "";
+        let size = 0;
+        let pending: string[] = [];
+        const flush = () => {
+          if (!pending.length) return;
+          const data = pending.join("\n");
+          pending = [];
+          if (data === "[DONE]") return;
+          try {
+            const parsed = JSON.parse(data);
+            if (chat) applyChat(parsed);
+            else applyResponses(parsed);
+          } catch {
+            // A keep-alive or a provider-specific frame we do not understand.
+          }
+        };
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          size += Buffer.byteLength(chunk);
+          if (size > 8 * 1024 * 1024) {
+            request.destroy();
+            reject(new WorkspaceError(413, "model_response_too_large"));
+            return;
+          }
+          buffer += chunk;
+          for (;;) {
+            const at = buffer.indexOf("\n");
+            if (at < 0) break;
+            const line = buffer.slice(0, at).replace(/\r$/, "");
+            buffer = buffer.slice(at + 1);
+            if (!line) flush();
+            else if (line.startsWith("data:"))
+              pending.push(line.slice(5).replace(/^ /, ""));
+            // `event:`/`id:`/`:` lines carry nothing the payload lacks.
+          }
+        });
+        response.on("end", () => {
+          flush();
+          resolve();
+        });
+        response.on("error", () =>
+          reject(new WorkspaceError(502, "model_network_error")),
+        );
+      },
+    );
+
+    const toolCalls = chat
+      ? [...calls.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([, call], index) => ({
+            id: call.id || `call_${index}`,
+            name: call.name,
+            arguments: call.arguments || "{}",
+          }))
+      : [...funcs.values()]
+          .sort((a, b) => a.index - b.index)
+          .map((entry, index) => ({
+            id: entry.call.id || `call_${index}`,
+            name: entry.call.name,
+            arguments: entry.call.arguments || "{}",
+          }));
+    return {
+      content: text.join("") || textFromOutput(output),
+      reasoning: reasoning.join(""),
+      toolCalls,
+      usage,
+      output,
+    };
+  };
+
+  try {
+    // `include_usage` makes OpenAI-compatible chat endpoints report tokens on
+    // the final chunk.
+    return await attempt(
+      chat ? { stream_options: { include_usage: true } } : {},
+    );
+  } catch (e) {
+    // A gateway may reject the extra field; stream again without it rather than
+    // failing the whole answer.
+    if (chat && e instanceof WorkspaceError && e.message === "model_http_400")
+      return await attempt({});
+    throw e;
+  }
 }
 
 const tools = [
@@ -253,6 +673,7 @@ export { secretPath };
 export function aiRouter(db: Db, secret: string) {
   const router = Router({ mergeParams: true });
   const active = new Set<number>();
+  const mcp = new McpManager(db, secret);
   db.prepare("UPDATE ai_runs SET status='failed' WHERE status='running'").run();
   db.prepare(
     "UPDATE ai_proposals SET status='failed' WHERE status='applying'",
@@ -289,6 +710,39 @@ export function aiRouter(db: Db, secret: string) {
     writeProfiles(db, secret, list, id);
     res.json({ ok: true, activeId: id });
   });
+  // MCP servers: mounted tools the assistant may call next to its built-ins.
+  router.get("/mcp", (_req, res) => {
+    res.json(publicMcpServers(readMcpServers(db, secret)));
+  });
+  router.put("/mcp", (req, res) => {
+    const body = McpBody.parse(req.body);
+    const ids = new Set(body.servers.map((server) => server.id));
+    if (ids.size !== body.servers.length)
+      throw new WorkspaceError(400, "duplicate_mcp_server");
+    for (const server of body.servers) {
+      const bad = mcpServerError(server);
+      if (bad) throw new WorkspaceError(400, bad);
+    }
+    const next = mergeMcpSecrets(body.servers, readMcpServers(db, secret));
+    writeMcpServers(db, secret, next);
+    mcp.invalidate();
+    res.json(publicMcpServers(next));
+  });
+  router.post(
+    "/mcp/test",
+    route(async (req, res) => {
+      const { server } = McpTestBody.parse(req.body);
+      const merged = mergeMcpSecrets([server], readMcpServers(db, secret))[0];
+      try {
+        const probe = await probeMcpServer(merged);
+        res.json({ ok: true, tools: probe.tools });
+      } catch (e) {
+        if (e instanceof WorkspaceError) throw e;
+        // Surface why the handshake failed instead of a bare 500.
+        throw new WorkspaceError(502, (e as Error).message || "mcp_test_failed");
+      }
+    }),
+  );
   router.get("/settings", (_req, res) => {
     try {
       const { id, name, config } = load();
@@ -606,7 +1060,9 @@ export function aiRouter(db: Db, secret: string) {
       db,
       secret,
       load,
-      model: (config, body, signal) => modelRequest(config, body, signal),
+      stream: (config, body, signal, onDelta) =>
+        streamModel(config, body as Record<string, unknown>, signal, onDelta),
+      mcp,
     }),
   );
   router.get("/machines/:id/runs", (req, res) => {

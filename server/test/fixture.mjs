@@ -368,6 +368,115 @@ export async function harness(port = 0) {
     // the live status line before the answer arrives.
     if (marker.includes("[slow]"))
       await new Promise((done) => setTimeout(done, 1200));
+    // `[strict]` imitates a gateway that rejects the optional `stream_options`
+    // field, so the client has to retry without it instead of failing the answer.
+    if (marker.includes("[strict]") && body.stream_options) {
+      res.statusCode = 400;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ error: "unknown field stream_options" }));
+      return;
+    }
+    // `[sse]` answers the way a real provider does when it is asked to stream,
+    // so the token-by-token path can be asserted separately from the buffered
+    // fallback that every other test exercises.
+    if (body.stream && marker.includes("[sse]")) {
+      const pieces = (value) => value.match(/[\s\S]{1,4}/g) ?? [];
+      const spoken = calls.length ? preamble : answer;
+      res.setHeader("content-type", "text/event-stream");
+      res.setHeader("cache-control", "no-store");
+      const send = (frame) => res.write(`data: ${JSON.stringify(frame)}\n\n`);
+      if (chat) {
+        send({ choices: [{ delta: { reasoning_content: "先看一下磁盘。" } }] });
+        for (const piece of pieces(spoken))
+          send({ choices: [{ delta: { content: piece } }] });
+        for (const [index, call] of toolCalls.entries()) {
+          send({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index,
+                      id: call.id,
+                      function: { name: call.function.name, arguments: "" },
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+          for (const piece of pieces(call.function.arguments))
+            send({
+              choices: [
+                { delta: { tool_calls: [{ index, function: { arguments: piece } }] } },
+              ],
+            });
+        }
+        send({ choices: [{ delta: {}, finish_reason: "stop" }] });
+        // Usage is only reported when the client asked for it, like OpenAI.
+        if (body.stream_options)
+          send({
+            choices: [],
+            usage: { prompt_tokens: 21, completion_tokens: 8, total_tokens: 29 },
+          });
+      } else {
+        send({
+          type: "response.reasoning_summary_text.delta",
+          delta: "先看一下磁盘。",
+        });
+        for (const piece of pieces(spoken))
+          send({ type: "response.output_text.delta", delta: piece });
+        for (const [index, call] of toolCalls.entries()) {
+          send({
+            type: "response.output_item.added",
+            output_index: index,
+            item: {
+              type: "function_call",
+              id: `fc_${count}_${index}`,
+              call_id: call.id,
+              name: call.function.name,
+              arguments: "",
+            },
+          });
+          for (const piece of pieces(call.function.arguments))
+            send({
+              type: "response.function_call_arguments.delta",
+              item_id: `fc_${count}_${index}`,
+              delta: piece,
+            });
+          send({
+            type: "response.function_call_arguments.done",
+            item_id: `fc_${count}_${index}`,
+            arguments: call.function.arguments,
+          });
+        }
+        // The authoritative completion carries the items history is replayed from.
+        send({
+          type: "response.completed",
+          response: {
+            usage: { input_tokens: 21, output_tokens: 8, total_tokens: 29 },
+            output: calls.length
+              ? toolCalls.map((call, index) => ({
+                  type: "function_call",
+                  id: `fc_${count}_${index}`,
+                  call_id: call.id,
+                  name: call.function.name,
+                  arguments: call.function.arguments,
+                }))
+              : [
+                  {
+                    type: "message",
+                    role: "assistant",
+                    content: [{ type: "output_text", text: answer }],
+                  },
+                ],
+          },
+        });
+      }
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
     res.setHeader("content-type", "application/json");
     res.end(
       JSON.stringify(

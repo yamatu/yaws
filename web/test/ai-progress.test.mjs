@@ -91,6 +91,26 @@ test("streaming text means the answer is being written", () => {
   assert.match(progressLabel(progress, 12000), /第 2 步 · 正在整理回答… · 12 秒/);
 });
 
+test("streamed reasoning keeps the run in the thinking state", () => {
+  const progress = run([
+    { type: "start" },
+    tool("read_file", "/a", "ok"),
+    { type: "thinking", text: "先确认目录结构" },
+  ]);
+  assert.equal(progress.kind, "thinking");
+  assert.equal(progress.step, 2);
+  assert.equal(progress.last, "");
+  assert.match(progressLabel(progress, 3000), /第 2 步 · 正在思考… · 3 秒/);
+  // Reasoning must not undo an answer that is already streaming.
+  const writing = run([{ type: "start" }, { type: "delta", text: "结论" }]);
+  assert.equal(acceptEvent(writing, { type: "thinking", text: "又想了想" }).kind, "writing");
+  // Usage is reporting, not progress.
+  assert.equal(
+    acceptEvent(writing, { type: "usage", usage: { totalTokens: 9 } }),
+    writing,
+  );
+});
+
 test("only the done event reports a finished run", () => {
   const progress = run([
     { type: "start" },
