@@ -40,6 +40,7 @@ import {
   type LoadedExtensionTool,
   type LoadedExtensions,
 } from "./extensions.js";
+import { aiRuns } from "./ai-runs.js";
 
 export type ChatTool = {
   name: string;
@@ -330,7 +331,6 @@ export type ChatDeps = {
 export function chatRouter(deps: ChatDeps) {
   const { db, secret } = deps;
   const router = Router({ mergeParams: true });
-  const active = new Set<number>();
 
   const owned = (conversationId: string, userId: number, machineId: number) =>
     db
@@ -476,8 +476,6 @@ export function chatRouter(deps: ChatDeps) {
       const machineId = Number(req.params.id),
         userId = (req as AuthedRequest).user.id;
       const machine = sshMachine(db, machineId);
-      if (active.has(userId) || active.size >= 4)
-        throw new WorkspaceError(429, "ai_busy");
       const body = ChatBody.parse(req.body);
       const profile = deps.load(body.profileId);
       const config = profile.config;
@@ -488,161 +486,178 @@ export function chatRouter(deps: ChatDeps) {
         : randomUUID();
       if (body.conversationId && !owned(conversationId, userId, machineId))
         throw new WorkspaceError(404, "not_found");
-      if (!body.conversationId)
-        db.prepare(
-          "INSERT INTO ai_conversations (id, machine_id, user_id, title, root, model, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
-        ).run(
-          conversationId,
-          machineId,
-          userId,
-          commandSummary(body.message, 40),
-          body.root,
-          config.model,
-          Date.now(),
-          Date.now(),
+
+      // Runs are independent — their own conversation, their own SSH
+      // connection, their own model request — so several machines (or several
+      // conversations) can ask at the same time. Only the same conversation
+      // stays exclusive: two turns started from it would read the same history
+      // and then both append to it.
+      const runKey = `chat:${userId}:${conversationId}`;
+      const acquired = aiRuns.acquire(runKey, String(userId));
+      if (!acquired.ok)
+        throw new WorkspaceError(
+          acquired.reason === "busy" ? 409 : 429,
+          acquired.reason === "busy" ? "ai_conversation_busy" : "ai_busy",
         );
-
-      const runId = randomUUID();
-      const startedAt = Date.now();
-      active.add(userId);
-      db.prepare(
-        "INSERT INTO ai_runs (id,machine_id,user_id,root,prompt,status,created_at,conversation_id) VALUES (?,?,?,?,?,'running',?,?)",
-      ).run(
-        runId,
-        machineId,
-        userId,
-        body.root,
-        encryptText(body.message, secret),
-        startedAt,
-        conversationId,
-      );
-
-      // From here on the response is a stream, so failures have to travel as events.
-      res.status(200);
-      res.setHeader("content-type", "application/x-ndjson; charset=utf-8");
-      res.setHeader("cache-control", "no-store");
-      res.setHeader("x-accel-buffering", "no");
-      res.flushHeaders?.();
-      const emit = (event: Record<string, unknown>) => {
-        if (res.writableEnded || res.destroyed) return;
-        try {
-          res.write(`${JSON.stringify(event)}\n`);
-        } catch {
-          // The operator navigated away mid-write; the abort listener handles it.
-        }
-      };
-      const trace: ToolEvent[] = [];
-      const emitTool = (event: ToolEvent) => {
-        const existing = trace.findIndex((step) => step.id === event.id);
-        if (existing >= 0) trace[existing] = event;
-        else trace.push(event);
-        emit({ type: "tool", tool: event });
-      };
-      // Persist the in-progress answer and steps while the run is still going.
-      // A page switch, a reload or a dropped connection used to leave the row
-      // with only its tool cards, so the operator came back to the steps of an
-      // answer that was gone. Throttled so streaming stays cheap; the forced
-      // write in the catch below always flushes the latest text.
-      const progress = { answer: "", lastWrite: 0 };
-      const checkpoint = (answer: string, force = false) => {
-        progress.answer = answer;
-        const now = Date.now();
-        if (!force && now - progress.lastWrite < 1_000) return;
-        progress.lastWrite = now;
-        db.prepare(
-          "UPDATE ai_runs SET result=?, trace=? WHERE id=? AND status='running'",
-        ).run(
-          // The `\0` sentinel keeps "no answer yet" decryptable, unlike an
-          // empty-string ciphertext.
-          encryptText(answer || "\0", secret),
-          encryptText(JSON.stringify(trace), secret),
-          runId,
-        );
-      };
-      const heartbeat = setInterval(
-        () => emit({ type: "ping", at: Date.now() }),
-        CHAT_HEARTBEAT_MS,
-      );
-      heartbeat.unref?.();
-      emit({
-        type: "start",
-        runId,
-        conversationId,
-        autoRun: body.autoRun,
-        profile: { id: profile.id, name: profile.name },
-        model: config.model,
-      });
-
-      // Keep the two reasons apart: a timeout is the guard firing, a client
-      // abort means the operator navigated away, and they deserve different
-      // wording instead of the same "cancelled".
-      const timeout = AbortSignal.timeout(CHAT_TIMEOUT_MS);
-      const signal = AbortSignal.any([requestSignal(res), timeout]);
+      const slot = acquired.slot;
+      let heartbeat: NodeJS.Timeout | undefined;
       try {
-        const answer = await turn({
-          deps,
-          res,
-          emit,
-          emitTool,
-          checkpoint,
-          trace,
+        if (!body.conversationId)
+          db.prepare(
+            "INSERT INTO ai_conversations (id, machine_id, user_id, title, root, model, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+          ).run(
+            conversationId,
+            machineId,
+            userId,
+            commandSummary(body.message, 40),
+            body.root,
+            config.model,
+            Date.now(),
+            Date.now(),
+          );
+
+        const runId = randomUUID();
+        const startedAt = Date.now();
+        db.prepare(
+          "INSERT INTO ai_runs (id,machine_id,user_id,root,prompt,status,created_at,conversation_id) VALUES (?,?,?,?,?,'running',?,?)",
+        ).run(
+          runId,
           machineId,
           userId,
-          mcpByName: new Map<string, MappedMcpTool>(),
-          extByName: new Map<string, LoadedExtensionTool>(),
-          runId,
+          body.root,
+          encryptText(body.message, secret),
+          startedAt,
           conversationId,
-          machineName: machine.name,
-          root: body.root,
-          message: body.message,
-          autoRun: body.autoRun,
-          config,
-          signal,
-        });
-        db.prepare(
-          "UPDATE ai_runs SET status='completed', result=?, trace=? WHERE id=?",
-        ).run(
-          encryptText(answer || "已完成检查。", secret),
-          encryptText(JSON.stringify(trace), secret),
-          runId,
         );
-        db.prepare(
-          "UPDATE ai_conversations SET updated_at=?, model=? WHERE id=?",
-        ).run(Date.now(), config.model, conversationId);
-        audit(db, machineId, userId, "ai_chat", body.root, runId);
-        emit({ type: "answer", text: answer });
+
+        // From here on the response is a stream, so failures have to travel as events.
+        res.status(200);
+        res.setHeader("content-type", "application/x-ndjson; charset=utf-8");
+        res.setHeader("cache-control", "no-store");
+        res.setHeader("x-accel-buffering", "no");
+        res.flushHeaders?.();
+        const emit = (event: Record<string, unknown>) => {
+          if (res.writableEnded || res.destroyed) return;
+          try {
+            res.write(`${JSON.stringify(event)}\n`);
+          } catch {
+            // The operator navigated away mid-write; the abort listener handles it.
+          }
+        };
+        const trace: ToolEvent[] = [];
+        const emitTool = (event: ToolEvent) => {
+          const existing = trace.findIndex((step) => step.id === event.id);
+          if (existing >= 0) trace[existing] = event;
+          else trace.push(event);
+          emit({ type: "tool", tool: event });
+        };
+        // Persist the in-progress answer and steps while the run is still going.
+        // A page switch, a reload or a dropped connection used to leave the row
+        // with only its tool cards, so the operator came back to the steps of an
+        // answer that was gone. Throttled so streaming stays cheap; the forced
+        // write in the catch below always flushes the latest text.
+        const progress = { answer: "", lastWrite: 0 };
+        const checkpoint = (answer: string, force = false) => {
+          progress.answer = answer;
+          const now = Date.now();
+          if (!force && now - progress.lastWrite < 1_000) return;
+          progress.lastWrite = now;
+          db.prepare(
+            "UPDATE ai_runs SET result=?, trace=? WHERE id=? AND status='running'",
+          ).run(
+            // The `\0` sentinel keeps "no answer yet" decryptable, unlike an
+            // empty-string ciphertext.
+            encryptText(answer || "\0", secret),
+            encryptText(JSON.stringify(trace), secret),
+            runId,
+          );
+        };
+        heartbeat = setInterval(
+          () => emit({ type: "ping", at: Date.now() }),
+          CHAT_HEARTBEAT_MS,
+        );
+        heartbeat.unref?.();
         emit({
-          type: "done",
+          type: "start",
           runId,
           conversationId,
-          proposals: readProposals(db, secret, runId),
+          autoRun: body.autoRun,
+          profile: { id: profile.id, name: profile.name },
+          model: config.model,
         });
-      } catch (e) {
-        const timedOut = timeout.aborted;
-        const code = timedOut
-          ? 504
-          : e instanceof WorkspaceError
-            ? e.status
-            : 500;
-        const error = timedOut
-          ? "ai_timeout"
-          : e instanceof WorkspaceError
-            ? e.message
-            : "ai_failed";
-        db.prepare(
-          "UPDATE ai_runs SET status=?, result=?, trace=? WHERE id=?",
-        ).run(
-          timedOut ? "failed" : signal.aborted ? "cancelled" : "failed",
-          encryptText(progress.answer || "\0", secret),
-          encryptText(JSON.stringify(trace), secret),
-          runId,
-        );
-        emit({ type: "error", error, status: code });
-        emit({ type: "done", runId, conversationId, proposals: readProposals(db, secret, runId) });
+
+        // Keep the two reasons apart: a timeout is the guard firing, a client
+        // abort means the operator navigated away, and they deserve different
+        // wording instead of the same "cancelled".
+        const timeout = AbortSignal.timeout(CHAT_TIMEOUT_MS);
+        const signal = AbortSignal.any([requestSignal(res), timeout]);
+        try {
+          const answer = await turn({
+            deps,
+            res,
+            emit,
+            emitTool,
+            checkpoint,
+            trace,
+            machineId,
+            userId,
+            mcpByName: new Map<string, MappedMcpTool>(),
+            extByName: new Map<string, LoadedExtensionTool>(),
+            runId,
+            conversationId,
+            machineName: machine.name,
+            root: body.root,
+            message: body.message,
+            autoRun: body.autoRun,
+            config,
+            signal,
+          });
+          db.prepare(
+            "UPDATE ai_runs SET status='completed', result=?, trace=? WHERE id=?",
+          ).run(
+            encryptText(answer || "已完成检查。", secret),
+            encryptText(JSON.stringify(trace), secret),
+            runId,
+          );
+          db.prepare(
+            "UPDATE ai_conversations SET updated_at=?, model=? WHERE id=?",
+          ).run(Date.now(), config.model, conversationId);
+          audit(db, machineId, userId, "ai_chat", body.root, runId);
+          emit({ type: "answer", text: answer });
+          emit({
+            type: "done",
+            runId,
+            conversationId,
+            proposals: readProposals(db, secret, runId),
+          });
+        } catch (e) {
+          const timedOut = timeout.aborted;
+          const code = timedOut
+            ? 504
+            : e instanceof WorkspaceError
+              ? e.status
+              : 500;
+          const error = timedOut
+            ? "ai_timeout"
+            : e instanceof WorkspaceError
+              ? e.message
+              : "ai_failed";
+          db.prepare(
+            "UPDATE ai_runs SET status=?, result=?, trace=? WHERE id=?",
+          ).run(
+            timedOut ? "failed" : signal.aborted ? "cancelled" : "failed",
+            encryptText(progress.answer || "\0", secret),
+            encryptText(JSON.stringify(trace), secret),
+            runId,
+          );
+          emit({ type: "error", error, status: code });
+          emit({ type: "done", runId, conversationId, proposals: readProposals(db, secret, runId) });
+        } finally {
+          if (heartbeat) clearInterval(heartbeat);
+          if (!res.writableEnded) res.end();
+        }
       } finally {
-        clearInterval(heartbeat);
-        active.delete(userId);
-        if (!res.writableEnded) res.end();
+        slot.release();
       }
     }),
   );

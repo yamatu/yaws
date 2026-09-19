@@ -20,6 +20,7 @@ import {
 } from "./files.js";
 import { route, audit, requestSignal } from "./workspace.js";
 import { chatRouter } from "./ai-chat.js";
+import { aiRuns } from "./ai-runs.js";
 import { ExtensionManager } from "./extensions.js";
 import { dataDir, extensionsDir, loadEnv } from "./env.js";
 import { secretPath } from "./ai-safety.js";
@@ -716,7 +717,6 @@ export { secretPath };
 
 export function aiRouter(db: Db, secret: string) {
   const router = Router({ mergeParams: true });
-  const active = new Set<number>();
   const mcp = new McpManager(db, secret);
   // Extension packages are checked out under the data directory so a backup of
   // `data/` keeps them, next to the SQLite file that lists them.
@@ -916,8 +916,6 @@ export function aiRouter(db: Db, secret: string) {
       const machineId = Number(req.params.id),
         userId = (req as AuthedRequest).user.id;
       sshMachine(db, machineId);
-      if (active.has(userId) || active.size >= 2)
-        throw new WorkspaceError(429, "ai_busy");
       const config = load().config;
       const body = Run.parse(req.body);
       remotePath(body.root);
@@ -927,7 +925,14 @@ export function aiRouter(db: Db, secret: string) {
       ]);
       const runId = randomUUID();
       let root = body.root;
-      active.add(userId);
+      // One run per machine: this route answers with a single JSON body, so a
+      // second run on the same machine would only queue behind this one.
+      const acquired = aiRuns.acquire(
+        `legacy:${userId}:${machineId}`,
+        String(userId),
+      );
+      if (!acquired.ok) throw new WorkspaceError(429, "ai_busy");
+      const slot = acquired.slot;
       db.prepare(
         "INSERT INTO ai_runs (id,machine_id,user_id,root,prompt,status,created_at) VALUES (?,?,?,?,?,'running',?)",
       ).run(
@@ -1156,7 +1161,7 @@ export function aiRouter(db: Db, secret: string) {
         db.prepare("UPDATE ai_runs SET status='failed' WHERE id=?").run(runId);
         throw e;
       } finally {
-        active.delete(userId);
+        slot.release();
       }
     }),
   );
