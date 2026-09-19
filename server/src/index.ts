@@ -19,7 +19,8 @@ import { workspaceRouter } from "./workspace.js";
 import { aiRouter } from "./ai.js";
 import { WorkspaceError, shellQuote } from "./ssh.js";
 import { certificateRouter, startCertificateScheduler } from "./certificates.js";
-import { renderInstallScript } from "./install-script.js";
+import { agentBinaryHandler } from "./agent-release.js";
+import { agentInstallRouter } from "./agent-install.js";
 import { billingMonthBoundsUtc } from "./billing.js";
 import { ttlKeyedStore, ttlStore } from "./cache.js";
 import { computeUptimeBuckets } from "./uptime.js";
@@ -27,10 +28,7 @@ import { computeUptimeBuckets } from "./uptime.js";
 const env = loadEnv();
 const db = openDb(env.DATABASE_PATH);
 const agentKeySecret = env.AGENT_KEY_SECRET ?? env.JWT_SECRET;
-const previousAgentKeySecret = env.AGENT_KEY_SECRET_PREVIOUS;
-const agentReleaseBaseUrl =
-  env.AGENT_RELEASE_BASE_URL?.trim() || `https://github.com/${env.AGENT_GITHUB_REPO}/releases/latest/download`;
-const MACHINE_DELETE_METRICS_BATCH = 1000;
+const previousAgentKeySecret = env.AGENT_KEY_SECRET_PREVIOUS;const MACHINE_DELETE_METRICS_BATCH = 1000;
 const METRICS_PRUNE_BATCH = 2000;
 const LOGIN_ATTEMPT_WINDOW_MS = 10 * 60_000;
 const LOGIN_MAX_FAILURES = 20;
@@ -354,6 +352,10 @@ app.use((req, res, next) => {
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+// Public on purpose: this is the same binary that GitHub/Gitee publish openly,
+// and the target host needs it before it has any credential of its own.
+app.get("/api/agent/binary/:asset", agentBinaryHandler(env));
+
 function validateBackupDb(filePath: string) {
   const tmp = new Database(filePath, { readonly: true, fileMustExist: true });
   try {
@@ -633,6 +635,9 @@ const pingService = createPingService(db, () => !isRestoring,
   (machineId) => wsHub.pingCapability(machineId));
 app.use("/api/ping", requireAuth, requireAdmin, pingService.router);
 app.use("/api/machines", requireAuth, requireAdmin);
+// Serves the installer options, the one-click install stream and the script file
+// (the latter embeds the agent key, hence the same admin gate as the rest).
+app.use("/api/machines", requireAuth, requireAdmin, agentInstallRouter(db, agentKeySecret, env));
 app.use("/api/machines/:id/workspace", requireAuth, requireAdmin, workspaceRouter(db, agentKeySecret));
 app.use("/api/ai", requireAuth, requireAdmin, aiRouter(db, agentKeySecret));
 app.use("/api/certificates", requireAuth, requireAdmin, certificateRouter(db, agentKeySecret, {
@@ -1670,32 +1675,6 @@ app.get("/api/machines/:id/setup", requireAuth, (req, res) => {
     agentKey: key,
     downloadConfigUrl: `/api/machines/${id}/agent-config`,
   });
-});
-
-app.get("/api/machines/:id/install-script", requireAuth, (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "bad_id" });
-  const row = db
-    .prepare("SELECT id, interval_sec, agent_key_enc, agent_ws_url FROM machines WHERE id = ? AND deleted_at IS NULL")
-    .get(id) as { id: number; interval_sec: number; agent_key_enc: string; agent_ws_url: string } | undefined;
-  if (!row) return res.status(404).json({ error: "not_found" });
-  if (!row.agent_key_enc) return res.status(409).json({ error: "no_key" });
-
-  const wsUrl = row.agent_ws_url || inferAgentWsUrl(req);
-  const key = decryptText(row.agent_key_enc, agentKeySecret);
-  const intervalSec = row.interval_sec;
-
-  const script = renderInstallScript({
-    machineId: id,
-    wsUrl,
-    key,
-    intervalSec,
-    agentRepo: env.AGENT_GITHUB_REPO,
-    releaseBaseUrl: agentReleaseBaseUrl,
-  });
-
-  res.setHeader("content-type", "text/plain; charset=utf-8");
-  res.end(script);
 });
 
 app.get("/api/machines/:id/metrics", requireAuth, (req, res) => {

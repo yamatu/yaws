@@ -17,7 +17,12 @@ data/
 *.log
 
 # Go
-agent/bin/
+# The panel serves the two linux builds from /api/agent/binary/<asset>, so they
+# are tracked; every other local build stays out of the repository.
+agent/bin/*
+!agent/bin/yaws-agent-linux-amd64
+!agent/bin/yaws-agent-linux-arm64
+!agent/bin/SHA256SUMS
 *.exe
 
 # Archives

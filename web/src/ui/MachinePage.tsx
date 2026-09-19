@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { apiFetch, apiFetchText, type Machine, type Metric, type UptimeSummary } from "./api";
+import { apiFetch, type Machine, type Metric, type UptimeSummary } from "./api";
 import { connectUiWs } from "./ws";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, formatMoneyCents, pct } from "./format";
 import { fractionLevel, meterValue } from "./serverStats";
 import { UsageMeter } from "./UsageMeter";
 import { useDocumentTitle } from "./documentTitle";
 import { getToken } from "./auth";
+import { AgentInstall } from "./AgentInstall";
 
 export function MachinePage() {
   const { id } = useParams();
@@ -47,7 +48,6 @@ export function MachinePage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [installScript, setInstallScript] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -548,24 +548,14 @@ export function MachinePage() {
                   method: "POST",
                 });
                 setSetup((prev) => (prev ? { ...prev, agentKey: r.agentKey } : prev));
-                setInstallScript(null);
               }}
             >
               重置 key
             </button>
-            <button
-              className="yaws-btn"
-              onClick={async () => {
-                try {
-                  const s = await apiFetchText(`/api/machines/${machineId}/install-script`);
-                  setInstallScript(s);
-                } catch (e: any) {
-                  alert(`生成脚本失败：${e?.message ?? "unknown"}`);
-                }
-              }}
-            >
-              生成一键安装脚本
-            </button>
+          </div>
+
+          <div className="mb-2">
+            <AgentInstall machineId={machineId} />
           </div>
 
           {setup?.agentKey ? (
@@ -578,26 +568,6 @@ export function MachinePage() {
               <pre className="overflow-auto rounded-lg border border-white/[0.06] bg-black/30 p-3 text-xs">
                 <code>{agentCmd}</code>
               </pre>
-
-              {installScript ? (
-                <div className="grid gap-2">
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 text-xs text-white/40">复制到被控端 root 执行（会从 GitHub Releases 下载对应架构）</div>
-                    <button
-                      className="yaws-btn text-xs"
-                      onClick={async () => {
-                        await navigator.clipboard.writeText(installScript);
-                        alert("已复制");
-                      }}
-                    >
-                      复制脚本
-                    </button>
-                  </div>
-                  <pre className="overflow-auto rounded-lg border border-white/[0.06] bg-black/30 p-3 text-xs">
-                    <code>{installScript}</code>
-                  </pre>
-                </div>
-              ) : null}
             </div>
           ) : (
             <div className="text-sm text-white/50">

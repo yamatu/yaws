@@ -48,6 +48,15 @@ export function fingerprint(key: Buffer) {
   return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
 }
 
+/** True when the stored fingerprint still matches the host/port the machine
+ *  points at, i.e. `connectMachine` would get past its trust check. */
+export function hostTrusted(machine: SshMachine) {
+  return (
+    Boolean(machine.fingerprint) &&
+    machine.fingerprintAddress === address(machine)
+  );
+}
+
 // Stored credentials are AES-GCM sealed with AGENT_KEY_SECRET (falling back to
 // JWT_SECRET). Changing either secret without AGENT_KEY_SECRET_PREVIOUS makes
 // every saved password undecryptable, and because trusting a host fingerprint

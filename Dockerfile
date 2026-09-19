@@ -25,6 +25,9 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/server/package.json ./server/package.json
 COPY --from=build /app/server/dist ./server/dist
 COPY --from=build /app/web/dist ./web/dist
+# The agent builds the one-click installer hands out (AGENT_BINARY_DIR to move
+# them elsewhere). Without them the panel falls back to GitHub/Gitee.
+COPY agent/bin ./agent/bin
 
 WORKDIR /app/server
 

@@ -86,6 +86,10 @@ const errors: Record<string, string> = {
   extension_call_failed: "调用扩展工具失败",
   blocked_by_extension: "扩展包拦截了这个操作",
   skill_not_found: "技能不存在，请重新加载扩展",
+  agent_binary_missing: "主控没有内置探针，请改用发布版下载或配置 AGENT_BINARY_DIR",
+  agent_install_running: "这台机器正在安装探针，请等待本次安装结束",
+  ssh_exec_failed: "被控端无法执行安装命令",
+  agent_install_failed: "安装探针失败，请看日志里的报错",
 };
 export function workspaceError(error: unknown) {
   const text = error instanceof Error ? error.message : "请求失败";
@@ -102,6 +106,11 @@ export function workspaceError(error: unknown) {
     const detail = text.slice("extension_install_failed".length).replace(/^:\s*/, "");
     return detail ? `扩展包安装失败：${detail}` : "扩展包安装失败";
   }
+  if (text.startsWith("agent_install_failed")) {
+    const detail = text.slice("agent_install_failed".length).replace(/^:\s*/, "");
+    return detail ? `安装探针失败（退出码 ${detail}）` : "安装探针失败";
+  }
+  if (text.startsWith("ssh_exec_failed")) return "被控端无法执行安装命令";
   if (text.startsWith("extension_unloadable")) {
     const detail = text.slice("extension_unloadable".length).replace(/^:\s*/, "");
     return detail ? `扩展包无法加载：${detail}` : "扩展包无法加载";

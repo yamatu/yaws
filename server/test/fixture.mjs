@@ -1,5 +1,7 @@
 import express from "express";
+import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -15,6 +17,9 @@ import { workspaceRouter } from "../dist/workspace.js";
 import { aiRouter } from "../dist/ai.js";
 import { createPingService } from "../dist/ping.js";
 import { WorkspaceError } from "../dist/ssh.js";
+import { loadEnv } from "../dist/env.js";
+import { agentBinaryHandler } from "../dist/agent-release.js";
+import { agentInstallRouter } from "../dist/agent-install.js";
 import { z } from "zod";
 
 /** Reply for the workspace resource probe (see server/src/system-stats.ts). */const STATS_OUTPUT = [
@@ -195,7 +200,25 @@ export async function harness(port = 0) {
     publicKeyEncoding: { type: "spki", format: "pem" },
   }).privateKey;
   const clients = new Set();
-  const commands = [];
+  const commands = [];  // Scripts the panel piped into `install.sh` over SSH stdin, plus a hook so a
+  // test can decide what the remote installer answers.
+  const installs = [];
+  let installReply = defaultInstallReply;
+  function defaultInstallReply(script) {
+    return {
+      code: 0,
+      out: [
+        "[1/4] 获取探针 (已安装=none 目标=v0.3.0)",
+        "  - 主控自带: https://panel.example.com/api/agent/binary/yaws-agent-linux-amd64",
+        "    checksum ok",
+        "    已通过 controller 安装",
+        "[2/4] 写入配置: /etc/yaws-agent.json",
+        "[3/4] 安装 systemd 服务",
+        "[4/4] 完成。systemctl status yaws-agent --no-pager",
+      ],
+      err: [],
+    };
+  }
   const ssh = new Server({ hostKeys: [privateKey] }, (client) => {
     clients.add(client);
     client.on("error", () => {});
@@ -226,6 +249,30 @@ export async function harness(port = 0) {
         session.on("exec", (accept, _reject, info) => {
           commands.push(info.command);
           const stream = accept();
+          if (/install\.sh/.test(info.command)) {
+            // The one-click installer writes the script to stdin and closes it;
+            // answer only after the whole script arrived.
+            let stdin = "";
+            stream.on("data", (chunk) => {
+              stdin += chunk.toString();
+            });
+            stream.on("end", () => {
+              const reply = installReply(stdin);
+              installs.push({ command: info.command, script: stdin, reply });
+              for (const line of reply.out ?? []) stream.write(`${line}\n`);
+              for (const line of reply.err ?? []) stream.stderr.write(`${line}\n`);
+              if (reply.hang) return;
+              stream.exit(reply.code ?? 0);
+              stream.end();
+            });
+            return;
+          }
+          if (/yaws-agent -version/.test(info.command)) {
+            stream.write("v0.3.0\n");
+            stream.exit(0);
+            stream.end();
+            return;
+          }
           stream.write(
             info.command.includes("MemAvailable")
               ? STATS_OUTPUT
@@ -334,8 +381,8 @@ export async function harness(port = 0) {
   const sshPort = ssh.address().port;
   for (const id of [1, 2, 3])
     db.prepare(
-      `INSERT INTO machines(id,name,ssh_host,ssh_port,ssh_user,ssh_password_enc,agent_key_hash,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,0,0)`,
+      `INSERT INTO machines(id,name,ssh_host,ssh_port,ssh_user,ssh_password_enc,agent_key_hash,agent_key_enc,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,0,0)`,
     ).run(
       id,
       `Fixture ${id}`,
@@ -344,6 +391,7 @@ export async function harness(port = 0) {
       "fixture",
       encryptText(password, secret),
       hashAgentKey("fixture-agent-key", secret),
+      encryptText("fixture-agent-key", secret),
     );
   const modelRequests = [];
   const model = http.createServer(async (req, res) => {
@@ -556,6 +604,22 @@ export async function harness(port = 0) {
   });
   await new Promise((resolve) => model.listen(0, "127.0.0.1", resolve));
   const modelUrl = `http://127.0.0.1:${model.address().port}/v1`;
+  // Throwaway agent builds for the public download endpoint and the one-click
+  // installer, so tests never read or execute the binaries in agent/bin.
+  const agentBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "yaws-agent-bin-"));
+  const agentBytes = {
+    "yaws-agent-linux-amd64": Buffer.from("fixture agent amd64\n"),
+    "yaws-agent-linux-arm64": Buffer.from("fixture agent arm64\n"),
+  };
+  for (const [name, bytes] of Object.entries(agentBytes))
+    fs.writeFileSync(path.join(agentBinDir, name), bytes);
+  const agentEnv = {
+    ...loadEnv(),
+    AGENT_BINARY_DIR: agentBinDir,
+    AGENT_GITHUB_REPO: "fixture/yaws",
+    AGENT_GITEE_REPO: "fixture/yaws",
+    AGENT_RELEASE_TAG: "",
+  };
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   const server = http.createServer(app);
@@ -631,6 +695,11 @@ export async function harness(port = 0) {
     admin,
     workspaceRouter(db, secret),
   );
+  // The panel's public download endpoint and the SSH one-click installer.
+  // AGENT_BINARY_DIR points at throwaway builds so the tests never touch the
+  // binaries committed in agent/bin (and never execute them).
+  app.get("/api/agent/binary/:asset", agentBinaryHandler(agentEnv));
+  app.use("/api/machines", auth, admin, agentInstallRouter(db, secret, agentEnv));
   app.use("/api/ai", auth, admin, aiRouter(db, secret));
   app.use("/api/ping", auth, admin, ping.router);
   app.get("/api/ssh/sessions", auth, admin, (_req, res) =>
@@ -695,6 +764,13 @@ export async function harness(port = 0) {
     modelUrl,
     files,
     commands,
+    installs,
+    env: agentEnv,
+    agentBinDir,
+    agentBytes,
+    setInstallReply(fn) {
+      installReply = fn ?? defaultInstallReply;
+    },
     modelRequests,
     hub,
     secret,
@@ -706,6 +782,7 @@ export async function harness(port = 0) {
       await new Promise((resolve) => server.close(resolve));
       await new Promise((resolve) => ssh.close(resolve));
       await new Promise((resolve) => model.close(resolve));
+      fs.rmSync(agentBinDir, { recursive: true, force: true });
       db.close();
     },
   };

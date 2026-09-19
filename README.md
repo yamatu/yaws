@@ -192,14 +192,39 @@ server {
 ./yaws-agent -config yaws-agent-<id>.json
 ```
 
-### 方式 B：一键安装脚本（推荐）
+### 方式 B：一键安装（推荐）
 
-后台机器详情页点击“生成一键安装脚本”，复制到被控端 root 执行即可：
+后台机器详情页的“探针配置”卡片里有两个按钮：
+
+- **国内一键安装**：下载顺序为 Gitee → 主控 → GitHub
+- **国外一键安装**：下载顺序为 GitHub → 主控 → Gitee
+
+两条线路最终都会回退到主控自身的 `/api/agent/binary/<架构>`，所以即使被控端既连不上
+GitHub 也连不上 Gitee，只要它能连上主控就能装好。点击后主控会通过 SSH 登录被控端执行
+安装脚本，并把安装日志实时回显在页面上（可以随时“停止”）。
+
+前提条件：
+
+- 该机器已保存可用的 SSH 地址/账号/密码（或密钥），并且已在 SSH 面板确认过主机指纹
+- 主控已生成该机器的探针密钥（机器详情页可重置）
+- 安装脚本内的 agent key、地址等值都会被正确转义后写入被控端
+
+也可以点“查看安装脚本”复制脚本，手动到被控端以 root 执行：
 
 - 自动识别 `linux/amd64` 或 `linux/arm64`
-- 从 GitHub Releases 下载 `yaws-agent-linux-amd64` / `yaws-agent-linux-arm64`
-- 写入 `/etc/yaws-agent.json` 并安装 systemd 服务（无 systemd 则 fallback 后台运行）
-- 自动检测是否最新版本；不最新则自动更新（`--check` 只检查，`--force` 强制重装）
+- 逐个来源尝试下载，只有 `-version` 能正常返回的二进制才算下载成功，能拿到校验和时会校验 SHA256
+- 写入 `/etc/yaws-agent.json`（权限 0600）并安装 systemd 服务（无 systemd 则 fallback 后台运行）
+- 已安装版本与主控自带版本一致时跳过下载（`--check` 只检查，`--force` 强制重装）
+
+主控自带的探针来自仓库里的 `agent/bin/`（Docker 镜像也会带上），可通过环境变量调整：
+
+| 变量 | 说明 |
+| --- | --- |
+| `AGENT_BINARY_DIR` | 探针二进制所在目录，默认 `<仓库>/agent/bin` |
+| `AGENT_GITHUB_REPO` | GitHub 发布仓库，默认 `yamatu/yaws` |
+| `AGENT_GITEE_REPO` | Gitee 镜像仓库，留空则关闭国内发布源，默认 `yamatu/yaws` |
+| `AGENT_RELEASE_BASE_URL` / `AGENT_GITEE_RELEASE_BASE_URL` | 自定义下载前缀（镜像站） |
+| `AGENT_RELEASE_TAG` | 固定发布版本（Gitee 没有 `/releases/latest/download` 别名，不固定时会走 Gitee API 查最新 tag） |
 
 ## 备份与恢复
 

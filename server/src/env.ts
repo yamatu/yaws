@@ -27,6 +27,14 @@ const EnvSchema = z.object({
   TELEGRAM_CHAT_ID: z.string().optional(),
   AGENT_GITHUB_REPO: z.string().default("yamatu/yaws"),
   AGENT_RELEASE_BASE_URL: z.string().optional(),
+  // Domestic mirror. Empty disables the Gitee source in the installer.
+  AGENT_GITEE_REPO: z.string().default("yamatu/yaws"),
+  AGENT_GITEE_RELEASE_BASE_URL: z.string().optional(),
+  // Pin the release tag instead of asking the provider for "latest".
+  AGENT_RELEASE_TAG: z.string().optional(),
+  // Agent builds the panel hands out from /api/agent/binary/<asset>
+  // (default: <repo>/agent/bin).
+  AGENT_BINARY_DIR: z.string().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

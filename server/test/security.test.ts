@@ -180,32 +180,70 @@ test("legacy controller monitors migrate without becoming machine measurements",
   }
 });
 
-test("the installer script shell-quotes operator controlled repository values", () => {
-  const repo = 'evil/repo"; touch /tmp/pwned; echo "';
-  const base = "https://mirror.example.com/agent/$(id)/";
+test("the installer script shell-quotes operator controlled values", () => {
+  const marker = path.join(os.tmpdir(), `yaws-pwned-${process.pid}`);
+  const repo = `evil/repo"; touch ${marker}; echo "`;
+  const controllerBase = 'https://panel.example.com"; rm -rf /; echo "';
+  const githubBase = "https://mirror.example.com/agent/$(id)/";
+  const giteeBase = "https://gitee.com/evil/$(id)";
+  const target = 'v0.3.0"; id; echo "';
   const script = renderInstallScript({
     machineId: 7,
     wsUrl: "wss://panel.example.com/ws/agent",
     key: "agent-key-value",
     intervalSec: 5,
-    agentRepo: repo,
-    releaseBaseUrl: base,
+    order: ["gitee", "controller", "github"],
+    githubRepo: repo,
+    giteeRepo: repo,
+    releaseTag: "v1.2.3",
+    githubBase,
+    giteeBase,
+    controllerBase,
+    targetVersion: target,
   });
-  const assignments = script
-    .split("\n")
-    .filter((line) => line.startsWith("REPO=") || line.startsWith("BASE="));
-  assert.equal(assignments.length, 2);
-  for (const line of assignments) assert.match(line, /^[A-Z]+='.*'$/);
-  // Evaluate the assignments in a real shell: the values must survive verbatim and the
+
+  const names = [
+    "ORDER",
+    "GITHUB_REPO",
+    "GITEE_REPO",
+    "RELEASE_TAG",
+    "GITHUB_BASE",
+    "GITEE_BASE",
+    "CONTROLLER_BASE",
+    "TARGET_VERSION",
+  ];
+  const block = script.slice(script.indexOf("ORDER="), script.indexOf("# END YAWS-GENERATED"));
+  const lines = block.trim().split("\n");
+  assert.equal(lines.length, names.length);
+  lines.forEach((line, index) => assert.ok(line.startsWith(`${names[index]}=`), line));
+  // Every generated line is a single quoted assignment: nothing can escape it.
+  for (const line of lines) assert.match(line, /^[A-Z_]+='[^']*'$/);
+
+  // Evaluate the block in a real shell: the values must survive verbatim and the
   // injected command substitutions must not run.
   const evaluated = execFileSync(
     "bash",
-    ["-c", `${assignments.join("\n")}\nprintf '%s\\n%s' "$REPO" "$BASE"`],
+    [
+      "-c",
+      `${lines.join("\n")}\nprintf '%s\\n' ${names.map((name) => `"$${name}"`).join(" ")}`,
+    ],
     { encoding: "utf8", shell: false },
   );
-  assert.equal(evaluated, `${repo}\n${base.replace(/\/+$/, "")}`);
+  assert.deepEqual(evaluated.slice(0, -1).split("\n"), [
+    "gitee controller github",
+    repo,
+    repo,
+    "v1.2.3",
+    githubBase.replace(/\/+$/, ""),
+    giteeBase,
+    controllerBase,
+    target,
+  ]);
+  // Nothing in the block ran, and a trailing slash on a mirror URL is dropped.
+  assert.ok(!fs.existsSync(marker));
+  assert.ok(block.includes("https://mirror.example.com/agent/$(id)'"));
   // The config heredoc must stay quoted so no value is expanded by the shell.
-  assert.ok(script.includes("cat > \"$CFG\" <<'JSON'"));
+  assert.ok(script.includes('cat > "$CFG" <<\'JSON\''));
 });
 
 test("stored credential envelopes must be well formed", () => {
