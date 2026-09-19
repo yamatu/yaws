@@ -162,6 +162,19 @@ test("source plan lists the reachable sources in the channel order", () => {
     bare.sources.map((s) => s.provider),
     ["controller"],
   );
+  // The installer is given the same filtered list, so it never announces a
+  // source that has no repository configured.
+  assert.deepEqual(bare.order, ["controller"]);
+  // Without a controller address there is nothing to fall back to.
+  assert.deepEqual(
+    agentSourcePlan({
+      env: env({ AGENT_GITHUB_REPO: "", AGENT_GITEE_REPO: "" }),
+      channel: "global",
+      controllerBase: "",
+      targetVersion: "",
+    }).order,
+    [],
+  );
 });
 
 test("bundled builds are read, hashed and versioned", () => {

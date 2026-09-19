@@ -126,17 +126,34 @@ export function readBundledAgent(env: Env, asset: AgentAsset): BundledAgent | nu
   };
 }
 
+/** Assets ordered so the architecture the controller itself runs on comes first
+ *  (`-version` only answers for a build this host can execute). */
+function assetOrder(): AgentAsset[] {
+  return process.arch === "arm64"
+    ? ["yaws-agent-linux-arm64", "yaws-agent-linux-amd64"]
+    : ["yaws-agent-linux-amd64", "yaws-agent-linux-arm64"];
+}
+
 /** Version the panel ships (both architectures are built from the same tag). */
 export function bundledAgentVersion(env: Env): {
   version: string;
   asset: AgentAsset | null;
   bytes: number;
 } {
-  for (const asset of AGENT_ASSETS) {
+  let present: BundledAgent | null = null;
+  for (const asset of assetOrder()) {
     const bundled = readBundledAgent(env, asset);
-    if (bundled) return { version: bundled.version, asset, bytes: bundled.bytes };
+    if (!bundled) continue;
+    present = present ?? bundled;
+    if (bundled.version) {
+      return { version: bundled.version, asset, bytes: bundled.bytes };
+    }
   }
-  return { version: "", asset: null, bytes: 0 };
+  // Built, but this controller cannot run it (different libc, Windows dev box):
+  // bytes are still servable, the version is simply unknown.
+  return present
+    ? { version: present.version, asset: present.asset, bytes: present.bytes }
+    : { version: "", asset: null, bytes: 0 };
 }
 
 /**
@@ -253,7 +270,7 @@ export function agentSourcePlan(opts: {
   const githubRepo = env.AGENT_GITHUB_REPO.trim();
   const giteeRepo = env.AGENT_GITEE_REPO.trim();
   const plan: AgentSourcePlan = {
-    order: agentProviderOrder(channel),
+    order: [],
     channel,
     githubRepo,
     giteeRepo,
@@ -264,7 +281,7 @@ export function agentSourcePlan(opts: {
     targetVersion: opts.targetVersion,
     sources: [],
   };
-  for (const provider of plan.order) {
+  for (const provider of agentProviderOrder(channel)) {
     if (provider === "controller") {
       if (!plan.controllerBase) continue;
       plan.sources.push({
@@ -288,5 +305,8 @@ export function agentSourcePlan(opts: {
       });
     }
   }
+  // Only sources that can actually be used: a provider without a repository (or
+  // without a controller address) is dropped instead of failing at install time.
+  plan.order = plan.sources.map((source) => source.provider);
   return plan;
 }
