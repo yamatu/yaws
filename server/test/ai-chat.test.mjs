@@ -25,6 +25,41 @@ async function chat(f, body, token = f.token) {
   };
 }
 
+/**
+ * Streams a chat request and aborts the connection once the accumulated NDJSON
+ * matches, imitating a page switch that drops the stream mid-run. Returns the
+ * bytes received before the abort.
+ */
+async function chatUntil(f, body, match) {
+  const ac = new AbortController();
+  const response = await fetch(`${f.url}/api/ai/machines/1/chat`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${f.token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal: ac.signal,
+  });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+      if (match(text)) {
+        ac.abort();
+        break;
+      }
+    }
+  } catch {
+    // aborted on purpose
+  }
+  return text;
+}
+
 /** Every tool card appears twice (running, then the result); keep the last state. */
 function toolsOf(turn) {
   const latest = new Map();
@@ -285,6 +320,34 @@ test("ai chat", async (t) => {
     assert.equal(answer, "已生成配置修改与验证命令。");
     assert.equal(/步数上限|分析步数/.test(turn.body), false);
     assert.equal(turn.events.at(-1).type, "done");
+  });
+
+  await t.test("an interrupted run keeps the answer it already wrote", async () => {
+    // `[slow]` leaves the second model call pending, `[pre]` streams a sentence
+    // before the tool, and the abort mimics switching away mid-run.
+    const text = await chatUntil(
+      f,
+      {
+        root: "/srv/app",
+        message: "[slow][pre][run] 看一下磁盘",
+        autoRun: "read",
+      },
+      (acc) => acc.includes('"type":"tool"'),
+    );
+    const events = text
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const start = events.find((e) => e.type === "start");
+    assert.ok(start?.conversationId, text);
+    // Give the server a beat to persist the cancel after the socket closed.
+    await new Promise((done) => setTimeout(done, 250));
+    const detail = await request(f, `/api/ai/conversations/${start.conversationId}`);
+    const last = detail.body.turns.at(-1);
+    assert.equal(last.status, "cancelled");
+    assert.equal(last.answer, "我先看一下磁盘占用。");
+    assert.ok(last.trace.length > 0);
   });
 
   await t.test("mutating commands wait for the operator", async () => {

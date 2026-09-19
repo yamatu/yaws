@@ -1035,3 +1035,66 @@ await expect(page.locator(".ssh-session")).toHaveCount(2);
     expect(failures).toEqual([]);
   },
 );
+
+browserTest(
+  "an answer that was running survives leaving the page",
+  async ({ page }) => {
+    const failures = [];
+    page.on("pageerror", (e) => failures.push(e.message));
+    await page.goto(f.url + "/login");
+    await page.getByPlaceholder("请输入用户名").fill("fixture");
+    await page.getByPlaceholder("请输入密码").fill(f.password);
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    await page.evaluate(async (baseUrl) => {
+      const token = localStorage.getItem("yaws_token");
+      await fetch("/api/ai/profiles", {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          activeId: "recovery",
+          profiles: [
+            {
+              id: "recovery",
+              name: "恢复模型",
+              baseUrl,
+              protocol: "chat",
+              model: "fixture-model",
+              reasoning: "",
+              apiKey: "fixture-key",
+              allowPrivate: true,
+            },
+          ],
+        }),
+      });
+    }, f.modelUrl);
+    const visible = page.locator(".remote-workspace:not([hidden])");
+    await page.goto(f.url + "/app/machines/1/ssh");
+    const knowsKey = !!f.db
+      .prepare("SELECT ssh_host_fingerprint as fp FROM machines WHERE id=1")
+      .get().fp;
+    if (!knowsKey) {
+      await visible
+        .getByRole("button", { name: "读取主机指纹", exact: true })
+        .click();
+      await visible.getByRole("button", { name: "确认并信任此指纹" }).click();
+    }
+    await expect(visible.locator(".workspace-header")).toContainText("已连接");
+    await page.getByRole("tab", { name: "AI", exact: true }).click();
+    await page.getByLabel("问题").fill("[slow][pre][run] 恢复测试");
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    // The model streams a sentence, then runs the command. Leaving now drops
+    // the stream mid-answer, which is what used to wipe the text and leave only
+    // the step cards behind.
+    await expect(page.locator(".ai-tool")).toContainText("df -h /");
+    await page.reload();
+    await page.getByRole("tab", { name: "AI", exact: true }).click();
+    await expect(page.locator(".ai-answer").last()).toContainText(
+      "我先看一下磁盘占用。",
+    );
+    await expect(page.locator(".ai-tool")).toContainText("df -h /");
+    expect(failures).toEqual([]);
+  },
+);

@@ -547,6 +547,27 @@ export function chatRouter(deps: ChatDeps) {
         else trace.push(event);
         emit({ type: "tool", tool: event });
       };
+      // Persist the in-progress answer and steps while the run is still going.
+      // A page switch, a reload or a dropped connection used to leave the row
+      // with only its tool cards, so the operator came back to the steps of an
+      // answer that was gone. Throttled so streaming stays cheap; the forced
+      // write in the catch below always flushes the latest text.
+      const progress = { answer: "", lastWrite: 0 };
+      const checkpoint = (answer: string, force = false) => {
+        progress.answer = answer;
+        const now = Date.now();
+        if (!force && now - progress.lastWrite < 1_000) return;
+        progress.lastWrite = now;
+        db.prepare(
+          "UPDATE ai_runs SET result=?, trace=? WHERE id=? AND status='running'",
+        ).run(
+          // The `\0` sentinel keeps "no answer yet" decryptable, unlike an
+          // empty-string ciphertext.
+          encryptText(answer || "\0", secret),
+          encryptText(JSON.stringify(trace), secret),
+          runId,
+        );
+      };
       const heartbeat = setInterval(
         () => emit({ type: "ping", at: Date.now() }),
         CHAT_HEARTBEAT_MS,
@@ -572,6 +593,7 @@ export function chatRouter(deps: ChatDeps) {
           res,
           emit,
           emitTool,
+          checkpoint,
           trace,
           machineId,
           userId,
@@ -615,9 +637,10 @@ export function chatRouter(deps: ChatDeps) {
             ? e.message
             : "ai_failed";
         db.prepare(
-          "UPDATE ai_runs SET status=?, trace=? WHERE id=?",
+          "UPDATE ai_runs SET status=?, result=?, trace=? WHERE id=?",
         ).run(
           timedOut ? "failed" : signal.aborted ? "cancelled" : "failed",
+          encryptText(progress.answer || "\0", secret),
           encryptText(JSON.stringify(trace), secret),
           runId,
         );
@@ -639,6 +662,8 @@ type TurnOptions = {
   res: Response;
   emit: (event: Record<string, unknown>) => void;
   emitTool: (event: ToolEvent) => void;
+  /** Stores the answer produced so far so an interrupted run is recoverable. */
+  checkpoint: (answer: string, force?: boolean) => void;
   trace: ToolEvent[];
   machineId: number;
   userId: number;
@@ -653,7 +678,7 @@ type TurnOptions = {
 };
 
 async function turn(options: TurnOptions): Promise<string> {
-  const { deps, emit, emitTool, root, message, autoRun, config, signal } =
+  const { deps, emit, emitTool, checkpoint, root, message, autoRun, config, signal } =
     options;
   const { db, secret } = deps;
 
@@ -768,6 +793,7 @@ async function turn(options: TurnOptions): Promise<string> {
       if (replyMessage.content) {
         answer += replyMessage.content;
         emit({ type: "delta", text: replyMessage.content });
+        checkpoint(answer);
       }
       calls = replyMessage.tool_calls ?? [];
       messages.push({
@@ -804,6 +830,7 @@ async function turn(options: TurnOptions): Promise<string> {
           if (part.text) {
             answer += part.text;
             emit({ type: "delta", text: part.text });
+            checkpoint(answer);
           }
         if (item.type === "function_call" && item.call_id && item.name && item.arguments)
           calls.push({
@@ -827,6 +854,8 @@ async function turn(options: TurnOptions): Promise<string> {
         output: text,
       });
     }
+    // The steps just ran are worth keeping even if the next model call hangs.
+    checkpoint(answer);
   }
   if (!answer.trim()) answer = "已完成。";
   return answer;

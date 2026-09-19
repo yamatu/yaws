@@ -9,6 +9,7 @@ import {
   Cpu,
   FileCode2,
   FolderTree,
+  LoaderCircle,
   MessageSquarePlus,
   Pencil,
   Play,
@@ -79,6 +80,16 @@ type Entry =
   | { key: string; kind: "tool"; tool: Tool }
   | { key: string; kind: "proposal"; proposal: Proposal }
   | { key: string; kind: "error"; text: string };
+/** One stored turn as the conversation endpoint returns it. */
+type ChatTurn = {
+  runId: string;
+  prompt: string;
+  answer: string;
+  status: string;
+  createdAt: number;
+  trace: Tool[];
+  proposals: Proposal[];
+};
 export const AUTO_RUN_KEY = "yaws.ai.autorun";
 export const AUTO_RUN_MODES: Array<{ value: AutoRun; label: string }> = [
   { value: "read", label: "只读命令自动执行（推荐）" },
@@ -188,6 +199,10 @@ export function AiChat({
   });
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
   const [progress, setProgress] = useState<Progress | null>(null);
+  // A run that is still going on the server after this view left, e.g. the
+  // floating panel was collapsed mid-answer. We poll it until it finishes
+  // instead of showing a frozen half-transcript.
+  const [following, setFollowing] = useState(false);
   // The clock is kept in a ref so the ticking status line does not re-render
   // the whole transcript; `busy` drives the visible updates.
   const clock = useRef({ start: 0, end: 0 });
@@ -266,43 +281,73 @@ export function AiChat({
     };
   }, [applyProfiles]);
 
+  /** Rebuilds the transcript from a stored conversation. */
+  const applyConversation = useCallback(
+    (id: string, data: { conversation: { root: string }; turns: ChatTurn[] }) => {
+      const restored: Entry[] = [];
+      for (const turn of data.turns) {
+        restored.push({ key: `e${++counter.current}`, kind: "user", text: turn.prompt });
+        for (const tool of turn.trace ?? [])
+          restored.push({ key: `e${++counter.current}`, kind: "tool", tool });
+        for (const proposal of turn.proposals ?? [])
+          restored.push({ key: `e${++counter.current}`, kind: "proposal", proposal });
+        if (turn.answer)
+          restored.push({
+            key: `e${++counter.current}`,
+            kind: "assistant",
+            text: turn.answer,
+          });
+      }
+      setEntries(restored);
+      setConversationId(id);
+      if (data.conversation.root) setRoot(data.conversation.root);
+      try {
+        localStorage.setItem(chatKey(machineId), id);
+      } catch {
+        // ignore
+      }
+      return data.turns;
+    },
+    [machineId],
+  );
+
+  /**
+   * Decides whether a loaded conversation should keep updating itself. A run
+   * that is still `running` is followed: its answer arrives later, so showing
+   * the steps alone would look like the answer was lost.
+   */
+  const syncFollow = useCallback(
+    (turns: ChatTurn[]) => {
+      const last = turns.at(-1);
+      const running = last?.status === "running";
+      setFollowing(running);
+      if (!running || !last) {
+        setProgress(null);
+        return;
+      }
+      let next = startProgress();
+      for (const tool of last.trace ?? [])
+        next = acceptEvent(next, { type: "tool", tool }) ?? next;
+      setProgress(next);
+      clock.current = { start: last.createdAt || Date.now(), end: 0 };
+    },
+    [],
+  );
+
   const openConversation = useCallback(
     async (id: string) => {
       if (!id) return;
       try {
         const data = await apiFetch<{
           conversation: { root: string };
-          turns: Array<{
-            prompt: string;
-            answer: string;
-            trace: Tool[];
-            proposals: Proposal[];
-          }>;
+          turns: ChatTurn[];
         }>(`/api/ai/conversations/${id}`);
-        const restored: Entry[] = [];
-        for (const turn of data.turns) {
-          restored.push({ key: nextKey(), kind: "user", text: turn.prompt });
-          for (const tool of turn.trace ?? [])
-            restored.push({ key: nextKey(), kind: "tool", tool });
-          for (const proposal of turn.proposals ?? [])
-            restored.push({ key: nextKey(), kind: "proposal", proposal });
-          if (turn.answer)
-            restored.push({ key: nextKey(), kind: "assistant", text: turn.answer });
-        }
-        setEntries(restored);
-        setConversationId(id);
-        setProgress(null);
-        if (data.conversation.root) setRoot(data.conversation.root);
-        try {
-          localStorage.setItem(chatKey(machineId), id);
-        } catch {
-          // ignore
-        }
+        syncFollow(applyConversation(id, data));
       } catch (e) {
         setError(workspaceError(e));
       }
     },
-    [machineId],
+    [applyConversation, syncFollow],
   );
 
   useEffect(() => {
@@ -327,11 +372,47 @@ export function AiChat({
 
   // One shared clock for the run: it stops ticking when the stream is over.
   useEffect(() => {
-    if (!busy) return;
+    if (!busy && !following) return;
     setTick((v) => v + 1);
     const timer = setInterval(() => setTick((v) => v + 1), 500);
     return () => clearInterval(timer);
-  }, [busy]);
+  }, [busy, following]);
+
+  // Follow a run this view is not streaming itself. The server keeps writing
+  // the answer and steps as it goes, so a short poll is enough to show the
+  // operator the result instead of a frozen transcript.
+  useEffect(() => {
+    if (!following || busy || !conversationId) return;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const data = await apiFetch<{
+          conversation: { root: string };
+          turns: ChatTurn[];
+        }>(`/api/ai/conversations/${conversationId}`);
+        if (stopped) return;
+        const turns = applyConversation(conversationId, data);
+        const last = turns.at(-1);
+        if (!last || last.status !== "running") {
+          setFollowing(false);
+          clock.current.end = clock.current.end || Date.now();
+          setProgress((old) => (old ? { ...old, kind: "done", last: "" } : old));
+          return;
+        }
+        let next = startProgress();
+        for (const tool of last.trace ?? [])
+          next = acceptEvent(next, { type: "tool", tool }) ?? next;
+        setProgress(next);
+      } catch {
+        if (!stopped) setFollowing(false);
+      }
+    };
+    const timer = setInterval(() => void tick(), 1500);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [following, busy, conversationId, applyConversation]);
 
   function newChat() {
     controller.current?.abort();
@@ -340,6 +421,7 @@ export function AiChat({
     setError("");
     setNotice("");
     setProgress(null);
+    setFollowing(false);
     clock.current = { start: 0, end: 0 };
     try {
       localStorage.removeItem(chatKey(machineId));
@@ -561,10 +643,11 @@ export function AiChat({
 
   async function send() {
     const message = input.trim();
-    if (!message || busy) return;
+    if (!message || busy || following) return;
     setInput("");
     setError("");
     setNotice("");
+    setFollowing(false);
     push({ key: nextKey(), kind: "user", text: message });
     setBusy(true);
     setProgress(startProgress());
@@ -1132,7 +1215,7 @@ export function AiChat({
               aria-label="工作目录"
               required
               value={root}
-              disabled={busy}
+              disabled={busy || following}
               onChange={(e) => setRoot(e.target.value)}
             />
           </label>
@@ -1142,7 +1225,7 @@ export function AiChat({
               className="yaws-select"
               aria-label="执行方式"
               value={autoRun}
-              disabled={busy}
+              disabled={busy || following}
               onChange={(e) => {
                 const value = e.target.value as AutoRun;
                 setAutoRun(value);
@@ -1177,7 +1260,7 @@ export function AiChat({
             value={input}
             placeholder="问点什么，例如：帮我看看 nginx 为什么 502"
             aria-label="问题"
-            disabled={busy}
+            disabled={busy || following}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -1196,6 +1279,16 @@ export function AiChat({
             >
               <CircleStop size={16} />
               停止
+            </button>
+          ) : following ? (
+            <button
+              type="button"
+              className="yaws-btn tool-text"
+              disabled
+              title="后台仍在运行"
+            >
+              <LoaderCircle size={16} className="animate-spin" />
+              运行中
             </button>
           ) : (
             <button
