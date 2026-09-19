@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  # Re-publishing an existing tag (for example after adding GITEE_TOKEN).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已经存在的 tag，例如 v0.3.0"
+        required: true
 
 permissions:
   contents: write
@@ -11,8 +17,13 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    env:
+      # A tag push already names the tag; a manual run is told which one to publish.
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - uses: actions/setup-go@v5
         with:
@@ -35,17 +46,45 @@ jobs:
 
       - name: Build agent (linux amd64/arm64)
         working-directory: agent
+        # VERSION comes from the tag; COMMIT defaults to the checked out commit,
+        # which is the tag's own commit even for an annotated tag.
         run: |
-          make linux-amd64 VERSION=${{ github.ref_name }} COMMIT=${{ github.sha }}
-          make linux-arm64 VERSION=${{ github.ref_name }} COMMIT=${{ github.sha }}
+          make linux-amd64 VERSION=${{ env.TAG }}
+          make linux-arm64 VERSION=${{ env.TAG }}
           (cd bin && sha256sum yaws-agent-linux-amd64 yaws-agent-linux-arm64 > SHA256SUMS)
 
       - name: Release assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           generate_release_notes: true
-          body_path: docs/releases/${{ github.ref_name }}.md
+          body_path: docs/releases/${{ env.TAG }}.md
           files: |
             agent/bin/yaws-agent-linux-amd64
             agent/bin/yaws-agent-linux-arm64
             agent/bin/SHA256SUMS
+
+      # Gitee has no /releases/latest/download alias, so the panel asks the Gitee
+      # API for the newest tag and downloads from the release; publishing there
+      # is what makes 国内一键安装 actually download domestically. Skipped until
+      # the secret exists, so the GitHub release never depends on it.
+      # (`secrets` cannot be used in `if`, hence the probe step; it keeps the
+      # token out of the build steps as well.)
+      - name: Check Gitee token
+        id: gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          if [ -n "${GITEE_TOKEN:-}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "未配置 GITEE_TOKEN，跳过 Gitee 发布"
+          fi
+
+      - name: Release assets (Gitee)
+        if: steps.gitee.outputs.ready == 'true'
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_REPO: ${{ vars.GITEE_REPO || github.repository }}
+        run: bash scripts/gitee-release.sh "${{ env.TAG }}"

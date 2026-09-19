@@ -226,6 +226,31 @@ GitHub 也连不上 Gitee，只要它能连上主控就能装好。点击后主�
 | `AGENT_RELEASE_BASE_URL` / `AGENT_GITEE_RELEASE_BASE_URL` | 自定义下载前缀（镜像站） |
 | `AGENT_RELEASE_TAG` | 固定发布版本（Gitee 没有 `/releases/latest/download` 别名，不固定时会走 Gitee API 查最新 tag） |
 
+只配置了的来源才会出现在下载顺序里（例如把 `AGENT_GITEE_REPO` 留空，国内线路就只剩主控 → GitHub），
+所以日志里出现的一定是真的会去试的地址。
+
+#### 发布探针二进制
+
+`agent/bin/` 里的两个二进制就是主控对外提供的版本，请与最新发布保持一致（否则可以把
+`AGENT_BINARY_DIR` 指到你放发布文件的目录）。打 `v*` tag 后 `.github/workflows/release-agent.yml`
+会构建 linux/amd64 与 linux/arm64 并发布到 GitHub；Gitee 侧需要额外配置：
+
+1. 在 Gitee 上生成私人令牌（设置 → 私人令牌，勾选 `projects`）；
+2. 在 GitHub 仓库的 Settings → Secrets and variables → Actions 里添加 secret `GITEE_TOKEN`
+   （可选：用 variable `GITEE_REPO` 指定 Gitee 仓库，默认与 GitHub 仓库同名）；
+3. 之后再打 tag，工作流会同时发布到 Gitee。已有的 tag 可以在 Actions 里手动
+   `Run workflow` 并填入 tag 补发布；
+
+本地手动发布同样可以（`GITEE_TOKEN` 也可以临时用环境变量传）：
+
+```bash
+GITEE_TOKEN=<私人令牌> scripts/gitee-release.sh v0.3.0
+```
+
+Gitee 没有“最新发布”下载别名，所以必须要有一个 release 把三个文件挂上去
+（`yaws-agent-linux-amd64`、`yaws-agent-linux-arm64`、`SHA256SUMS`），国内线路才会真的从
+Gitee 下载；没有 release 时该来源会被跳过并回退到主控。脚本可重复执行，已发布的附件不会重复上传。
+
 ## 备份与恢复
 
 后台：`/app/settings` → “备份与恢复”
