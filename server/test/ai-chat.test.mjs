@@ -546,6 +546,25 @@ test("ai chat", async (t) => {
     assert.equal(usage.usage.promptTokens, 21);
     assert.equal(usage.usage.completionTokens, 8);
     assert.equal(usage.usage.totalTokens, 29);
+    // The cached share of the prompt reaches the page for the hit-rate line.
+    assert.equal(usage.usage.cachedTokens, 12);
+    assert.equal(turn.events.at(-1).type, "done");
+  });
+
+  await t.test("a provider that reports no cache is not shown as a cache miss", async () => {
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[nocache][sse][md] 再总结一次磁盘情况",
+      autoRun: "read",
+    });
+    assert.equal(turn.status, 200, turn.body);
+    const usage = turn.events.find((e) => e.type === "usage");
+    assert.equal(usage.usage.totalTokens, 29);
+    assert.equal(
+      usage.usage.cachedTokens,
+      null,
+      "an unreported cache stays null so the page can hide the hit rate",
+    );
     assert.equal(turn.events.at(-1).type, "done");
   });
 
@@ -605,6 +624,8 @@ test("ai chat", async (t) => {
       turn.events.find((e) => e.type === "answer").text,
     );
     assert.ok(turn.events.some((e) => e.type === "thinking"));
+    const usage = turn.events.find((e) => e.type === "usage");
+    assert.equal(usage.usage.cachedTokens, 12);
     assert.equal(turn.events.at(-1).type, "done");
     assert.ok(Array.isArray(f.modelRequests.at(-1).input));
     // Leave the chat protocol active for the tests that follow.

@@ -219,6 +219,11 @@ export type ModelUsage = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /**
+   * Cached part of the prompt, or null when the provider says nothing about
+   * caching (which is not the same as a cold cache).
+   */
+  cachedTokens: number | null;
 };
 
 export type ModelToolCall = {
@@ -252,18 +257,45 @@ export type ModelDelta =
 function normalizeUsage(raw: unknown): ModelUsage | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Record<string, unknown>;
+  const read = (source: Record<string, unknown>, key: string): number | null => {
+    const raw = source[key];
+    if (raw === undefined || raw === null || raw === "") return null;
+    const number = Number(raw);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  };
+  const readOr0 = (source: Record<string, unknown>, key: string) =>
+    read(source, key) ?? 0;
   const pick = (...keys: string[]) => {
     for (const key of keys) {
-      const number = Number(value[key]);
-      if (Number.isFinite(number) && number > 0) return number;
+      const number = readOr0(value, key);
+      if (number > 0) return number;
     }
     return 0;
   };
+  const details = (key: string) =>
+    value[key] && typeof value[key] === "object"
+      ? (value[key] as Record<string, unknown>)
+      : {};
   const promptTokens = pick("prompt_tokens", "input_tokens");
   const completionTokens = pick("completion_tokens", "output_tokens");
   const totalTokens = pick("total_tokens") || promptTokens + completionTokens;
-  if (!promptTokens && !completionTokens && !totalTokens) return null;
-  return { promptTokens, completionTokens, totalTokens };
+  // Providers spell the cached prompt differently: OpenAI nests it under
+  // prompt_tokens_details (chat) or input_tokens_details (responses), DeepSeek
+  // uses prompt_cache_hit_tokens, and the Anthropic-style name is at the top
+  // level. A reported 0 stays 0 so the page can tell it apart from "unreported".
+  const cachedTokens =
+    read(details("prompt_tokens_details"), "cached_tokens") ??
+    read(details("input_tokens_details"), "cached_tokens") ??
+    read(value, "cache_read_input_tokens") ??
+    read(value, "prompt_cache_hit_tokens");
+  if (
+    !promptTokens &&
+    !completionTokens &&
+    !totalTokens &&
+    cachedTokens === null
+  )
+    return null;
+  return { promptTokens, completionTokens, totalTokens, cachedTokens };
 }
 
 /** Joins the text of assistant message items in a responses `output` array. */

@@ -38,6 +38,8 @@ import { ConversationPicker } from "./ConversationPicker";
 import { McpSettings } from "./McpSettings";
 import { Markdown } from "./MarkdownView";
 import { orderTurnEntries } from "./chatOrder";
+import { cacheStats } from "./aiUsage";
+import type { Usage } from "./aiUsage";
 import type { Conversation } from "./conversations";
 
 type Profile = {
@@ -74,11 +76,6 @@ type Proposal = {
   status: string;
   summary: string;
   result: { output?: string; code?: number | null; backup?: string | null } | null;
-};
-type Usage = {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
 };
 type Entry =
   | { key: string; kind: "user"; text: string }
@@ -809,6 +806,9 @@ export function AiChat({
   const elapsed = clock.current.start
     ? Math.max(0, (clock.current.end || Date.now()) - clock.current.start)
     : 0;
+  // Only shown once the turn is over, and only when the provider told us how
+  // much of the prompt it served from its cache.
+  const cache = busy ? null : cacheStats(usage);
 
   return (
     <div className={`ai-chat${compact ? " compact" : ""}`}>
@@ -1247,8 +1247,21 @@ export function AiChat({
       ) : null}
       {usage && !busy ? (
         <div className="ai-usage">
-          输入 {usage.promptTokens} · 输出 {usage.completionTokens} · 共{" "}
-          {usage.totalTokens} tokens
+          <span>输入 {usage.promptTokens}</span>
+          <span>输出 {usage.completionTokens}</span>
+          <span>共 {usage.totalTokens} tokens</span>
+          {cache ? (
+            <span
+              className="ai-usage-cache"
+              data-hit={cache.cached > 0 ? "yes" : "no"}
+              title={`提示词缓存命中 ${cache.cached} / ${cache.prompt} tokens`}
+            >
+              缓存 {cache.cached}/{cache.prompt} · 命中率 {cache.rate}%
+              <i className="ai-usage-bar">
+                <b style={{ width: `${Math.min(100, cache.rate)}%` }} />
+              </i>
+            </span>
+          ) : null}
         </div>
       ) : null}
       {error && (

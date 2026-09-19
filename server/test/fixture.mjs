@@ -417,7 +417,15 @@ export async function harness(port = 0) {
         if (body.stream_options)
           send({
             choices: [],
-            usage: { prompt_tokens: 21, completion_tokens: 8, total_tokens: 29 },
+            usage: {
+              prompt_tokens: 21,
+              completion_tokens: 8,
+              total_tokens: 29,
+              // `[nocache]` imitates a provider that never reports caching.
+              ...(marker.includes("[nocache]")
+                ? {}
+                : { prompt_tokens_details: { cached_tokens: 12 } }),
+            },
           });
       } else {
         send({
@@ -454,7 +462,14 @@ export async function harness(port = 0) {
         send({
           type: "response.completed",
           response: {
-            usage: { input_tokens: 21, output_tokens: 8, total_tokens: 29 },
+            usage: {
+              input_tokens: 21,
+              output_tokens: 8,
+              total_tokens: 29,
+              ...(marker.includes("[nocache]")
+                ? {}
+                : { input_tokens_details: { cached_tokens: 12 } }),
+            },
             output: calls.length
               ? toolCalls.map((call, index) => ({
                   type: "function_call",

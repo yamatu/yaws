@@ -279,7 +279,11 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-thinking-head:hover { background: #20252b; }
 .ai-thinking-head:focus-visible { outline: 2px solid #38bdf8; outline-offset: -2px; }
 .ai-thinking-text { max-height: 240px; padding: 6px 10px 8px; border-top: 1px dashed #3a4149; color: #8d97a2; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
-.ai-usage { flex: 0 0 auto; padding: 3px 12px 6px; background: #171c21; color: #6b7681; font-size: 11px; font-variant-numeric: tabular-nums; }
+.ai-usage { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; flex: 0 0 auto; padding: 4px 12px 7px; background: #171c21; color: #6b7681; font-size: 11px; font-variant-numeric: tabular-nums; }
+.ai-usage-cache { display: inline-flex; align-items: center; gap: 6px; padding: 1px 7px; border-radius: 999px; background: #1e242b; color: #8d97a2; }
+.ai-usage-cache[data-hit="yes"] { background: #16302a; color: #6ee7b7; }
+.ai-usage-bar { display: inline-block; width: 34px; height: 4px; border-radius: 2px; background: #2c3238; overflow: hidden; }
+.ai-usage-bar b { display: block; height: 100%; background: currentColor; }
 .ai-tag { flex: 0 0 auto; padding: 1px 7px; border-radius: 999px; background: #2c3238; color: #a8b2bd; font-size: 11px; }
 .ai-tag.ok,.ai-tag.applied { background: #183528; color: #86efac; }
 .ai-tag.failed { background: #462329; color: #fda4af; }
