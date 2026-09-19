@@ -15,6 +15,7 @@ import {
   Play,
   Plus,
   Send,
+  Server,
   Settings2,
   Sparkles,
   Terminal,
@@ -41,6 +42,13 @@ import { Markdown } from "./MarkdownView";
 import { orderTurnEntries } from "./chatOrder";
 import { cacheStats } from "./aiUsage";
 import type { Usage } from "./aiUsage";
+import {
+  hostChoices,
+  hostNames,
+  hostSummary,
+  toggleHost,
+  type HostOption,
+} from "./aiHosts";
 import type { Conversation } from "./conversations";
 
 type Profile = {
@@ -66,6 +74,8 @@ type Tool = {
   readOnly?: boolean;
   auto?: boolean;
   purpose?: string;
+  /** Which server the step ran on, e.g. `web-2 (#4)`. */
+  host?: string;
 };
 type Proposal = {
   id: string;
@@ -76,6 +86,8 @@ type Proposal = {
   revision: string;
   status: string;
   summary: string;
+  /** Server the card applies to; `""` for conversations from older versions. */
+  host?: string;
   result: { output?: string; code?: number | null; backup?: string | null } | null;
 };
 type Entry =
@@ -95,6 +107,8 @@ type ChatTurn = {
   trace: Tool[];
   proposals: Proposal[];
 };
+/** The conversation endpoint reports the extra servers of a stored chat. */
+type StoredConversation = { root: string; hosts?: HostOption[]; machineId?: number };
 export const AUTO_RUN_KEY = "yaws.ai.autorun";
 export const AUTO_RUN_MODES: Array<{ value: AutoRun; label: string }> = [
   { value: "read", label: "只读命令自动执行（推荐）" },
@@ -198,6 +212,11 @@ export function AiChat({
   const [notice, setNotice] = useState("");
   const [conversationId, setConversationId] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  // Extra servers this conversation also works on. The primary host is the
+  // machine the chat was opened from and is always part of the set.
+  const [hosts, setHosts] = useState<number[]>([]);
+  const [hostOptions, setHostOptions] = useState<HostOption[]>([]);
+  const [hostOpen, setHostOpen] = useState(false);
   const [session, setSession] = useState<{ name: string; model: string }>({
     name: "",
     model: "",
@@ -221,6 +240,25 @@ export function AiChat({
   const nextKey = () => `e${++counter.current}`;
 
   useEffect(() => setRoot(initialRoot || "/"), [initialRoot]);
+
+  // The picker needs the machine list once. A viewer account cannot read it;
+  // the chat then simply stays on its primary host.
+  useEffect(() => {
+    const ac = new AbortController();
+    void (async () => {
+      try {
+        const data = await apiFetch<{ machines: HostOption[] }>("/api/machines", {
+          signal: ac.signal,
+        });
+        setHostOptions(
+          data.machines.map((machine) => ({ id: machine.id, name: machine.name })),
+        );
+      } catch {
+        // ignored: the assistant still works on the primary host
+      }
+    })();
+    return () => ac.abort();
+  }, []);
 
   // Steps are always rendered above the answer they produced, even when the
   // model streamed its first sentence before calling a tool.
@@ -291,7 +329,7 @@ export function AiChat({
 
   /** Rebuilds the transcript from a stored conversation. */
   const applyConversation = useCallback(
-    (id: string, data: { conversation: { root: string }; turns: ChatTurn[] }) => {
+    (id: string, data: { conversation: StoredConversation; turns: ChatTurn[] }) => {
       const restored: Entry[] = [];
       for (const turn of data.turns) {
         restored.push({ key: `e${++counter.current}`, kind: "user", text: turn.prompt });
@@ -310,6 +348,13 @@ export function AiChat({
       setConversationId(id);
       setUsage(null);
       if (data.conversation.root) setRoot(data.conversation.root);
+      // Opened with the servers it last ran on, so adding a follow-up question
+      // reaches the same machines instead of silently dropping back to one.
+      setHosts(
+        (data.conversation.hosts ?? [])
+          .map((host) => host.id)
+          .filter((hostId) => hostId !== machineId),
+      );
       try {
         localStorage.setItem(chatKey(machineId), id);
       } catch {
@@ -348,7 +393,7 @@ export function AiChat({
       if (!id) return;
       try {
         const data = await apiFetch<{
-          conversation: { root: string };
+          conversation: StoredConversation;
           turns: ChatTurn[];
         }>(`/api/ai/conversations/${id}`);
         syncFollow(applyConversation(id, data));
@@ -358,6 +403,10 @@ export function AiChat({
     },
     [applyConversation, syncFollow],
   );
+
+  // A different machine means a different conversation: drop the extra hosts
+  // of the previous one before the stored conversation restores its own.
+  useEffect(() => setHosts([]), [machineId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -396,7 +445,7 @@ export function AiChat({
     const tick = async () => {
       try {
         const data = await apiFetch<{
-          conversation: { root: string };
+          conversation: StoredConversation;
           turns: ChatTurn[];
         }>(`/api/ai/conversations/${conversationId}`);
         if (stopped) return;
@@ -674,6 +723,7 @@ export function AiChat({
     setError("");
     setNotice("");
     setFollowing(false);
+    setHostOpen(false);
     push({ key: nextKey(), kind: "user", text: message });
     setBusy(true);
     setProgress(startProgress());
@@ -683,6 +733,12 @@ export function AiChat({
     controller.current = ac;
     try {
       const token = getToken();
+      // A deleted machine cannot be unchecked in the picker, so drop ids that
+      // are gone from the machine list instead of failing the whole question.
+      const active = hostOptions.length
+        ? hosts.filter((id) => hostOptions.some((option) => option.id === id))
+        : hosts;
+      if (active.length !== hosts.length) setHosts(active);
       const response = await fetch(`/api/ai/machines/${machineId}/chat`, {
         method: "POST",
         headers: {
@@ -695,6 +751,7 @@ export function AiChat({
           root,
           autoRun,
           profileId: activeProfile,
+          hosts: active,
         }),
         signal: ac.signal,
       });
@@ -741,13 +798,16 @@ export function AiChat({
   }
 
   async function decide(proposal: Proposal, action: "apply" | "revert" | "reject") {
+    // The card knows which server it belongs to; the conversation root is only
+    // a fallback for cards written before the multi-host assistant existed.
+    const where = proposal.host ? `主机 ${proposal.host} 上` : "服务器上";
     const confirmText =
       action === "apply"
         ? proposal.kind === "command"
-          ? `在目录 ${root} 执行以下命令？\n\n${proposal.after}`
-          : `写入 ${proposal.path}？修改前的版本会自动备份。`
+          ? `在${where}的目录 ${proposal.path || root} 执行以下命令？\n\n${proposal.after}`
+          : `写入${where}的 ${proposal.path}？修改前的版本会自动备份。`
         : action === "revert"
-          ? `撤销对 ${proposal.path} 的修改？`
+          ? `撤销对${where} ${proposal.path} 的修改？`
           : `忽略这条待确认操作？`;
     if (!window.confirm(confirmText)) return;
     setError("");
@@ -810,6 +870,12 @@ export function AiChat({
   // Only shown once the turn is over, and only when the provider told us how
   // much of the prompt it served from its cache.
   const cache = busy ? null : cacheStats(usage);
+  const choices = hostChoices(hostOptions, machineId);
+  // Falls back to the id when the machine list is unavailable (viewer account),
+  // so the picker still names the host a turn will use.
+  const primaryName =
+    hostOptions.find((option) => option.id === machineId)?.name ?? `#${machineId}`;
+  const selectedNames = hostNames(hosts, hostOptions, primaryName);
 
   return (
     <div className={`ai-chat${compact ? " compact" : ""}`}>
@@ -1108,6 +1174,11 @@ export function AiChat({
                   {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   <Icon size={14} />
                   <span className="ai-tool-name">{entry.tool.detail || entry.tool.name}</span>
+                  {entry.tool.host ? (
+                    <span className="ai-tag host" title="执行的主机">
+                      {entry.tool.host}
+                    </span>
+                  ) : null}
                   {entry.tool.readOnly ? (
                     <span className="ai-tag">只读</span>
                   ) : null}
@@ -1153,6 +1224,9 @@ export function AiChat({
             <section key={entry.key} className={`ai-proposal${dismissed ? " muted" : ""}`}>
               <div className="workspace-toolbar">
                 <strong className="min-w-0 flex-1 break-all text-sm">
+                  {proposal.host ? (
+                    <span className="ai-tag host">{proposal.host}</span>
+                  ) : null}
                   {proposal.kind === "command" ? "执行命令" : proposal.path}
                 </strong>
                 {proposal.status === "pending" ? (
@@ -1320,6 +1394,54 @@ export function AiChat({
               ))}
             </select>
           </label>
+          <div className="ai-meta-hosts">
+            <button
+              type="button"
+              className="ai-host-toggle"
+              aria-label="选择主机"
+              aria-expanded={hostOpen}
+              title="本轮问题可以操作的主机"
+              disabled={busy || following}
+              onClick={() => setHostOpen((open) => !open)}
+            >
+              <Server size={14} />
+              {hostSummary(hosts, hostOptions.length || 1)}
+            </button>
+            {hostOpen ? (
+              <div className="ai-host-menu">
+                <div className="ai-host-row">
+                  <Check size={13} />
+                  <span className="ai-host-name">
+                    {primaryName} (#{machineId})
+                  </span>
+                  <span className="ai-tag">主</span>
+                </div>
+                {choices.length === 0 ? (
+                  <p className="ai-host-note">
+                    只有这一台主机。在「机器」里添加其它服务器后，可以在这里一起选中。
+                  </p>
+                ) : (
+                  choices.map((host) => (
+                    <label key={host.id} className="ai-host-row">
+                      <input
+                        type="checkbox"
+                        checked={hosts.includes(host.id)}
+                        onChange={() =>
+                          setHosts((old) => toggleHost(old, host.id, machineId))
+                        }
+                      />
+                      <span className="ai-host-name">
+                        {host.name} (#{host.id})
+                      </span>
+                    </label>
+                  ))
+                )}
+                <p className="ai-host-note">
+                  勾选的主机会随本轮问题一起提交。只读检查可以一次跑多台；修改类操作仍然一台一张确认卡片。
+                </p>
+              </div>
+            ) : null}
+          </div>
           {session.model ? (
             <span
               className="ai-chat-session"
@@ -1330,6 +1452,16 @@ export function AiChat({
             </span>
           ) : null}
         </div>
+        {selectedNames.length > 1 ? (
+          <div className="ai-host-chips" aria-label="本轮主机">
+            {selectedNames.map((name, index) => (
+              <span key={`${name}-${index}`} className="ai-host-chip">
+                {name}
+                {index === 0 ? <em>主</em> : null}
+              </span>
+            ))}
+          </div>
+        ) : null}
         <div className="ai-chat-input">
           <textarea
             className="yaws-input"

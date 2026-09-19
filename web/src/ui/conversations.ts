@@ -9,6 +9,8 @@ export type Conversation = {
   turns: number;
   preview?: string;
   lastStatus?: string;
+  /** Extra servers this conversation also works on, if any. */
+  hosts?: Array<{ id: number; name: string }>;
 };
 
 const DAY_MS = 86_400_000;

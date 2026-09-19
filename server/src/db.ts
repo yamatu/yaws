@@ -314,7 +314,26 @@ function migrate(db: Db) {
   );
   ensureColumns(db, "ai_proposals", [
     { name: "result", sql: "ALTER TABLE ai_proposals ADD COLUMN result TEXT NOT NULL DEFAULT ''" },
+    // Which server an approval card belongs to. 0 keeps the old behaviour of
+    // "the machine the run belongs to", so rows written before the multi-host
+    // assistant existed still apply to the right server.
+    {
+      name: "machine_id",
+      sql: "ALTER TABLE ai_proposals ADD COLUMN machine_id INTEGER NOT NULL DEFAULT 0",
+    },
   ]);
+
+  // Extra servers a conversation is allowed to work on, on top of the machine
+  // the chat was opened from. Kept in its own table so the same conversation
+  // can be reopened with a different set without rewriting its runs.
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS ai_conversation_hosts (
+      conversation_id TEXT NOT NULL REFERENCES ai_conversations(id) ON DELETE CASCADE,
+      machine_id INTEGER NOT NULL, created_at INTEGER NOT NULL,
+      PRIMARY KEY (conversation_id, machine_id));
+     CREATE INDEX IF NOT EXISTS idx_ai_conversation_hosts
+       ON ai_conversation_hosts(conversation_id);`,
+  );
 
   ensureColumns(db, "metrics", [
     { name: "net_rx_bytes", sql: "ALTER TABLE metrics ADD COLUMN net_rx_bytes INTEGER NOT NULL DEFAULT 0" },

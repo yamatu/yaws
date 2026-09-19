@@ -276,6 +276,9 @@ export function ConversationPicker({
                         <span className="ai-conv-meta">
                           {item.turns} 轮 · {item.root}
                           {item.model ? ` · ${item.model}` : ""}
+                          {item.hosts?.length
+                            ? ` · 主机 ${item.hosts.length + 1} 台`
+                            : ""}
                           {item.lastStatus === "failed" ? " · 上次失败" : ""}
                         </span>
                         {item.preview ? (

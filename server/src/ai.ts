@@ -712,6 +712,9 @@ type Proposal = {
   revision: string;
   status: string;
   result?: string;
+  /** Which server the card applies to; 0 means the run's own machine. */
+  machine_id: number;
+  hostName?: string | null;
 };
 export { secretPath };
 
@@ -1172,7 +1175,11 @@ export function aiRouter(db: Db, secret: string) {
   function readProposals(runId: string) {
     return (
       db
-        .prepare("SELECT * FROM ai_proposals WHERE run_id = ?")
+        .prepare(
+          `SELECT p.*, m.name as hostName FROM ai_proposals p
+             LEFT JOIN machines m ON m.id = p.machine_id
+            WHERE p.run_id = ?`,
+        )
         .all(runId) as Proposal[]
     ).map((p) => ({
       id: p.id,
@@ -1182,6 +1189,7 @@ export function aiRouter(db: Db, secret: string) {
       after: decode(p.after_text),
       revision: p.revision,
       status: p.status,
+      host: p.hostName ?? "",
     }));
   }
   // Chat conversations live in the same tables (a run is one user message + its answer).
@@ -1254,6 +1262,11 @@ export function aiRouter(db: Db, secret: string) {
         )
         .get(req.params.proposalId, machineId, userId) as Proposal | undefined;
       if (!proposal) throw new WorkspaceError(404, "not_found");
+      // The card may target an extra host of the conversation, while the run
+      // that produced it belongs to `machineId` (checked above, so one operator
+      // cannot confirm another machine's card). Everything that touches the
+      // server uses the card's own machine.
+      const target = proposal.machine_id || machineId;
       const claimed = db
         .prepare(
           "UPDATE ai_proposals SET status='applying' WHERE id=? AND status='pending'",
@@ -1266,13 +1279,13 @@ export function aiRouter(db: Db, secret: string) {
         if (proposal.kind === "file") {
           result = await withFiles(
             db,
-            machineId,
+            target,
             secret,
             async (files) => {
               const actual = await files.confined("/", proposal.path, true);
               if (actual !== proposal.path)
                 throw new WorkspaceError(409, "file_path_changed");
-              return lockedWrite(machineId, actual, () =>
+              return lockedWrite(target, actual, () =>
                 files.write(
                   actual,
                   Buffer.from(decode(proposal.after_text)),
@@ -1285,7 +1298,7 @@ export function aiRouter(db: Db, secret: string) {
         } else {
           const currentPath = await withFiles(
             db,
-            machineId,
+            target,
             secret,
             (files) => files.canonical(proposal.path),
             requestSignal(res),
@@ -1294,7 +1307,7 @@ export function aiRouter(db: Db, secret: string) {
             throw new WorkspaceError(409, "file_path_changed");
           result = await runCommand(
             db,
-            machineId,
+            target,
             secret,
             proposal.path,
             decode(proposal.after_text),
@@ -1309,7 +1322,7 @@ export function aiRouter(db: Db, secret: string) {
         );
         audit(
           db,
-          machineId,
+          target,
           userId,
           proposal.kind === "file" ? "ai_file_apply" : "ai_command",
           proposal.path,
@@ -1368,6 +1381,7 @@ export function aiRouter(db: Db, secret: string) {
         throw new WorkspaceError(404, "not_found");
       if (proposal.status !== "applied")
         throw new WorkspaceError(409, "proposal_not_applied");
+      const target = proposal.machine_id || machineId;
       let writtenRevision = "";
       try {
         writtenRevision = String(
@@ -1380,13 +1394,13 @@ export function aiRouter(db: Db, secret: string) {
       if (!writtenRevision) throw new WorkspaceError(409, "proposal_not_applied");
       const restored = await withFiles(
         db,
-        machineId,
+        target,
         secret,
         async (files) => {
           const actual = await files.confined("/", proposal.path, true);
           if (actual !== proposal.path)
             throw new WorkspaceError(409, "file_path_changed");
-          return lockedWrite(machineId, actual, () =>
+          return lockedWrite(target, actual, () =>
             files.write(
               actual,
               Buffer.from(decode(proposal.before_text)),
@@ -1402,7 +1416,7 @@ export function aiRouter(db: Db, secret: string) {
         encryptText(JSON.stringify({ revision: restored.revision, reverted: true }), secret),
         proposal.id,
       );
-      audit(db, machineId, userId, "ai_file_revert", proposal.path, proposal.id);
+      audit(db, target, userId, "ai_file_revert", proposal.path, proposal.id);
       res.json({ ok: true, result: restored });
     }),
   );
