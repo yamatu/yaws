@@ -354,6 +354,12 @@ export function agentInstallRouter(db: Db, secret: string, env: Env) {
       finish({ type: "error", error: "cancelled" });
     };
     signal.addEventListener("abort", onAbort, { once: true });
+    // The browser may already be gone (closed the page while we connected): the
+    // abort listener would never fire for an aborted-before-subscribe signal.
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
 
     stream.on("data", (chunk: Buffer) => out.push(chunk));
     stream.stderr?.on("data", (chunk: Buffer) => err.push(chunk));
