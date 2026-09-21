@@ -16,6 +16,7 @@ export type ProgressKind =
   | "thinking"
   | "tool"
   | "writing"
+  | "continuing"
   | "waiting"
   | "done"
   | "failed"
@@ -35,6 +36,12 @@ export type Progress = {
   failed: number;
   /** Operations that went to the operator for approval. */
   pending: number;
+  /**
+   * How many times the model was asked to finish an answer it cut short at its
+   * own output-token cap. Anything above 0 means the answer on screen is being
+   * written in several rounds instead of being lost.
+   */
+  continues: number;
   /** How the previous tool step ended: "" | "ok" | "error". */
   last: "" | "ok" | "error";
 };
@@ -60,6 +67,7 @@ export function startProgress(): Progress {
     ok: 0,
     failed: 0,
     pending: 0,
+    continues: 0,
     last: "",
   };
 }
@@ -123,6 +131,15 @@ export function acceptEvent(prev: Progress | null, event: Event): Progress | nul
   }
   if (kind === "delta" || kind === "answer")
     return prev.kind === "writing" ? prev : { ...prev, kind: "writing", last: "" };
+  if (kind === "continuing")
+    // The answer is still arriving, in another round. Counting the rounds keeps
+    // the status line honest about why it is taking this long.
+    return {
+      ...prev,
+      kind: "continuing",
+      continues: prev.continues + 1,
+      last: "",
+    };
   if (kind === "error") return { ...prev, kind: "failed", last: "" };
   // Only `done` finishes the run. Operations still waiting for the operator are
   // part of the final line instead of turning it back into "working".
@@ -149,6 +166,13 @@ export function formatElapsed(ms: number): string {
   return `${Math.floor(minutes / 60)} 小时 ${String(minutes % 60).padStart(2, "0")} 分`;
 }
 
+/** Wording for the "writing" state: a continued answer says which round it is. */
+function writeVerb(progress: Progress): string {
+  return progress.continues > 0
+    ? `正在续写回答（第 ${progress.continues + 1} 段）…`
+    : "正在整理回答…";
+}
+
 /** `pending` comes from the conversation itself: it is the authoritative count. */
 export function progressLabel(
   progress: Progress,
@@ -162,7 +186,9 @@ export function progressLabel(
     case "tool":
       return `${step} · ${toolVerb(progress.tool)}${target} · ${time}`;
     case "writing":
-      return `${step} · 正在整理回答… · ${time}`;
+      return `${step} · ${writeVerb(progress)} · ${time}`;
+    case "continuing":
+      return `${step} · 输出达到长度上限，正在续写第 ${progress.continues + 1} 段… · ${time}`;
     case "waiting":
       if (pending > 0)
         return `等待你确认 ${pending} 个操作 · ${time}`;
@@ -189,6 +215,7 @@ export function progressLabel(
 export function progressTone(progress: Progress): "busy" | "ok" | "warn" | "bad" {
   if (progress.kind === "done") return progress.pending > 0 ? "warn" : "ok";
   if (progress.kind === "waiting") return "warn";
+  if (progress.kind === "continuing") return "warn";
   if (progress.kind === "failed") return "bad";
   if (progress.kind === "stopped") return "warn";
   return "busy";

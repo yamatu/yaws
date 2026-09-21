@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { harness } from "./fixture.mjs";
+import { runGuard, MAX_CONTINUATIONS } from "../dist/ai-chat.js";
 
 /** Chat replies arrive as newline delimited JSON. */
 async function chat(f, body, token = f.token) {
@@ -635,6 +636,113 @@ test("ai chat", async (t) => {
     );
   });
 
+  await t.test("an answer cut off at the output cap is finished", async () => {
+    // Buffered provider first: `finish_reason: length` has to be noticed even
+    // when the endpoint ignores `stream`.
+    const plain = await chat(f, {
+      root: "/srv/app",
+      message: "[cut] 写一份很长的排查报告",
+      autoRun: "read",
+    });
+    assert.equal(plain.status, 200, plain.body);
+    const whole =
+      "第一段：答案太长，在中间就被切开了" + "第二段：这是被截断后接着写完的结尾。";
+    assert.equal(plain.events.find((e) => e.type === "answer").text, whole);
+    const rounds = plain.events.filter((e) => e.type === "continuing");
+    assert.equal(rounds.length, 1, plain.body);
+    assert.equal(rounds[0].round, 1);
+    // The operator sees one seamless answer: the deltas add up to the same text.
+    assert.equal(
+      plain.events
+        .filter((e) => e.type === "delta")
+        .map((e) => e.text)
+        .join(""),
+      whole,
+    );
+    // The second request replays the fragment as the model's own turn and asks
+    // it to carry on, which is what makes providers continue instead of restart.
+    const replay = f.modelRequests.at(-1).messages;
+    assert.equal(replay.at(-2).role, "assistant");
+    assert.equal(replay.at(-2).content, "第一段：答案太长，在中间就被切开了");
+    assert.equal(replay.at(-1).role, "user");
+    assert.match(replay.at(-1).content, /被截断了/);
+    // A stopped run keeps the finished text, not the fragment.
+    const runId = plain.events.find((e) => e.type === "start").runId;
+    const stored = await request(f, `/api/ai/machines/1/runs/${runId}`);
+    assert.equal(stored.status, 200);
+    assert.equal(stored.body.answer, whole);
+
+    // Streaming provider: the same, token by token.
+    const streamed = await chat(f, {
+      root: "/srv/app",
+      message: "[cut][sse] 再写一份长报告",
+      autoRun: "read",
+    });
+    assert.equal(streamed.status, 200, streamed.body);
+    assert.equal(streamed.events.find((e) => e.type === "answer").text, whole);
+    assert.equal(streamed.events.filter((e) => e.type === "continuing").length, 1);
+    // The continuation is streamed token by token like the first part was, so
+    // the operator watches one answer being written, not a fragment plus a dump.
+    assert.ok(
+      streamed.events.filter((e) => e.type === "delta").length > 8,
+      streamed.body,
+    );
+    assert.equal(streamed.events.at(-1).type, "done");
+  });
+
+  await t.test("the responses protocol continues a cut answer too", async () => {
+    assert.equal(
+      (await request(f, "/api/ai/settings", "PUT", {
+        ...settings(f),
+        protocol: "responses",
+      })).status,
+      200,
+    );
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[cut][sse] 用 responses 协议写长报告",
+      autoRun: "read",
+    });
+    assert.equal(turn.status, 200, turn.body);
+    assert.equal(
+      turn.events.find((e) => e.type === "answer").text,
+      "第一段：答案太长，在中间就被切开了" + "第二段：这是被截断后接着写完的结尾。",
+    );
+    assert.equal(turn.events.filter((e) => e.type === "continuing").length, 1);
+    // `incomplete_details.reason` is the responses-API way of saying the same.
+    assert.equal(f.modelRequests.at(-1).input.at(-2).role, "assistant");
+    assert.match(f.modelRequests.at(-1).input.at(-1).content, /被截断了/);
+    assert.equal(
+      (await request(f, "/api/ai/settings", "PUT", settings(f))).status,
+      200,
+    );
+  });
+
+  await t.test("a model that never stops truncating is given up on", async () => {
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[cutall] 写一份永远写不完的报告",
+      autoRun: "read",
+    });
+    assert.equal(turn.status, 200, turn.body);
+    // Every round is cut short, so the loop stops at its own limit instead of
+    // asking the model forever, and the operator is told why.
+    assert.equal(
+      turn.events.filter((e) => e.type === "continuing").length,
+      MAX_CONTINUATIONS,
+    );
+    const notes = turn.events.filter(
+      (e) => e.type === "note" && e.note === "answer_truncated",
+    );
+    assert.equal(notes.length, 1, turn.body);
+    const segments = Array.from(
+      { length: MAX_CONTINUATIONS + 1 },
+      (_, index) => `第 ${index + 1} 段。`,
+    ).join("");
+    assert.equal(turn.events.find((e) => e.type === "answer").text, segments);
+    assert.equal(turn.events.at(-1).type, "done");
+  });
+
   await t.test("conversations keep their history", async () => {
     const first = await chat(f, {
       root: "/srv/app",
@@ -776,4 +884,44 @@ test("ai chat", async (t) => {
     assert.equal(run.status, 200, JSON.stringify(run.body));
     assert.equal(run.body.proposals.length, 2);
   });
+});
+
+/**
+ * The run guard is what decides whether a long answer survives: it has to let a
+ * slow model keep writing and only stop one that has gone silent. Small timeouts
+ * are used so the assertion does not take ten minutes.
+ */
+test("a run is stopped for stalling, not for taking long", async (t) => {
+  const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+  const guard = runGuard(40, 60_000);
+  t.after(() => guard.stop());
+  // Progress keeps it alive past every idle window.
+  for (let round = 0; round < 5; round += 1) {
+    await sleep(20);
+    guard.reset();
+    assert.equal(guard.signal.aborted, false);
+  }
+  // Silence, on the other hand, ends the run.
+  await sleep(90);
+  assert.equal(guard.tripped, true);
+  assert.equal(guard.signal.aborted, true);
+  // The hard ceiling fires even while work keeps arriving.
+  const ceiling = runGuard(60_000, 30);
+  t.after(() => ceiling.stop());
+  await sleep(70);
+  assert.equal(ceiling.tripped, true);
+  // A tool that works for minutes without a word is progress, not a stall.
+  const held = runGuard(40, 60_000);
+  t.after(() => held.stop());
+  held.pause();
+  await sleep(90);
+  assert.equal(held.signal.aborted, false);
+  held.resume();
+  await sleep(90);
+  assert.equal(held.tripped, true);
+  // A stopped guard never fires, so a finished run cannot be killed by it.
+  const stopped = runGuard(20, 20);
+  stopped.stop();
+  await sleep(50);
+  assert.equal(stopped.signal.aborted, false);
 });

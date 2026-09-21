@@ -15,7 +15,7 @@ const errors: Record<string, string> = {
   ai_failed: "AI 请求失败，请检查接口设置或稍后重试",
   ai_context_limit: "读取的内容过多，请缩小问题范围",
   ai_tool_limit: "本轮操作过多，请再追问一次继续处理",
-  ai_timeout: "本轮运行时间过长已自动结束，可继续提问接着处理",
+  ai_timeout: "长时间没有新内容已自动结束，回复「继续」可以让它接着写",
   cancelled: "本轮已取消",
   bad_tool_arguments: "AI 生成的参数无效，请换个说法再试",
   proposal_already_handled: "这条操作已经被处理过了",

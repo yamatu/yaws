@@ -155,6 +155,30 @@ test("errors and cancellations end the run with their own wording", () => {
   assert.equal(progressLabel(stopped, 2000), "已停止 · 用时 2 秒");
 });
 
+test("a continued answer says so while it is being written", () => {
+  const progress = run([
+    { type: "start" },
+    { type: "delta", text: "第一段：" },
+    { type: "continuing", round: 1 },
+  ]);
+  assert.equal(progress.kind, "continuing");
+  assert.equal(progress.continues, 1);
+  assert.equal(progressTone(progress), "warn");
+  assert.match(
+    progressLabel(progress, 8000),
+    /第 1 步 · 输出达到长度上限，正在续写第 2 段… · 8 秒/,
+  );
+  // The text arriving again is just the answer being written, but the status
+  // keeps counting the rounds so a long answer looks long for a reason.
+  const writing = acceptEvent(progress, { type: "delta", text: "第二段" });
+  assert.equal(writing.kind, "writing");
+  assert.equal(writing.continues, 1);
+  assert.match(progressLabel(writing, 9000), /正在续写回答（第 2 段）…/);
+  const twice = acceptEvent(writing, { type: "continuing", round: 2 });
+  assert.equal(twice.continues, 2);
+  assert.match(progressLabel(twice, 10000), /正在续写第 3 段/);
+});
+
 test("unknown events and an idle chat are left alone", () => {
   assert.equal(acceptEvent(null, { type: "delta", text: "x" }), null);
   const progress = startProgress();

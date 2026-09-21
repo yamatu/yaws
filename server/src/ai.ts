@@ -202,7 +202,7 @@ export async function modelRequest(
       const chunks: Buffer[] = [];
       response.on("data", (chunk: Buffer) => {
         size += chunk.length;
-        if (size > 2 * 1024 * 1024) {
+        if (size > MODEL_BODY_LIMIT) {
           request.destroy();
           reject(new WorkspaceError(413, "model_response_too_large"));
         } else chunks.push(chunk);
@@ -245,6 +245,16 @@ export type ModelToolCall = {
   arguments: string;
 };
 
+/**
+ * How much the model may answer with in one response body. A JSON answer is
+ * nothing but text, so the buffered cap is generous; the streamed one is much
+ * larger because every fragment costs a whole SSE frame around a few
+ * characters, and a long answer would otherwise hit the ceiling while still
+ * being far below it in characters.
+ */
+export const MODEL_BODY_LIMIT = 8 * 1024 * 1024;
+export const MODEL_STREAM_LIMIT = 64 * 1024 * 1024;
+
 /** One completed model message, assembled from the stream. */
 export type ModelTurn = {
   content: string;
@@ -253,7 +263,22 @@ export type ModelTurn = {
   usage: ModelUsage | null;
   /** Responses protocol: the output items to replay as history. */
   output: unknown[];
+  /**
+   * The provider stopped because it hit its own output-token cap, so `content`
+   * is the beginning of an answer rather than all of it. The turn loop asks it
+   * to carry on instead of handing the operator a fragment.
+   */
+  truncated: boolean;
 };
+
+/**
+ * Providers spell "I ran out of output tokens" differently: the chat protocol
+ * uses `length` (OpenAI) or `max_tokens`, the responses API reports
+ * `incomplete_details.reason = max_output_tokens`.
+ */
+export function isTruncatedReason(reason: unknown): boolean {
+  return typeof reason === "string" && /length|max_?\w*tokens/i.test(reason);
+}
 
 /**
  * The same event shape pi streams from the model: text, reasoning and tool-call
@@ -357,6 +382,13 @@ export async function streamModel(
     >();
     const output: unknown[] = [];
     let usage: ModelUsage | null = null;
+    let truncated = false;
+
+    // A token cap is the one stop reason the operator cannot see for
+    // themselves: the answer simply ends mid-sentence.
+    const noteStop = (reason: unknown) => {
+      if (isTruncatedReason(reason)) truncated = true;
+    };
 
     const usageFrom = (raw: unknown) => {
       const value = normalizeUsage(raw);
@@ -378,6 +410,8 @@ export async function streamModel(
     const applyChat = (chunk: any) => {
       if (chunk?.usage) usageFrom(chunk.usage);
       const choice = Array.isArray(chunk?.choices) ? chunk.choices[0] : null;
+      // The stop reason rides on the last chunk, whose delta is usually empty.
+      noteStop(choice?.finish_reason);
       const delta = choice?.delta ?? choice?.message ?? null;
       if (delta) {
         if (typeof delta.content === "string") pushText(delta.content);
@@ -448,9 +482,11 @@ export async function streamModel(
           else output.push(item);
           return;
         }
-        case "response.completed": {
+        case "response.completed":
+        case "response.incomplete": {
           const completed = event.response;
           if (completed?.usage) usageFrom(completed.usage);
+          noteStop(completed?.incomplete_details?.reason);
           if (Array.isArray(completed?.output)) {
             output.length = 0;
             output.push(...completed.output);
@@ -464,6 +500,7 @@ export async function streamModel(
 
     const applyBuffered = (parsed: any) => {
       if (chat) {
+        noteStop(parsed?.choices?.[0]?.finish_reason);
         const message = parsed?.choices?.[0]?.message ?? {};
         if (typeof message.content === "string") pushText(message.content);
         const think = message.reasoning_content ?? message.reasoning;
@@ -480,6 +517,7 @@ export async function streamModel(
         return;
       }
       const items = Array.isArray(parsed?.output) ? parsed.output : [];
+      noteStop(parsed?.incomplete_details?.reason);
       output.push(...items);
       for (const [index, item] of items.entries()) {
         if (item?.type !== "function_call") continue;
@@ -514,7 +552,7 @@ export async function streamModel(
           const chunks: Buffer[] = [];
           response.on("data", (chunk: Buffer) => {
             size += chunk.length;
-            if (size > 2 * 1024 * 1024) {
+            if (size > MODEL_BODY_LIMIT) {
               request.destroy();
               reject(new WorkspaceError(413, "model_response_too_large"));
             } else chunks.push(chunk);
@@ -551,7 +589,7 @@ export async function streamModel(
         response.setEncoding("utf8");
         response.on("data", (chunk: string) => {
           size += Buffer.byteLength(chunk);
-          if (size > 8 * 1024 * 1024) {
+          if (size > MODEL_STREAM_LIMIT) {
             request.destroy();
             reject(new WorkspaceError(413, "model_response_too_large"));
             return;
@@ -599,6 +637,7 @@ export async function streamModel(
       toolCalls,
       usage,
       output,
+      truncated,
     };
   };
 

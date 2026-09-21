@@ -435,7 +435,27 @@ export async function harness(port = 0) {
     // A model that narrates first would send content *and* tool_calls together,
     // which makes the assistant bubble arrive before the steps it describes.
     const preamble = marker.includes("[pre]") ? "我先看一下磁盘占用。" : "";
-    if (loop && count < 12) calls = [{ name: "list_files", args: { path: "/srv/app" } }];
+    // `[cut]` imitates a provider that runs into its own output-token cap in the
+    // middle of an answer: the first round stops with a "length" reason and the
+    // client has to ask for the rest. The continuation round is recognised by the
+    // prompt the server appends, so both protocols can be scripted the same way.
+    const cut = history.some(
+      (m) => typeof m.content === "string" && m.content.includes("[cut]"),
+    );
+    const continuing =
+      cut &&
+      history.some(
+        (m) => typeof m.content === "string" && m.content.includes("被截断了"),
+      );
+    // `[cutall]` never stops truncating: the client has to give up after its own
+    // number of rounds instead of looping forever.
+    const cutAll = history.some(
+      (m) => typeof m.content === "string" && m.content.includes("[cutall]"),
+    );
+    // How many rounds of this answer the model has already written.
+    const rounds = history.filter((m) => m.role === "assistant").length;
+    if (continuing || cutAll) calls = [];
+    else if (loop && count < 12) calls = [{ name: "list_files", args: { path: "/srv/app" } }];
     else if (markdown) calls = [];
     else if (/\[(run|write|danger|file|list|stats|log|secret|many)\]/.test(marker))
       calls = markerCalls(marker, count);
@@ -456,7 +476,17 @@ export async function harness(port = 0) {
       type: "function",
       function: { name: call.name, arguments: JSON.stringify(call.args) },
     }));
-    const answer = markdown ? MD_ANSWER : "已生成配置修改与验证命令。";
+    const answer = cutAll
+      ? `第 ${rounds + 1} 段。`
+      : continuing
+        ? "第二段：这是被截断后接着写完的结尾。"
+        : cut
+          ? "第一段：答案太长，在中间就被切开了"
+          : markdown
+            ? MD_ANSWER
+            : "已生成配置修改与验证命令。";
+    // The stop reason a real provider reports when it hits its output cap.
+    const stopReason = cutAll || (cut && !continuing) ? "length" : "stop";
     // `[slow]` keeps the model thinking long enough for a browser test to read
     // the live status line before the answer arrives.
     if (marker.includes("[slow]"))
@@ -471,8 +501,13 @@ export async function harness(port = 0) {
     }
     // `[sse]` answers the way a real provider does when it is asked to stream,
     // so the token-by-token path can be asserted separately from the buffered
-    // fallback that every other test exercises.
-    if (body.stream && marker.includes("[sse]")) {
+    // fallback that every other test exercises. A provider that streams keeps
+    // streaming for every round of the conversation, so the marker is looked for
+    // in the whole history rather than only in the newest message.
+    const streaming = history.some(
+      (m) => typeof m.content === "string" && m.content.includes("[sse]"),
+    );
+    if (body.stream && streaming) {
       const pieces = (value) => value.match(/[\s\S]{1,4}/g) ?? [];
       const spoken = calls.length ? preamble : answer;
       res.setHeader("content-type", "text/event-stream");
@@ -505,7 +540,7 @@ export async function harness(port = 0) {
               ],
             });
         }
-        send({ choices: [{ delta: {}, finish_reason: "stop" }] });
+        send({ choices: [{ delta: {}, finish_reason: stopReason }] });
         // Usage is only reported when the client asked for it, like OpenAI.
         if (body.stream_options)
           send({
@@ -555,6 +590,11 @@ export async function harness(port = 0) {
         send({
           type: "response.completed",
           response: {
+            // A responses-API provider says "I hit the cap" this way.
+            status: stopReason === "length" ? "incomplete" : "completed",
+            ...(stopReason === "length"
+              ? { incomplete_details: { reason: "max_output_tokens" } }
+              : {}),
             usage: {
               input_tokens: 21,
               output_tokens: 8,
@@ -596,10 +636,14 @@ export async function harness(port = 0) {
                     content: calls.length ? preamble || null : answer,
                     ...(calls.length ? { tool_calls: toolCalls } : {}),
                   },
+                  finish_reason: calls.length ? "tool_calls" : stopReason,
                 },
               ],
             }
           : {
+              ...(stopReason === "length"
+                ? { incomplete_details: { reason: "max_output_tokens" } }
+                : {}),
               output: calls.length
                 ? toolCalls.map((call) => ({
                     type: "function_call",

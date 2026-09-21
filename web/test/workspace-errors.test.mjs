@@ -14,5 +14,5 @@ test("ai run failures are explained", () => {
     workspaceError(new Error("ai_busy")),
     "同时运行的 AI 任务太多，请等其中一个结束后再试",
   );
-  assert.match(workspaceError(new Error("ai_timeout")), /时间过长/);
+  assert.match(workspaceError(new Error("ai_timeout")), /接着写/);
 });

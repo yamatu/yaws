@@ -244,12 +244,33 @@ const Rename = z.object({
  * No step limit: the assistant keeps working until the model stops asking for
  * tools, so a long task is finished in one answer instead of being cut off with
  * "step limit reached". The numbers left here are only runaway guards, not a
- * budget the operator ever sees: 200 tool calls and 30 minutes are far beyond
- * any real investigation and only stop a model that loops forever.
+ * budget the operator ever sees.
  */
 export const MAX_TOOL_CALLS = 200;
 export const MAX_TOOL_OUTPUT = 12_000;
-export const CHAT_TIMEOUT_MS = 30 * 60_000;
+/**
+ * A run is stopped for making no progress, not for taking long. A fixed
+ * wall-clock cap used to cut off a slow model in the middle of a long answer
+ * and throw away the part it had already written; the clock now only runs while
+ * nothing at all arrives, so an answer may take as long as it needs to as long
+ * as it keeps coming. The hard ceiling is only there for a stream that never
+ * ends, and is deliberately far beyond any real answer.
+ */
+export const CHAT_IDLE_MS = 10 * 60_000;
+export const CHAT_TIMEOUT_MS = 3 * 60 * 60_000;
+/**
+ * A model that runs into its own output-token cap leaves half an answer behind.
+ * The turn asks it to carry on from where it stopped, and only gives up after
+ * this many rounds so a model that keeps cutting itself off cannot loop forever.
+ */
+export const MAX_CONTINUATIONS = 12;
+/**
+ * Sent as an extra user message when an answer was cut off. It is never shown
+ * to the operator and never stored: it only tells the model to finish writing.
+ */
+export const CONTINUE_PROMPT =
+  "你的上一条回答因为达到输出长度上限而被截断了。请直接从截断的地方继续写完剩下的内容：" +
+  "不要重复已经写过的部分，不要重新开头，也不要道歉或解释，直接接着写。";
 /**
  * A slow model can leave the NDJSON stream silent for minutes. A periodic ping
  * keeps proxies and browsers from treating an idle connection as dead and
@@ -322,6 +343,63 @@ export function readProposals(
 export function clip(text: string, max = MAX_TOOL_OUTPUT): string {
   if (text.length <= max) return text;
   return `${text.slice(0, max)}\n…（输出已截断，共 ${text.length} 字符）`;
+}
+
+/**
+ * Guards one run: it aborts when nothing has happened for `idleMs` (the model
+ * went quiet, a socket died) and, as a last resort, when the run has been going
+ * for `totalMs` without ever stopping. `reset()` is called for every event the
+ * run produces, so steady progress keeps a slow but healthy answer alive.
+ */
+export function runGuard(
+  idleMs = CHAT_IDLE_MS,
+  totalMs = CHAT_TIMEOUT_MS,
+): {
+  signal: AbortSignal;
+  reset: () => void;
+  pause: () => void;
+  resume: () => void;
+  readonly tripped: boolean;
+  stop: () => void;
+} {
+  const controller = new AbortController();
+  let tripped = false;
+  let idle: NodeJS.Timeout | undefined;
+  const reset = () => {
+    if (idle) clearTimeout(idle);
+    idle = setTimeout(() => {
+      tripped = true;
+      controller.abort();
+    }, idleMs);
+    idle.unref?.();
+  };
+  const total = setTimeout(() => {
+    tripped = true;
+    controller.abort();
+  }, totalMs);
+  total.unref?.();
+  reset();
+  return {
+    signal: controller.signal,
+    reset,
+    /**
+     * A tool that runs for minutes at a time is progress even though it says
+     * nothing, so the idle clock is held while one is in flight instead of
+     * killing a run that is busy installing or scanning.
+     */
+    pause() {
+      if (idle) clearTimeout(idle);
+      idle = undefined;
+    },
+    resume: reset,
+    get tripped() {
+      return tripped;
+    },
+    stop() {
+      if (idle) clearTimeout(idle);
+      clearTimeout(total);
+    },
+  };
 }
 
 type ToolEvent = {
@@ -686,7 +764,12 @@ export function chatRouter(deps: ChatDeps) {
         res.setHeader("cache-control", "no-store");
         res.setHeader("x-accel-buffering", "no");
         res.flushHeaders?.();
+        // Every event the run produces counts as progress, so a slow model that
+        // is still writing is never cut off. The pings are the one exception:
+        // they keep the connection alive, they do not prove work is happening.
+        const guard = runGuard();
         const emit = (event: Record<string, unknown>) => {
+          if (event.type !== "ping") guard.reset();
           if (res.writableEnded || res.destroyed) return;
           try {
             res.write(`${JSON.stringify(event)}\n`);
@@ -736,11 +819,10 @@ export function chatRouter(deps: ChatDeps) {
           model: config.model,
         });
 
-        // Keep the two reasons apart: a timeout is the guard firing, a client
-        // abort means the operator navigated away, and they deserve different
-        // wording instead of the same "cancelled".
-        const timeout = AbortSignal.timeout(CHAT_TIMEOUT_MS);
-        const signal = AbortSignal.any([requestSignal(res), timeout]);
+        // Keep the two reasons apart: a guard that fired is a stalled run, a
+        // client abort means the operator navigated away, and they deserve
+        // different wording instead of the same "cancelled".
+        const signal = AbortSignal.any([requestSignal(res), guard.signal]);
         try {
           const answer = await turn({
             deps,
@@ -762,6 +844,7 @@ export function chatRouter(deps: ChatDeps) {
             autoRun: body.autoRun,
             config,
             signal,
+            guard,
           });
           db.prepare(
             "UPDATE ai_runs SET status='completed', result=?, trace=? WHERE id=?",
@@ -782,7 +865,7 @@ export function chatRouter(deps: ChatDeps) {
             proposals: readProposals(db, secret, runId),
           });
         } catch (e) {
-          const timedOut = timeout.aborted;
+          const timedOut = guard.tripped;
           const code = timedOut
             ? 504
             : e instanceof WorkspaceError
@@ -805,6 +888,7 @@ export function chatRouter(deps: ChatDeps) {
           emit({ type: "done", runId, conversationId, proposals: readProposals(db, secret, runId) });
         } finally {
           if (heartbeat) clearInterval(heartbeat);
+          guard.stop();
           if (!res.writableEnded) res.end();
         }
       } finally {
@@ -823,6 +907,8 @@ type TurnOptions = {
   emitTool: (event: ToolEvent) => void;
   /** Stores the answer produced so far so an interrupted run is recoverable. */
   checkpoint: (answer: string, force?: boolean) => void;
+  /** Holds the stall clock while a tool is running, see `runGuard`. */
+  guard?: Pick<ReturnType<typeof runGuard>, "pause" | "resume">;
   trace: ToolEvent[];
   machineId: number;
   userId: number;
@@ -977,6 +1063,8 @@ async function turn(options: TurnOptions): Promise<string> {
 
   let answer = "";
   let contextBytes = 0;
+  /** How many times the model was asked to finish an answer it cut short. */
+  let continuations = 0;
   const runTool = async (name: string, raw: string): Promise<unknown> => {
     const id = randomUUID();
     let args: Record<string, unknown>;
@@ -1037,6 +1125,9 @@ async function turn(options: TurnOptions): Promise<string> {
       }
     }
     emitTool({ id, name, detail, state: "running", purpose: args.purpose as string });
+    // A long tool says nothing while it works, and silence is what the stall
+    // guard watches for, so the clock is held until this step reports back.
+    options.guard?.pause();
     try {
       const result = await execute(name, args, {
         ...options,
@@ -1058,6 +1149,8 @@ async function turn(options: TurnOptions): Promise<string> {
         purpose: args.purpose as string,
       });
       return { error };
+    } finally {
+      options.guard?.resume();
     }
   };
 
@@ -1140,7 +1233,30 @@ async function turn(options: TurnOptions): Promise<string> {
           arguments: call.arguments,
         });
     }
-    if (!calls.length) break;
+    if (!calls.length) {
+      // The provider stopped because it ran into its own output-token cap. The
+      // answer so far is already on the screen, so instead of handing back a
+      // fragment the loop replays it and asks the model to carry on writing.
+      if (
+        result.truncated &&
+        result.content &&
+        continuations < MAX_CONTINUATIONS
+      ) {
+        continuations += 1;
+        emit({ type: "continuing", round: continuations });
+        messages.push({ role: "user", content: CONTINUE_PROMPT });
+        responses.push({ role: "user", content: CONTINUE_PROMPT });
+        // Keep the fragment safe before the next round: a continuation that
+        // fails must not lose what was already written.
+        checkpoint(answer, true);
+        continue;
+      }
+      // Out of rounds, or nothing was written to continue from: say so instead
+      // of silently returning half an answer.
+      if (result.truncated && result.content)
+        emit({ type: "note", note: "answer_truncated" });
+      break;
+    }
     for (const call of calls) {
       if (options.trace.length >= MAX_TOOL_CALLS)
         throw new WorkspaceError(429, "ai_tool_limit");

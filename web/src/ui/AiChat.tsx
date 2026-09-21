@@ -705,6 +705,11 @@ export function AiChat({
       });
     } else if (event.type === "error") {
       setError(workspaceError(new Error(String(event.error ?? "请求失败"))));
+    } else if (event.type === "note" && event.note === "answer_truncated") {
+      // The model kept stopping at its own output cap and the automatic
+      // continuation ran out of rounds, so the fragment on screen is all there
+      // is. Say so instead of letting it look like a finished answer.
+      setNotice("回答过长，已自动续写多轮仍未写完，回复「继续」可让它接着写。");
     } else if (event.type === "done") {
       const proposals = (event.proposals ?? []) as Proposal[];
       if (proposals.length)
