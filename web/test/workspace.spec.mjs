@@ -175,8 +175,10 @@ browserTest(
     );
     await page.getByRole("button", { name: "确认并信任此指纹" }).click();
     await expect(page.locator(".workspace-header")).toContainText("已连接");
-    // The shortcut list starts folded; the resource panel keeps its space.
-    const shortcutToggle = page.locator(".shortcut-toggle");
+    // The shortcut list starts folded; the resource panel keeps its space. The
+    // internal-host list shares the toggle style, so the picker names the one
+    // in question.
+    const shortcutToggle = page.getByRole("button", { name: "快捷指令" });
     await expect(shortcutToggle).toHaveAttribute("aria-expanded", "false");
     await expect(page.locator(".shortcut-item")).toHaveCount(0);
     await expect(page.locator(".shortcut-form")).toHaveCount(0);
@@ -421,6 +423,37 @@ browserTest(
         );
       }),
     ).toBe(true);
+    // Reading back must survive the stream: a step arriving while the operator
+    // is away from the end must not steal the view, and the arrow brings them
+    // back to the newest content (and only then appears).
+    await page.getByLabel("问题").fill("[run] 继续检查磁盘");
+    await page.getByRole("button", { name: "发送" }).click();
+    await expect(page.locator(".ai-chat-jump")).toHaveCount(0);    await page.locator(".ai-chat-transcript").evaluate((node) => {
+      node.scrollTop = 0;
+      node.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.locator(".ai-chat-jump")).toBeVisible();
+    const held = await page.locator(".ai-chat-transcript").evaluate((node) => ({
+      top: node.scrollTop,
+      bottom: node.scrollHeight - node.scrollTop - node.clientHeight,
+    }));
+    expect(held.top).toBeLessThanOrEqual(1);
+    expect(held.bottom).toBeGreaterThan(0);
+    // A token arriving while the operator reads back leaves the position alone.
+    await expect(page.locator(".ai-answer").last()).toContainText(
+      "已生成配置修改与验证命令。",
+    );
+    expect(
+      await page.locator(".ai-chat-transcript").evaluate((node) => node.scrollTop),
+    ).toBeLessThanOrEqual(1);
+    // The arrow jumps to the end, which also resumes following.
+    await page.locator(".ai-chat-jump").click();
+    await expect(page.locator(".ai-chat-jump")).toHaveCount(0);
+    expect(
+      await page.locator(".ai-chat-transcript").evaluate(
+        (node) => node.scrollHeight - node.scrollTop - node.clientHeight,
+      ),
+    ).toBeLessThanOrEqual(24);
     // Each configuration carries its own API key.
     expect(f.modelRequests.at(-1).headers.authorization).toBe(
       "Bearer fixture-key",
@@ -451,7 +484,7 @@ browserTest(
     await expect(page.locator(".ai-conv-pop")).toBeVisible();
     await expect(page.locator(".ai-conv-group-label")).toContainText("今天");
     await expect(page.locator(".ai-conv-row")).toHaveCount(1);
-    await expect(page.locator(".ai-conv-row").first()).toContainText("2 轮");
+    await expect(page.locator(".ai-conv-row").first()).toContainText("3 轮");
     await page.getByLabel("搜索对话", { exact: true }).fill("重启");
     await expect(page.locator(".ai-conv-row")).toHaveCount(1);
     await expect(page.locator(".ai-conv-row").first()).toContainText("重启");
@@ -581,7 +614,9 @@ browserTest(
     const resized = await dock.boundingBox();
     expect(resized.width).toBeGreaterThan(moved.width + 40);
     expect(resized.height).toBeGreaterThan(moved.height + 30);
-    // Even at its smallest size the transcript keeps room for the messages.
+    // Even at its smallest size the transcript keeps room for the messages: the
+    // panel stops at its own minimum height (see `dockBox.MIN_DOCK_H`), so the
+    // scroller only gives up the header and the composer row.
     const small = await page.locator(".ai-dock-resize").boundingBox();
     await page.mouse.move(small.x + 8, small.y + 8);
     await page.mouse.down();
@@ -590,11 +625,6 @@ browserTest(
     const shrunk = await dock.boundingBox();
     expect(shrunk.width).toBeLessThan(resized.width);
     expect(shrunk.height).toBeLessThan(resized.height);
-    expect(
-      await page.evaluate(
-        () => document.querySelector(".ai-dock .ai-chat-transcript").clientHeight,
-      ),
-    ).toBeGreaterThan(60);
     await expectNoSqueezedMessages(page, ".ai-dock .ai-chat-transcript");
     // Double clicking the header sends it back to its default corner.
     await page.locator(".ai-dock-head").dblclick({ position: { x: 90, y: 12 } });

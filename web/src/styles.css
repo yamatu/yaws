@@ -268,7 +268,13 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ext-tool-list em { font-style: normal; font-size: 11px; color: #8d97a2; }
 .ext-error { grid-column: 1 / -1; margin: 0; font-size: 12px; color: #fda4af; overflow-wrap: anywhere; }
 .yaws-btn.danger { border-color: #7f1d1d; color: #fda4af; }
+.ai-chat-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* Wrapper for the transcript and its jump-to-end button: `position: relative`
+   anchors the button, `min-height: 0` keeps the scroller from growing past the
+   chat body. */
 .ai-chat-transcript { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
+.ai-chat-jump { position: absolute; right: 14px; bottom: 10px; z-index: 5; display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; border: 1px solid #2b5a75; border-radius: 999px; background: #1d3a4d; box-shadow: 0 6px 16px rgba(0,0,0,.45); color: #7dd3fc; font-size: 12px; cursor: pointer; }
+.ai-chat-jump:hover { border-color: #38bdf8; background: #22485e; }
 /* Message rows always keep their natural height: a tall tool card or diff must
    never be squeezed by the neighbouring messages into an unreadable sliver. */
 .ai-chat-transcript > * { flex: 0 0 auto; }

@@ -50,6 +50,11 @@ import {
   type HostOption,
 } from "./aiHosts";
 import { FloatingPanel } from "./FloatingPanel";
+import {
+  scrollIntent,
+  shouldStickOnChange,
+  stickAfterScroll,
+} from "./chatScroll";
 import type { Conversation } from "./conversations";
 
 type Profile = {
@@ -240,6 +245,19 @@ export function AiChat({
   const [, setTick] = useState(0);
   const controller = useRef<AbortController | null>(null);
   const transcript = useRef<HTMLDivElement | null>(null);
+  // Whether the view follows the answer as it is written. It starts as `true`
+  // (a fresh transcript should show its newest content) and the operator decides
+  // from then on: reading back turns it off, returning to the end turns it on.
+  // Kept in a ref because a scroll event must read the latest value without
+  // waiting for a re-render, and mirrored into state so the jump-to-end button
+  // can appear.
+  const stick = useRef(true);
+  const lastTop = useRef(0);
+  const [atEnd, setAtEnd] = useState(true);
+  const setStick = useCallback((value: boolean) => {
+    stick.current = value;
+    setAtEnd(value);
+  }, []);
   const counter = useRef(0);
   const nextKey = () => `e${++counter.current}`;
 
@@ -425,12 +443,44 @@ export function AiChat({
     };
   }, [machineId, loadConversations, openConversation]);
 
-  // Scroll on transcript changes and when a step starts — never on a clock tick:
-  // the timer must not yank the view back while the operator reads back.
+  // Follow the transcript only while the operator is at the end of it. Steps
+  // push the answer down from above, so jumping on every change is what made
+  // reading back impossible mid-run; a finished answer is still revealed, and
+  // the timer never scrolls on its own (see `chatScroll`).
   useEffect(() => {
     const node = transcript.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [entries, progress?.kind, progress?.step]);
+    if (!node) return;
+    if (!shouldStickOnChange({ stick: stick.current, busy, entries })) return;
+    node.scrollTop = node.scrollHeight;
+    lastTop.current = node.scrollTop;
+  }, [entries, busy, progress?.kind, progress?.step]);
+
+  /**
+   * One scroll event from the operator: away from the end stops the follow, back
+   * to the end resumes it and jumps, so the tokens that arrived while reading
+   * are not missed. A transcript that already sits at the end (a re-render, a
+   * resize) must not undo a running follow.
+   */
+  function onTranscriptScroll() {
+    const node = transcript.current;
+    if (!node) return;
+    const intent = scrollIntent(lastTop.current, node.scrollTop);
+    lastTop.current = node.scrollTop;
+    if (intent === "up") {
+      setStick(false);
+      return;
+    }
+    if (intent === "down") setStick(stickAfterScroll(stick.current, node).stick);
+  }
+
+  /** The arrow in the transcript: come back to the newest content. */
+  function jumpToEnd() {
+    const node = transcript.current;
+    if (!node) return;
+    setStick(true);
+    node.scrollTop = node.scrollHeight;
+    lastTop.current = node.scrollTop;
+  }
 
   // One shared clock for the run: it stops ticking when the stream is over.
   useEffect(() => {
@@ -1126,7 +1176,12 @@ export function AiChat({
           <ExtensionSettings />
         </form>
       )}
-      <div className="ai-chat-transcript" ref={transcript}>
+      <div className="ai-chat-body">
+        <div
+          className="ai-chat-transcript"
+          ref={transcript}
+          onScroll={onTranscriptScroll}
+        >
         {entries.length === 0 && !busy && (
           <div className="ai-chat-empty">
             <p>
@@ -1318,6 +1373,21 @@ export function AiChat({
             </section>
           );
         })}
+        </div>
+        {/* Only offered while the update stream is off: the operator scrolled
+            back to read something and the newest tokens are below the fold. */}
+        {!atEnd ? (
+          <button
+            type="button"
+            className="ai-chat-jump"
+            title="回到最新内容"
+            aria-label="回到最新内容"
+            onClick={jumpToEnd}
+          >
+            <ChevronDown size={15} />
+            回到最新
+          </button>
+        ) : null}
       </div>
       {/* The live status is chrome, not transcript content: keeping it outside
           leaves the answer as the element that closes the turn. */}
