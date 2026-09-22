@@ -431,7 +431,8 @@ browserTest(
     // back to the newest content (and only then appears).
     await page.getByLabel("问题").fill("[run] 继续检查磁盘");
     await page.getByRole("button", { name: "发送" }).click();
-    await expect(page.locator(".ai-chat-jump")).toHaveCount(0);    await page.locator(".ai-chat-transcript").evaluate((node) => {
+    await expect(page.locator(".ai-chat-jump")).toHaveCount(0);
+    await page.locator(".ai-chat-transcript").evaluate((node) => {
       node.scrollTop = 0;
       node.dispatchEvent(new Event("scroll"));
     });
@@ -462,6 +463,65 @@ browserTest(
       "Bearer fixture-key",
     );
     await expect(page.locator(".ai-chat-session")).toContainText("主力模型");
+    // The arrow keys recall the questions this conversation was already asked,
+    // newest first, and coming back down returns the half-written question
+    // instead of clearing it.
+    const question = page.getByLabel("问题");
+    await question.fill("[run] 稍后再问的问题");
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(page.locator(".ai-answer").last()).toContainText(
+      "已生成配置修改与验证命令。",
+    );
+    await question.fill("还没写完的问题");
+    // The question just asked is the first thing `up` reaches.
+    await question.press("ArrowUp");
+    await expect(question).toHaveValue("[run] 稍后再问的问题");
+    // A second press goes one older, and the value is one of the questions this
+    // conversation was asked before — not the draft and not the newest.
+    await question.press("ArrowUp");
+    const older = await question.inputValue();
+    expect(older).not.toBe("[run] 稍后再问的问题");
+    expect(older).not.toBe("还没写完的问题");
+    expect(older.trim()).not.toBe("");
+    // Coming back down returns the newest question, then the draft.
+    await question.press("ArrowDown");
+    await expect(question).toHaveValue("[run] 稍后再问的问题");
+    await question.press("ArrowDown");
+    await expect(question).toHaveValue("还没写完的问题");
+    // Walk to the oldest question and confirm `up` there does not swallow the key
+    // (the box keeps its value instead of going blank).
+    for (let i = 0; i < 20; i += 1) await question.press("ArrowUp");
+    await expect(question).not.toHaveValue("");
+    // Editing a recalled question makes it the operator's own text, so the next
+    // arrow press must not silently throw the edit away.
+    await question.fill("改过的草稿");
+    await question.press("ArrowUp");
+    const recalled = await question.inputValue();
+    expect(recalled).not.toBe("改过的草稿");
+    await question.press("ArrowDown");
+    await expect(question).toHaveValue("改过的草稿");
+    // In a multi-line question the arrows first move the caret through the text,
+    // so recall only takes over once the caret reaches the edge. A caret in the
+    // middle of the text keeps the key for editing.
+    await question.fill("第一行\n第二行\n第三行");
+    await question.evaluate((node) => node.setSelectionRange(5, 5));
+    await question.press("ArrowUp");
+    await expect(question).toHaveValue("第一行\n第二行\n第三行");
+    await question.press("ArrowDown");
+    await expect(question).toHaveValue("第一行\n第二行\n第三行");
+    // Caret on the last line: nothing left below, so `down` walks back to the
+    // draft. Walking up first is what makes there be anything to walk down to.
+    await question.evaluate((node) => node.setSelectionRange(0, 0));
+    await question.press("ArrowUp");
+    await expect(question).not.toHaveValue("第一行\n第二行\n第三行");
+    const recalledMulti = await question.inputValue();
+    await question.evaluate((node) => {
+      node.setSelectionRange(node.value.length, node.value.length);
+    });
+    await question.press("ArrowDown");
+    await expect(question).toHaveValue("第一行\n第二行\n第三行");
+    expect(recalledMulti).not.toBe("第一行\n第二行\n第三行");
+    await question.fill("");
     // Anything mutating waits for an approval card instead of running.
     await page.getByLabel("问题").fill("[write] 重启 nginx");
     await page.getByRole("button", { name: "发送", exact: true }).click();
@@ -487,7 +547,8 @@ browserTest(
     await expect(page.locator(".ai-conv-pop")).toBeVisible();
     await expect(page.locator(".ai-conv-group-label")).toContainText("今天");
     await expect(page.locator(".ai-conv-row")).toHaveCount(1);
-    await expect(page.locator(".ai-conv-row").first()).toContainText("3 轮");
+    // Four questions were asked by this point, the last one for the recall check.
+    await expect(page.locator(".ai-conv-row").first()).toContainText("4 轮");
     await page.getByLabel("搜索对话", { exact: true }).fill("重启");
     await expect(page.locator(".ai-conv-row")).toHaveCount(1);
     await expect(page.locator(".ai-conv-row").first()).toContainText("重启");

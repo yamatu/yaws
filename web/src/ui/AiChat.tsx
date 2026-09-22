@@ -54,6 +54,14 @@ import {
   shouldStickOnChange,
   stickAfterScroll,
 } from "./chatScroll";
+import {
+  atEdge,
+  down as historyDown,
+  NEW_CURSOR,
+  remember,
+  up as historyUp,
+  type HistoryCursor,
+} from "./promptHistory";
 import type { Conversation } from "./conversations";
 
 type Profile = {
@@ -245,6 +253,16 @@ export function AiChat({
   const [autoRun, setAutoRun] = useState<AutoRun>(storedAutoRun);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [input, setInput] = useState("");
+  /**
+   * Questions this conversation was asked, newest last, plus where the arrow
+   * keys currently sit in them. Unlike the transcript this is only about the
+   * input box, so it is deliberately not part of the saved conversation: the
+   * stored turns are already the record, and a recalled question becomes a
+   * stored turn the moment it is asked again.
+   */
+  const [history, setHistory] = useState<string[]>([]);
+  const cursor = useRef<HistoryCursor>(NEW_CURSOR);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -416,6 +434,13 @@ export function AiChat({
           });
       }
       setEntries(restored);
+      // A reopened conversation can be recalled from, so switching away and back
+      // does not lose the ability to press `up` for an earlier question.
+      setHistory(
+        data.turns.map((turn) => turn.prompt).filter((text) => text.trim()),
+      );
+      cursor.current = NEW_CURSOR;
+      setInput("");
       setConversationId(id);
       setUsage(null);
       if (data.conversation.root) setRoot(data.conversation.root);
@@ -746,6 +771,11 @@ export function AiChat({
     follower.current?.abort();
     controller.current?.abort();
     setEntries([]);
+    // A new chat has no questions of its own to recall yet, and keeping the old
+    // ones would offer `up` questions that belong to a conversation the operator
+    // just left.
+    setHistory([]);
+    cursor.current = NEW_CURSOR;
     setConversationId("");
     setError("");
     setNotice("");
@@ -905,6 +935,11 @@ export function AiChat({
       return;
     }
     setInput("");
+    // The question just asked is now the newest one `up` reaches, and the box
+    // stops browsing: recall is per conversation, so `setHistory` here is the
+    // one place the list grows from the operator's own typing.
+    setHistory((old) => remember(old, message));
+    cursor.current = NEW_CURSOR;
     setError("");
     setNotice("");
     setHostOpen(false);
@@ -1683,15 +1718,46 @@ export function AiChat({
             className="yaws-input"
             rows={compact ? 2 : 3}
             value={input}
-            placeholder="问点什么，例如：帮我看看 nginx 为什么 502"
+            ref={inputRef}
+            placeholder="问点什么，例如：帮我看看 nginx 为什么 502    （↑ / ↓ 可翻回之前问过的问题）"
             aria-label="问题"
-            disabled={busy}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              // Editing is not browsing: the recalled question becomes the
+              // operator's own text, so `down` must not silently replace it.
+              cursor.current = { ...cursor.current, index: 0 };
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void send();
+                return;
               }
+              if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+              if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+              // In a multi-line question the arrow keys first have to move the
+              // caret through the lines the operator is writing; recall only
+              // takes over once there is no line left in that direction.
+              const caret = e.currentTarget.selectionStart ?? 0;
+              if (!atEdge(input, caret, e.key === "ArrowUp" ? -1 : 1)) return;
+              const target = e.currentTarget;
+              const moved =
+                e.key === "ArrowUp"
+                  ? historyUp(history, cursor.current, input)
+                  : historyDown(history, cursor.current, input);
+              // Nothing older/newer: let the caret have the key instead of
+              // swallowing it, so `up` in an empty box is not a dead key.
+              if (!moved) return;
+              e.preventDefault();
+              cursor.current = moved.cursor;
+              setInput(moved.value);
+              // The replacement is written by React on the next frame, so the
+              // caret is placed there: end of the question, which is where a
+              // recalled question is most likely to want an edit.
+              requestAnimationFrame(() => {
+                const end = target.value.length;
+                target.setSelectionRange(end, end);
+              });
             }}
           />
           {busy ? (
