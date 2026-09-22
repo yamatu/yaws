@@ -491,6 +491,13 @@ export async function harness(port = 0) {
     // the live status line before the answer arrives.
     if (marker.includes("[slow]"))
       await new Promise((done) => setTimeout(done, 1200));
+    // `[hold]` keeps the model busy long enough for a client to hang up and come
+    // back. Like `[sse]` it is looked for in the whole history, because the run
+    // that has to survive a reload is a multi-round one: a tool call first, then
+    // the long answer. The delay is what a real provider's thinking time looks
+    // like; only a run that is detached from its request survives it.
+    if (history.some((m) => typeof m.content === "string" && m.content.includes("[hold]")))
+      await new Promise((done) => setTimeout(done, 2500));
     // `[strict]` imitates a gateway that rejects the optional `stream_options`
     // field, so the client has to retry without it instead of failing the answer.
     if (marker.includes("[strict]") && body.stream_options) {

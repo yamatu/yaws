@@ -269,8 +269,10 @@ test("the assistant serves several machines at once", async (t) => {
   });
 
   await t.test("an interrupted run gives its slot back", async () => {
-    // Stopping a run (or closing the page) aborts the stream. The conversation
-    // must become usable again instead of staying locked until a restart.
+    // Closing the page no longer ends the run, so the conversation stays busy
+    // while it keeps working — that is the point of detaching it. The slot is
+    // released by stopping the run explicitly, and the conversation must be
+    // usable again right after instead of staying locked until a restart.
     const controller = new AbortController();
     const live = await openChat(
       f,
@@ -279,12 +281,34 @@ test("the assistant serves several machines at once", async (t) => {
       controller.signal,
     );
     assert.equal(live.status, 200, live.error || JSON.stringify(live.events));
-    const conversationId = live.events.find(
-      (event) => event.type === "start",
-    )?.conversationId;
-    assert.ok(conversationId);
+    const start = live.events.find((event) => event.type === "start");
+    const conversationId = start?.conversationId;
+    const runId = start?.runId;
+    assert.ok(conversationId && runId);
+    // The page goes away, and the run is still the conversation's turn.
     controller.abort();
-    let retry = { status: 0, error: "never tried", events: [] };
+    const busy = await openChat(f, 1, {
+      message: "停止之后还能继续问",
+      root: "/srv/app",
+      autoRun: "read",
+      conversationId,
+    });
+    assert.equal(busy.status, 409, JSON.stringify(busy.error));
+    assert.equal(busy.error, "ai_conversation_busy");
+    // Stopping it is what frees the slot.
+    const stopped = await fetch(
+      `${f.url}/api/ai/conversations/${conversationId}/runs/${runId}/stop`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${f.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ confirm: true }),
+      },
+    );
+    assert.equal(stopped.status, 200, await stopped.text());
+    let retry = { status: 0, error: "never tried", events: [], finish: async () => {} };
     for (let attempt = 0; attempt < 40; attempt += 1) {
       retry = await openChat(f, 1, {
         message: "停止之后还能继续问",

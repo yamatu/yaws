@@ -9,7 +9,6 @@ import {
   Cpu,
   FileCode2,
   FolderTree,
-  LoaderCircle,
   MessageSquarePlus,
   Pencil,
   Play,
@@ -180,6 +179,39 @@ function storedConversation(machineId: number): string {
   }
 }
 
+/**
+ * Reads one NDJSON frame at a time out of a streamed response.
+ *
+ * Both the request that starts a run and the re-attach that follows one use
+ * this, so a page that comes back after a reload parses the very same frames the
+ * original request did. Frames are split on newlines and a partial trailing line
+ * is kept in the buffer, because a socket read can land in the middle of one.
+ */
+async function readFrames(
+  response: Response,
+  onEvent: (event: Record<string, any>) => void,
+) {
+  if (!response.body) throw new Error(`http_${response.status}`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        onEvent(JSON.parse(line) as Record<string, any>);
+      } catch {
+        // A malformed frame is skipped: one bad line must not kill the run.
+      }
+    }
+  }
+}
+
 const TOOL_ICON: Record<string, typeof Terminal> = {
   list_files: FolderTree,
   read_file: FileCode2,
@@ -236,9 +268,21 @@ export function AiChat({
   const [usage, setUsage] = useState<Usage | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   // A run that is still going on the server after this view left, e.g. the
-  // floating panel was collapsed mid-answer. We poll it until it finishes
-  // instead of showing a frozen half-transcript.
+  // floating panel was collapsed mid-answer, or the page was reloaded. Instead
+  // of polling the transcript we re-attach to the run's own stream, so a
+  // refresh keeps showing the answer as it is written.
   const [following, setFollowing] = useState(false);
+  // The run this view is (re-)attached to, and how many frames of it have been
+  // rendered. A reconnect passes the count so the answer is not duplicated.
+  const attached = useRef<{ runId: string; frames: number }>({ runId: "", frames: 0 });
+  /** The reader that is watching a detached run, so it can be stopped cleanly. */
+  const follower = useRef<AbortController | null>(null);
+  /**
+   * Set while the operator is stopping a run, so the stream that owns it reports
+   * a stop rather than the generic "connection lost" it would otherwise see
+   * when its own socket is closed by the stop button.
+   */
+  const stopping = useRef(false);
   // The clock is kept in a ref so the ticking status line does not re-render
   // the whole transcript; `busy` drives the visible updates.
   const clock = useRef({ start: 0, end: 0 });
@@ -349,6 +393,11 @@ export function AiChat({
     };
   }, [applyProfiles]);
 
+  // Leaving the page detaches this reader; the run keeps going. The stored run
+  // id is what brings the transcript back on the next mount, and an explicit
+  // stop is the only thing that actually ends it (see `stopRun`).
+  useEffect(() => () => follower.current?.abort(), []);
+
   /** Rebuilds the transcript from a stored conversation. */
   const applyConversation = useCallback(
     (id: string, data: { conversation: StoredConversation; turns: ChatTurn[] }) => {
@@ -388,17 +437,173 @@ export function AiChat({
   );
 
   /**
-   * Decides whether a loaded conversation should keep updating itself. A run
-   * that is still `running` is followed: its answer arrives later, so showing
-   * the steps alone would look like the answer was lost.
+   * Applies one frame of the run stream. Shared by the request that starts a
+   * run and by a re-attach after a reload, so a refreshed page renders the
+   * answer exactly the way the original request did.
+   */
+  const handleEvent = useCallback((event: Record<string, any>) => {
+    setProgress((old) => acceptEvent(old, event));
+    if (event.type === "start") {
+      setConversationId(event.conversationId);
+      if (event.profile?.name || event.model)
+        setSession({ name: event.profile?.name ?? "", model: event.model ?? "" });
+      try {
+        localStorage.setItem(chatKey(machineId), event.conversationId);
+      } catch {
+        // ignore
+      }
+    } else if (event.type === "tool") {
+      const tool = event.tool as Tool;
+      setEntries((old) => {
+        const index = old.findIndex(
+          (entry) => entry.kind === "tool" && entry.tool.id === tool.id,
+        );
+        if (index < 0) return [...old, { key: nextKey(), kind: "tool", tool }];
+        const copy = old.slice();
+        copy[index] = { key: copy[index].key, kind: "tool", tool };
+        return copy;
+      });
+    } else if (event.type === "proposal") {
+      const proposal = event.proposal as Proposal;
+      setEntries((old) => {
+        const index = old.findIndex(
+          (entry) => entry.kind === "proposal" && entry.proposal.id === proposal.id,
+        );
+        if (index < 0)
+          return [...old, { key: nextKey(), kind: "proposal", proposal }];
+        const copy = old.slice();
+        copy[index] = { key: copy[index].key, kind: "proposal", proposal };
+        return copy;
+      });
+    } else if (event.type === "thinking") {
+      // Reasoning streams on its own channel: it is shown apart from the answer
+      // so a model that thinks out loud cannot be mistaken for a reply.
+      const text = String(event.text ?? "");
+      if (text)
+        setEntries((old) => {
+          const copy = old.slice();
+          const last = copy[copy.length - 1];
+          if (last?.kind === "thinking") {
+            copy[copy.length - 1] = { ...last, text: last.text + text };
+            return copy;
+          }
+          return [...copy, { key: nextKey(), kind: "thinking", text }];
+        });
+    } else if (event.type === "usage") {
+      setUsage(event.usage as Usage);
+    } else if (event.type === "delta") {
+      setEntries((old) => {
+        const copy = old.slice();
+        for (let i = copy.length - 1; i >= 0; i--) {
+          const entry = copy[i];
+          if (entry.kind === "user") break;
+          if (entry.kind === "assistant") {
+            copy[i] = { ...entry, text: entry.text + String(event.text) };
+            return copy;
+          }
+        }
+        return [...copy, { key: nextKey(), kind: "assistant", text: String(event.text) }];
+      });
+    } else if (event.type === "answer") {
+      const text = String(event.text ?? "");
+      setEntries((old) => {
+        const copy = old.slice();
+        for (let i = copy.length - 1; i >= 0; i--) {
+          const entry = copy[i];
+          if (entry.kind === "user") break;
+          if (entry.kind === "assistant") {
+            copy[i] = { ...entry, text };
+            return copy;
+          }
+        }
+        return [...copy, { key: nextKey(), kind: "assistant", text }];
+      });
+    } else if (event.type === "error") {
+      setError(workspaceError(new Error(String(event.error ?? "请求失败"))));
+    } else if (event.type === "note" && event.note === "answer_truncated") {
+      // The model kept stopping at its own output cap and the automatic
+      // continuation ran out of rounds, so the fragment on screen is all there
+      // is. Say so instead of letting it look like a finished answer.
+      setNotice("回答过长，已自动续写多轮仍未写完，回复「继续」可让它接着写。");
+    } else if (event.type === "done") {
+      const proposals = (event.proposals ?? []) as Proposal[];
+      if (proposals.length)
+        setEntries((old) =>
+          old.map((entry) => {
+            if (entry.kind !== "proposal") return entry;
+            const found = proposals.find((p) => p.id === entry.proposal.id);
+            return found
+              ? { key: entry.key, kind: "proposal", proposal: found }
+              : entry;
+          }),
+        );
+    }
+    }, [machineId]);
+
+  const followRun = useCallback(
+    async (runId: string, from = 0) => {
+      if (!runId) return;
+      const ac = new AbortController();
+      follower.current = ac;
+      attached.current = { runId, frames: from };
+      setFollowing(true);
+      try {
+        const token = getToken();
+        const response = await fetch(
+          `/api/ai/conversations/${conversationId}/runs/${runId}/stream?after=${from}`,
+          {
+            headers: token ? { authorization: `Bearer ${token}` } : {},
+            signal: ac.signal,
+          },
+        );
+        if (!response.ok || !response.body)
+          throw new Error(`http_${response.status}`);
+        await readFrames(response, (event) => {
+          // The server closes the stream when the run ends; `stream_end` is only
+          // the control frame that says so, and it is not a frame of the run.
+          if (event.type === "stream_end") return;
+          attached.current.frames += 1;
+          handleEvent(event);
+        });
+      } catch (e) {
+        // A dropped reconnect is not a failed run: the run keeps going and the
+        // next mount attaches again. Only a real HTTP error is worth showing.
+        if (!ac.signal.aborted && workspaceError(e) !== "http_404")
+          setError(workspaceError(e));
+      } finally {
+        if (follower.current === ac) follower.current = null;
+        setFollowing(false);
+        clock.current.end = clock.current.end || Date.now();
+        setProgress((old) => (old ? { ...old, kind: "done", last: "" } : old));
+      }
+    },
+    [conversationId, handleEvent],
+  );
+
+  /**
+   * Decides whether a loaded conversation should keep updating itself.
+   *
+   * A stored turn whose status is `running` only says the row was not finished
+   * when it was read. Whether there is still something to watch is answered by
+   * the live-run field: after a reload the run is still going and is re-attached
+   * to, while a row left over from a server restart is shown as it is, so the
+   * page does not wait forever on a stream that no longer exists.
    */
   const syncFollow = useCallback(
-    (turns: ChatTurn[]) => {
+    (turns: ChatTurn[], liveRunId: string) => {
       const last = turns.at(-1);
       const running = last?.status === "running";
-      setFollowing(running);
       if (!running || !last) {
+        setFollowing(false);
         setProgress(null);
+        return;
+      }
+      // A live run can be picked up mid-answer; a `running` row without one is
+      // history the process lost, and it must not look like it is still working.
+      if (!liveRunId) {
+        setFollowing(false);
+        setProgress(null);
+        setNotice("上一轮因为面板重启没有跑完，回复「继续」可以接着处理。");
         return;
       }
       let next = startProgress();
@@ -406,8 +611,11 @@ export function AiChat({
         next = acceptEvent(next, { type: "tool", tool }) ?? next;
       setProgress(next);
       clock.current = { start: last.createdAt || Date.now(), end: 0 };
+      // The stored trace is already on screen, so the replay starts after it and
+      // the answer is not written twice.
+      void followRun(liveRunId, 0);
     },
-    [],
+    [followRun],
   );
 
   const openConversation = useCallback(
@@ -417,8 +625,9 @@ export function AiChat({
         const data = await apiFetch<{
           conversation: StoredConversation;
           turns: ChatTurn[];
+          liveRunId?: string;
         }>(`/api/ai/conversations/${id}`);
-        syncFollow(applyConversation(id, data));
+        syncFollow(applyConversation(id, data), data.liveRunId ?? "");
       } catch (e) {
         setError(workspaceError(e));
       }
@@ -490,43 +699,51 @@ export function AiChat({
     return () => clearInterval(timer);
   }, [busy, following]);
 
-  // Follow a run this view is not streaming itself. The server keeps writing
-  // the answer and steps as it goes, so a short poll is enough to show the
-  // operator the result instead of a frozen transcript.
-  useEffect(() => {
-    if (!following || busy || !conversationId) return;
-    let stopped = false;
-    const tick = async () => {
-      try {
-        const data = await apiFetch<{
-          conversation: StoredConversation;
-          turns: ChatTurn[];
-        }>(`/api/ai/conversations/${conversationId}`);
-        if (stopped) return;
-        const turns = applyConversation(conversationId, data);
-        const last = turns.at(-1);
-        if (!last || last.status !== "running") {
-          setFollowing(false);
-          clock.current.end = clock.current.end || Date.now();
-          setProgress((old) => (old ? { ...old, kind: "done", last: "" } : old));
-          return;
-        }
-        let next = startProgress();
-        for (const tool of last.trace ?? [])
-          next = acceptEvent(next, { type: "tool", tool }) ?? next;
-        setProgress(next);
-      } catch {
-        if (!stopped) setFollowing(false);
-      }
-    };
-    const timer = setInterval(() => void tick(), 1500);
-    return () => {
-      stopped = true;
-      clearInterval(timer);
-    };
-  }, [following, busy, conversationId, applyConversation]);
+  /**
+   * Re-attaches to a run that is still going on the server.
+   *
+   * `following` used to mean "poll the transcript every 1.5 s". The run is a
+   * stream now, so the re-attach endpoint replays what has already happened and
+   * then keeps writing live frames — the answer appears written out, not in
+   * 1.5-second lumps, and a refresh costs nothing but a reconnect.
+   *
+   * `from` is the number of frames already rendered, so coming back to a tab
+   * after a dropped socket does not duplicate the part that was already shown.
+   */
+  /**
+   * Stops the run the operator is looking at.
+   *
+   * The button used to close the socket, which stopped the run only because the
+   * run lived inside that request. Now the run is detached, so stopping is an
+   * explicit call: the stream is closed here and the server is told to abort, so
+   * the same button works on a page that merely re-attached after a reload.
+   */
+  async function stopRun() {
+    const runId = attached.current.runId;
+    stopping.current = true;
+    follower.current?.abort();
+    controller.current?.abort();
+    setFollowing(false);
+    setError("已停止");
+    setProgress((old) => (old ? stopProgress(old) : old));
+    if (!runId || !conversationId) {
+      stopping.current = false;
+      return;
+    }
+    try {
+      await apiFetch(
+        `/api/ai/conversations/${conversationId}/runs/${runId}/stop`,
+        { method: "POST", body: JSON.stringify({ confirm: true }) },
+      );
+    } catch (e) {
+      setError(workspaceError(e));
+    } finally {
+      stopping.current = false;
+    }
+  }
 
   function newChat() {
+    follower.current?.abort();
     controller.current?.abort();
     setEntries([]);
     setConversationId("");
@@ -676,118 +893,27 @@ export function AiChat({
     }
   }
 
-  function handleEvent(event: Record<string, any>) {
-    setProgress((old) => acceptEvent(old, event));
-    if (event.type === "start") {
-      setConversationId(event.conversationId);
-      if (event.profile?.name || event.model)
-        setSession({ name: event.profile?.name ?? "", model: event.model ?? "" });
-      try {
-        localStorage.setItem(chatKey(machineId), event.conversationId);
-      } catch {
-        // ignore
-      }
-    } else if (event.type === "tool") {
-      const tool = event.tool as Tool;
-      setEntries((old) => {
-        const index = old.findIndex(
-          (entry) => entry.kind === "tool" && entry.tool.id === tool.id,
-        );
-        if (index < 0) return [...old, { key: nextKey(), kind: "tool", tool }];
-        const copy = old.slice();
-        copy[index] = { key: copy[index].key, kind: "tool", tool };
-        return copy;
-      });
-    } else if (event.type === "proposal") {
-      const proposal = event.proposal as Proposal;
-      setEntries((old) => {
-        const index = old.findIndex(
-          (entry) => entry.kind === "proposal" && entry.proposal.id === proposal.id,
-        );
-        if (index < 0)
-          return [...old, { key: nextKey(), kind: "proposal", proposal }];
-        const copy = old.slice();
-        copy[index] = { key: copy[index].key, kind: "proposal", proposal };
-        return copy;
-      });
-    } else if (event.type === "thinking") {
-      // Reasoning streams on its own channel: it is shown apart from the answer
-      // so a model that thinks out loud cannot be mistaken for a reply.
-      const text = String(event.text ?? "");
-      if (text)
-        setEntries((old) => {
-          const copy = old.slice();
-          const last = copy[copy.length - 1];
-          if (last?.kind === "thinking") {
-            copy[copy.length - 1] = { ...last, text: last.text + text };
-            return copy;
-          }
-          return [...copy, { key: nextKey(), kind: "thinking", text }];
-        });
-    } else if (event.type === "usage") {
-      setUsage(event.usage as Usage);
-    } else if (event.type === "delta") {
-      setEntries((old) => {
-        const copy = old.slice();
-        for (let i = copy.length - 1; i >= 0; i--) {
-          const entry = copy[i];
-          if (entry.kind === "user") break;
-          if (entry.kind === "assistant") {
-            copy[i] = { ...entry, text: entry.text + String(event.text) };
-            return copy;
-          }
-        }
-        return [...copy, { key: nextKey(), kind: "assistant", text: String(event.text) }];
-      });
-    } else if (event.type === "answer") {
-      const text = String(event.text ?? "");
-      setEntries((old) => {
-        const copy = old.slice();
-        for (let i = copy.length - 1; i >= 0; i--) {
-          const entry = copy[i];
-          if (entry.kind === "user") break;
-          if (entry.kind === "assistant") {
-            copy[i] = { ...entry, text };
-            return copy;
-          }
-        }
-        return [...copy, { key: nextKey(), kind: "assistant", text }];
-      });
-    } else if (event.type === "error") {
-      setError(workspaceError(new Error(String(event.error ?? "请求失败"))));
-    } else if (event.type === "note" && event.note === "answer_truncated") {
-      // The model kept stopping at its own output cap and the automatic
-      // continuation ran out of rounds, so the fragment on screen is all there
-      // is. Say so instead of letting it look like a finished answer.
-      setNotice("回答过长，已自动续写多轮仍未写完，回复「继续」可让它接着写。");
-    } else if (event.type === "done") {
-      const proposals = (event.proposals ?? []) as Proposal[];
-      if (proposals.length)
-        setEntries((old) =>
-          old.map((entry) => {
-            if (entry.kind !== "proposal") return entry;
-            const found = proposals.find((p) => p.id === entry.proposal.id);
-            return found
-              ? { key: entry.key, kind: "proposal", proposal: found }
-              : entry;
-          }),
-        );
-    }
-  }
-
   async function send() {
     const message = input.trim();
-    if (!message || busy || following) return;
+    // `busy` is this view's own run. `following` is a run that belongs to this
+    // conversation but is being watched rather than started here; asking again
+    // would be refused by the server (one conversation runs one turn at a
+    // time), so the refusal is shown instead of swallowing the question.
+    if (!message || busy) return;
+    if (following) {
+      setError("这个对话正在运行，请等它结束或先停止");
+      return;
+    }
     setInput("");
     setError("");
     setNotice("");
-    setFollowing(false);
     setHostOpen(false);
     push({ key: nextKey(), kind: "user", text: message });
     setBusy(true);
     setProgress(startProgress());
     setUsage(null);
     clock.current = { start: Date.now(), end: 0 };
+    attached.current = { runId: "", frames: 0 };
     const ac = new AbortController();
     controller.current = ac;
     try {
@@ -824,30 +950,35 @@ export function AiChat({
         }
         throw new Error(text);
       }
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            handleEvent(JSON.parse(line));
-          } catch {
-            // ignore malformed frame
-          }
-        }
-      }
+      await readFrames(response, (event) => {
+        // Remember which run this is the moment the server names it, so a
+        // reload (or the reconnect below) can find it again. The count is kept
+        // in step with the frames so a reconnect resumes without repeating.
+        if (event.type === "start" && typeof event.runId === "string")
+          attached.current = { runId: event.runId, frames: 0 };
+        attached.current.frames += 1;
+        handleEvent(event);
+      });
       void loadConversations();
     } catch (e) {
-      const aborted =
-        ac.signal.aborted || (e as Error)?.name === "AbortError";
-      setError(aborted ? "已停止" : workspaceError(e));
-      setProgress((old) => (aborted ? stopProgress(old) : failProgress(old)));
+      const aborted = ac.signal.aborted || (e as Error)?.name === "AbortError";
+      // A stopped request no longer stops the run (the run is detached now), so
+      // the wording must not claim it did.
+      if (stopping.current) {
+        setError("已停止");
+        setProgress((old) => (old ? stopProgress(old) : old));
+      } else {
+        setError(aborted ? "已断开与这一轮的连接" : workspaceError(e));
+        setProgress((old) => (aborted ? stopProgress(old) : failProgress(old)));
+      }
+      // Losing the socket is exactly the case the run is detached for: come
+      // back to it instead of leaving a half-written answer on screen.
+      const runId = attached.current.runId;
+      const offline =
+        !aborted &&
+        (/network|failed to fetch|load failed/i.test(String(e)) ||
+          /^http_5/.test(workspaceError(e)));
+      if (runId && offline) void followRun(runId, attached.current.frames);
     } finally {
       // The run clock stops here: the status line keeps the final duration.
       clock.current.end = clock.current.end || Date.now();
@@ -1554,7 +1685,7 @@ export function AiChat({
             value={input}
             placeholder="问点什么，例如：帮我看看 nginx 为什么 502"
             aria-label="问题"
-            disabled={busy || following}
+            disabled={busy}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -1569,7 +1700,7 @@ export function AiChat({
               className="yaws-btn tool-text"
               title="停止"
               aria-label="停止"
-              onClick={() => controller.current?.abort()}
+              onClick={() => void stopRun()}
             >
               <CircleStop size={16} />
               停止
@@ -1578,11 +1709,12 @@ export function AiChat({
             <button
               type="button"
               className="yaws-btn tool-text"
-              disabled
-              title="后台仍在运行"
+              title="停止这一轮"
+              aria-label="停止"
+              onClick={() => void stopRun()}
             >
-              <LoaderCircle size={16} className="animate-spin" />
-              运行中
+              <CircleStop size={16} />
+              停止
             </button>
           ) : (
             <button

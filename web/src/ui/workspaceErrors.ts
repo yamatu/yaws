@@ -12,6 +12,8 @@ const errors: Record<string, string> = {
   ai_not_configured: "请先配置 AI 接口和模型",
   ai_busy: "同时运行的 AI 任务太多，请等其中一个结束后再试",
   ai_conversation_busy: "这个对话正在运行，请等它结束或先停止",
+  run_not_running: "这一轮已经结束了",
+  run_running: "这一轮还在运行，请先点“停止”再删除",
   ai_failed: "AI 请求失败，请检查接口设置或稍后重试",
   ai_context_limit: "读取的内容过多，请缩小问题范围",
   ai_tool_limit: "本轮操作过多，请再追问一次继续处理",

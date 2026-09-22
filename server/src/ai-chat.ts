@@ -20,7 +20,7 @@ import {
   runCommand,
   TEXT_LIMIT,
 } from "./files.js";
-import { route, audit, requestSignal } from "./workspace.js";
+import { route, audit } from "./workspace.js";
 import { collectSystemStats, type SystemStats } from "./system-stats.js";
 import {
   autoRuns,
@@ -41,6 +41,11 @@ import {
   type LoadedExtensions,
 } from "./extensions.js";
 import { aiRuns } from "./ai-runs.js";
+import {
+  runStreams,
+  RunStreams,
+  type DetachedRun,
+} from "./ai-streams.js";
 import {
   HOST_FANOUT,
   HOST_OUTPUT_LIMIT,
@@ -346,6 +351,22 @@ export function clip(text: string, max = MAX_TOOL_OUTPUT): string {
 }
 
 /**
+ * The run of this conversation that is still in flight, if any.
+ *
+ * Several conversations run at once — that is the point of the detached runs —
+ * so a reload asks this per conversation instead of guessing from the newest
+ * row's `running` status, which only becomes accurate again when the run ends.
+ */
+export function liveRunIdFor(
+  conversationId: string,
+  streams: RunStreams = runStreams,
+): string {
+  for (const run of streams.all())
+    if (run.conversationId === conversationId && !run.finished) return run.runId;
+  return "";
+}
+
+/**
  * Guards one run: it aborts when nothing has happened for `idleMs` (the model
  * went quiet, a socket died) and, as a last resort, when the run has been going
  * for `totalMs` without ever stopping. `reset()` is called for every event the
@@ -480,6 +501,46 @@ export function toolDetail(name: string, args: Record<string, unknown>): string 
   if (name === "server_stats") return "读取 CPU / 内存 / 磁盘 / 进程";
   if (name === "list_hosts") return "列出可用主机";
   return String(args.path ?? "");
+}
+
+/**
+ * Pipes a detached run into one HTTP response.
+ *
+ * The response is a *reader*: `close` removes it and nothing else. That is what
+ * makes a page reload harmless — the browser drops the socket, the run keeps
+ * going, and the next page attaches again with `GET /runs/:runId/stream`.
+ */
+function streamToReader(
+  res: Response,
+  run: DetachedRun,
+  write: (event: Record<string, unknown>) => void,
+) {
+  const listener = (event: Record<string, unknown>) => {
+    // `stream_end` is a control frame for this attachment, not part of the run:
+    // it is never replayed, so a late reader sees exactly the frames the run
+    // produced and nothing else.
+    if (event.type === "stream_end") {
+      if (!res.writableEnded) {
+        try {
+          res.end();
+        } catch {
+          // The socket is already gone.
+        }
+      }
+      return;
+    }
+    write(event);
+  };
+  for (const event of run.replay) write(event);
+  if (run.finished) {
+    // The run ended before this reader arrived (a reload right on the last
+    // token): replay is the whole story, so close the response here instead of
+    // leaving the client waiting for a stream that will never speak again.
+    if (!res.writableEnded) res.end();
+    return;
+  }
+  run.listeners.add(listener);
+  res.once("close", () => runStreams.detach(run, listener));
 }
 
 export type ChatDeps = {
@@ -635,6 +696,15 @@ export function chatRouter(deps: ChatDeps) {
         updatedAt: conversation.updated_at,
         hosts: extrasByConversation([conversation.id]).get(conversation.id) ?? [],
       },
+      /**
+       * A run of this conversation that is still in flight, if any.
+       *
+       * The stored row already says `running`, but that status is only rewritten
+       * when the run ends — a page that reloads needs to know whether there is
+       * still a live stream to attach to, or whether it is looking at a run the
+       * process lost (a restart) and should be shown as stopped.
+       */
+      liveRunId: liveRunIdFor(conversation.id),
       turns: runs.map((run) => {
         let trace: ToolEvent[] = [];
         try {
@@ -655,6 +725,81 @@ export function chatRouter(deps: ChatDeps) {
     });
   });
 
+  /**
+   * Re-attaches to a run this view is no longer connected to.
+   *
+   * A reloaded page (or a second terminal opened on the same conversation) has
+   * no socket into the run any more, but the run itself never stopped. This
+   * streams it from the beginning, so a page that comes back mid-answer shows
+   * the whole thing instead of a half-written bubble: the frames are the same
+   * ones the original request received, in the same order.
+   *
+   * `after` lets a client that already rendered that many frames skip them; it
+   * is a frame count, not a byte offset, so a reconnect cannot land mid-frame.
+   *
+   * The run is reached through its conversation, not by run id alone: an id from
+   * a different operator must not be streamable, and the ownership check is the
+   * same one every other conversation route uses.
+   */
+  router.get("/conversations/:cid/runs/:runId/stream", (req, res) => {
+    const userId = (req as AuthedRequest).user.id;
+    const conversation = db
+      .prepare("SELECT id FROM ai_conversations WHERE id = ? AND user_id = ?")
+      .get(req.params.cid, userId) as { id: string } | undefined;
+    if (!conversation) throw new WorkspaceError(404, "not_found");
+    const run = runStreams.get(req.params.runId);
+    if (!run || run.conversationId !== conversation.id)
+      throw new WorkspaceError(404, "run_not_running");
+    const after = Number(req.query.after);
+    const from = Number.isFinite(after) && after > 0 ? Math.floor(after) : 0;
+    res.status(200);
+    res.setHeader("content-type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("x-accel-buffering", "no");
+    res.flushHeaders?.();
+    const write = (event: Record<string, unknown>) => {
+      if (res.writableEnded || res.destroyed) return;
+      try {
+        res.write(`${JSON.stringify(event)}\n`);
+      } catch {
+        // The reader went away again; the run is unaffected.
+      }
+    };
+    const listener = (event: Record<string, unknown>) => {
+      write(event);
+      if (event.type === "stream_end" && !res.writableEnded) res.end();
+    };
+    const attached = runStreams.attach(run.runId, listener, from);
+    if (!attached) throw new WorkspaceError(404, "run_not_running");
+    for (const event of attached.replay) write(event);
+    if (run.finished && !res.writableEnded) {
+      res.end();
+      return;
+    }
+    // Same contract as the original request: detaching is not stopping.
+    res.once("close", () => runStreams.detach(run, listener));
+  });
+
+  /**
+   * Stops a run from outside the request that started it.
+   *
+   * The original 停止 button closed the socket. That no longer stops anything,
+   * so stopping has to be an explicit action: it works from a reloaded page, and
+   * from any tab showing the same conversation, without needing the stream that
+   * owns the run to be in the caller's hands.
+   */
+  router.post("/conversations/:cid/runs/:runId/stop", (req, res) => {
+    const userId = (req as AuthedRequest).user.id;
+    const conversation = db
+      .prepare("SELECT id FROM ai_conversations WHERE id = ? AND user_id = ?")
+      .get(req.params.cid, userId) as { id: string } | undefined;
+    if (!conversation) throw new WorkspaceError(404, "not_found");
+    const run = runStreams.get(req.params.runId);
+    if (!run || run.conversationId !== conversation.id)
+      throw new WorkspaceError(404, "run_not_running");
+    res.json({ ok: true, stopped: runStreams.abort(run.runId) });
+  });
+
   router.patch("/conversations/:cid", (req, res) => {
     const userId = (req as AuthedRequest).user.id;
     const { title } = Rename.parse(req.body);
@@ -671,6 +816,12 @@ export function chatRouter(deps: ChatDeps) {
       .prepare("SELECT id FROM ai_conversations WHERE id = ? AND user_id = ?")
       .get(req.params.cid, userId) as { id: string } | undefined;
     if (!conversation) throw new WorkspaceError(404, "not_found");
+    // Refuse while a run of this conversation is still going. The run is
+    // detached from its request and writes to `ai_runs` as it works, so deleting
+    // the rows underneath it would leave updates aimed at a row that is gone.
+    // Stopping first is one click, and the refusal says so.
+    if (liveRunIdFor(conversation.id)) throw new WorkspaceError(409, "run_running");
+    runStreams.forgetConversation(conversation.id);
     db.prepare("DELETE FROM ai_runs WHERE conversation_id = ?").run(conversation.id);
     // The host rows have no cascade of their own (foreign keys are off by
     // default in SQLite), so they are removed explicitly.
@@ -764,18 +915,23 @@ export function chatRouter(deps: ChatDeps) {
         res.setHeader("cache-control", "no-store");
         res.setHeader("x-accel-buffering", "no");
         res.flushHeaders?.();
+        // The run is registered before any work starts, so a reload can find it
+        // again through `GET /runs/:runId/stream`. The socket below is only a
+        // reader: losing it (a refresh, a closed tab, a second terminal asking
+        // its own question) must not stop the model or the SSH work.
+        const runStream = runStreams.create({
+          runId,
+          conversationId,
+          userId,
+          machineId,
+        });
         // Every event the run produces counts as progress, so a slow model that
         // is still writing is never cut off. The pings are the one exception:
         // they keep the connection alive, they do not prove work is happening.
         const guard = runGuard();
         const emit = (event: Record<string, unknown>) => {
           if (event.type !== "ping") guard.reset();
-          if (res.writableEnded || res.destroyed) return;
-          try {
-            res.write(`${JSON.stringify(event)}\n`);
-          } catch {
-            // The operator navigated away mid-write; the abort listener handles it.
-          }
+          runStreams.emit(runStream, event);
         };
         const trace: ToolEvent[] = [];
         const emitTool = (event: ToolEvent) => {
@@ -818,11 +974,24 @@ export function chatRouter(deps: ChatDeps) {
           profile: { id: profile.id, name: profile.name },
           model: config.model,
         });
+        // The reader writes what the run publishes; a broken pipe only detaches
+        // this reader, the run keeps going.
+        const write = (event: Record<string, unknown>) => {
+          if (res.writableEnded || res.destroyed) return;
+          try {
+            res.write(`${JSON.stringify(event)}\n`);
+          } catch {
+            // The operator navigated away mid-write; the run is unaffected.
+          }
+        };
+        streamToReader(res, runStream, write);
 
-        // Keep the two reasons apart: a guard that fired is a stalled run, a
-        // client abort means the operator navigated away, and they deserve
-        // different wording instead of the same "cancelled".
-        const signal = AbortSignal.any([requestSignal(res), guard.signal]);
+        // Only the guard firing or an explicit stop aborts the run. The request
+        // signal is deliberately not part of this: a closed socket means the
+        // operator left the page, not that the question was withdrawn.
+        const stop = new AbortController();
+        runStreams.onAbort(runStream, () => stop.abort());
+        const signal = AbortSignal.any([stop.signal, guard.signal]);
         try {
           const answer = await turn({
             deps,
@@ -889,6 +1058,11 @@ export function chatRouter(deps: ChatDeps) {
         } finally {
           if (heartbeat) clearInterval(heartbeat);
           guard.stop();
+          // Closing the run releases every reader (including one that attached
+          // after the answer was already written) and keeps the last frames
+          // around for a moment, so a refresh around the final token still sees
+          // the answer instead of a 404.
+          runStreams.finish(runStream);
           if (!res.writableEnded) res.end();
         }
       } finally {

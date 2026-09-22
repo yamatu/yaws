@@ -15,4 +15,10 @@ test("ai run failures are explained", () => {
     "同时运行的 AI 任务太多，请等其中一个结束后再试",
   );
   assert.match(workspaceError(new Error("ai_timeout")), /接着写/);
+  // A run that ended between the reload and the re-attach is not an error worth
+  // alarming the operator with; it reads as a finished turn.
+  assert.equal(
+    workspaceError(new Error("run_not_running")),
+    "这一轮已经结束了",
+  );
 });

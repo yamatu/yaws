@@ -323,9 +323,11 @@ test("ai chat", async (t) => {
     assert.equal(turn.events.at(-1).type, "done");
   });
 
-  await t.test("an interrupted run keeps the answer it already wrote", async () => {
+  await t.test("a dropped socket no longer interrupts the run", async () => {
     // `[slow]` leaves the second model call pending, `[pre]` streams a sentence
-    // before the tool, and the abort mimics switching away mid-run.
+    // before the tool, and the abort mimics switching away (or refreshing)
+    // mid-run. The run is detached from its request, so it must keep going, save
+    // its answer, and finish on its own instead of being recorded as cancelled.
     const text = await chatUntil(
       f,
       {
@@ -342,12 +344,18 @@ test("ai chat", async (t) => {
       .map((line) => JSON.parse(line));
     const start = events.find((e) => e.type === "start");
     assert.ok(start?.conversationId, text);
-    // Give the server a beat to persist the cancel after the socket closed.
-    await new Promise((done) => setTimeout(done, 250));
-    const detail = await request(f, `/api/ai/conversations/${start.conversationId}`);
-    const last = detail.body.turns.at(-1);
-    assert.equal(last.status, "cancelled");
-    assert.equal(last.answer, "我先看一下磁盘占用。");
+    // The socket is gone; the run is not. Wait for it to finish by itself.
+    let last;
+    for (let i = 0; i < 100; i += 1) {
+      const detail = await request(f, `/api/ai/conversations/${start.conversationId}`);
+      last = detail.body.turns.at(-1);
+      if (last.status !== "running") break;
+      await new Promise((done) => setTimeout(done, 100));
+    }
+    assert.equal(last.status, "completed", JSON.stringify(last));
+    // The sentence written while the operator was away is kept, and so is the
+    // step the run performed after the socket closed.
+    assert.match(last.answer, /我先看一下磁盘占用。/);
     assert.ok(last.trace.length > 0);
   });
 

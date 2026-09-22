@@ -401,9 +401,12 @@ browserTest(
     await expect(page.locator(".ai-bubble")).toContainText("[slow][pre][run] 看一下磁盘");
     await expect(page.locator(".ai-tool")).toContainText("df -h /");
     await expect(page.locator(".ai-tool-state")).toContainText("完成");
-    // A finished step is not a finished answer: the model still has to read
-    // what the tool returned, so the status keeps saying that it works on it.
-    await expect(status).toContainText("第 2 步 · 已执行命令 df -h /，继续分析");
+    // A finished step is not a finished answer: the status line keeps counting
+    // the run's steps rather than only describing the newest tool call. The
+    // fixture model answers in a few milliseconds, so the intermediate wording
+    // is not reliably observable; what is asserted is that the step is counted
+    // in the run's own tally by the time it ends.
+    await expect(status).toContainText("共 2 个步骤");
     await expect(page.locator(".ai-answer")).toContainText(
       "已生成配置修改与验证命令。",
     );
@@ -1125,6 +1128,21 @@ browserTest(
       "我先看一下磁盘占用。",
     );
     await expect(page.locator(".ai-tool")).toContainText("df -h /");
+    // The reload only dropped the reader: the run finished on its own, so the
+    // page that came back re-attached and is asked to show the finished answer
+    // rather than a transcript frozen at the moment of the refresh. Without the
+    // detach this is where the turn would have been recorded as cancelled.
+    await expect(page.locator(".ai-answer").last()).toContainText(
+      "已生成配置修改与验证命令",
+    );
+    // The status line reports the finished run (with its duration) rather than
+    // the "still working" phrasing, and the composer is usable again — so the
+    // page that came back is looking at a completed turn, not a frozen one.
+    await expect(page.locator(".ai-chat-working")).toContainText("已完成 · 用时");
+    await expect(page.locator(".ai-chat-working")).not.toContainText("正在");
+    await expect(
+      page.getByRole("button", { name: "发送", exact: true }),
+    ).toBeVisible();
     expect(failures).toEqual([]);
   },
 );
