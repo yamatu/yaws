@@ -19,6 +19,8 @@ export const AIConfigSchema = z.object({
     .default(""),
   apiKey: z.string().max(4096).default(""),
   allowPrivate: z.boolean().default(false),
+  /** Empty for custom API keys; official providers use pi's native transport. */
+  officialProvider: z.string().max(40).default(""),
 });
 export type AIConfig = z.infer<typeof AIConfigSchema>;
 
@@ -173,6 +175,7 @@ export function publicProfiles(profiles: AIProfile[], activeId: string) {
       model: p.model,
       reasoning: p.reasoning,
       allowPrivate: p.allowPrivate,
+      officialProvider: p.officialProvider,
       hasKey: !!p.apiKey,
     })),
   };

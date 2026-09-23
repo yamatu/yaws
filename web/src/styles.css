@@ -237,6 +237,13 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-profile-dot { width: 7px; height: 7px; border-radius: 50%; background: #86efac; }
 .ai-profile-warn { width: 14px; height: 14px; border-radius: 50%; background: #78511a; color: #fcd34d; font-size: 10px; line-height: 14px; text-align: center; }
 .ai-profile-keynote { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: #8d97a2; }
+.ai-official { grid-column: 1 / -1; min-width: 0; display: grid; gap: 9px; padding: 12px; border: 1px solid #38536a; border-radius: 12px; background: #16232e; font-size: 12px; }
+.ai-official > p, .ai-official-flow p { margin: 0; color: #a7bac9; line-height: 1.5; }
+.ai-official label { display: grid; gap: 5px; min-width: 0; }
+.ai-official select { min-width: 0; max-width: 100%; }
+.ai-official-flow { display: grid; gap: 8px; padding: 8px; border-radius: 8px; background: #1d303d; overflow-wrap: anywhere; }
+.ai-official-flow a { color: #7dd3fc; text-decoration: underline; }
+.ai-official-flow .ai-settings-actions input { min-width: 180px; flex: 1; }
 .ai-settings-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 /* MCP servers panel: a full-width block inside the AI settings grid. */
 .mcp-settings { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 4px; padding-top: 12px; border-top: 1px solid #2c3238; }

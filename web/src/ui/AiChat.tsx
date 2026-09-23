@@ -63,6 +63,7 @@ import {
   type HistoryCursor,
 } from "./promptHistory";
 import type { Conversation } from "./conversations";
+import { OfficialModels, type OfficialProvider } from "./OfficialModels";
 
 type Profile = {
   id: string;
@@ -73,6 +74,7 @@ type Profile = {
   reasoning: string;
   allowPrivate: boolean;
   hasKey?: boolean;
+  officialProvider?: string;
 };
 /** A profile being edited: `apiKey` empty keeps the stored key unless dropped. */
 type Draft = Profile & { apiKey: string; dropKey: boolean };
@@ -159,6 +161,7 @@ function blankDraft(): Draft {
     protocol: "chat",
     reasoning: "",
     allowPrivate: false,
+    officialProvider: "",
     apiKey: "",
     dropKey: false,
   };
@@ -845,6 +848,19 @@ export function AiChat({
     setSettings(true);
   }
 
+  function addOfficialProfile(provider: OfficialProvider, model: string) {
+    if (profiles.length >= 20) { setError("最多只能保存 20 个模型配置"); return; }
+    const draft: Draft = {
+      ...blankDraft(), name: `${provider.name} · ${model}`,
+      baseUrl: provider.baseUrl, protocol: "chat", model,
+      officialProvider: provider.id,
+    };
+    setProfiles((old) => [...old, draft]);
+    setEditingId(draft.id);
+    setActiveProfile(draft.id);
+    setNotice("官方模型已添加，请点击「保存全部配置」后使用");
+  }
+
   function duplicateProfile(source: Draft) {
     // The API key cannot be copied: it is never sent back to the browser.
     const draft: Draft = {
@@ -1173,6 +1189,7 @@ export function AiChat({
               新建配置
             </button>
           </div>
+          <OfficialModels onAdd={addOfficialProfile} />
           <div className="ai-profile-list">
             {profiles.map((profile) => (
               <button
@@ -1188,7 +1205,7 @@ export function AiChat({
                 {profile.id === activeProfile ? (
                   <span className="ai-profile-dot" title="当前使用" />
                 ) : null}
-                {!profile.hasKey && !profile.apiKey ? (
+                {!profile.officialProvider && !profile.hasKey && !profile.apiKey ? (
                   <span className="ai-profile-warn" title="还没有 API Key">
                     !
                   </span>
@@ -1214,6 +1231,7 @@ export function AiChat({
                   type="url"
                   value={current.baseUrl}
                   required
+                  readOnly={!!current.officialProvider}
                   placeholder="https://api.example.com/v1"
                   onChange={(e) =>
                     patch(current.id, { baseUrl: e.target.value })
@@ -1226,6 +1244,7 @@ export function AiChat({
                   className="yaws-input"
                   value={current.model}
                   required
+                  readOnly={!!current.officialProvider}
                   onChange={(e) => patch(current.id, { model: e.target.value })}
                 />
               </label>
@@ -1234,6 +1253,7 @@ export function AiChat({
                 <select
                   className="yaws-select w-full"
                   value={current.protocol}
+                  disabled={!!current.officialProvider}
                   onChange={(e) =>
                     patch(current.id, {
                       protocol: e.target.value as Profile["protocol"],
@@ -1261,7 +1281,7 @@ export function AiChat({
                   ))}
                 </datalist>
               </label>
-              <label>
+              {!current.officialProvider && <label>
                 API Key
                 <input
                   className="yaws-input"
@@ -1273,8 +1293,8 @@ export function AiChat({
                     patch(current.id, { apiKey: e.target.value })
                   }
                 />
-              </label>
-              <div className="ai-profile-keynote">
+              </label>}
+              {!current.officialProvider && <div className="ai-profile-keynote">
                 <span>
                   {current.dropKey
                     ? "保存后将清除该配置的密钥"
@@ -1294,8 +1314,8 @@ export function AiChat({
                 >
                   {current.dropKey ? "取消清除" : "清除密钥"}
                 </button>
-              </div>
-              <label className="flex items-center gap-2">
+              </div>}
+              {!current.officialProvider && <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
                   checked={current.allowPrivate}
@@ -1304,7 +1324,11 @@ export function AiChat({
                   }
                 />
                 允许内网 / HTTP 接口
-              </label>
+              </label>}
+              {current.officialProvider && <p className="ai-profile-keynote">
+                官方账号授权 · {current.officialProvider}；地址与协议由 pi 固定，不能修改。
+                退出登录请在上方「登录官方模型」中操作。
+              </p>}
               <div className="ai-settings-actions">
                 <button className="yaws-btn-primary tool-text" type="submit">
                   <Check size={16} />

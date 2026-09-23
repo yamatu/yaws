@@ -15,6 +15,8 @@ test("ai run failures are explained", () => {
     "同时运行的 AI 任务太多，请等其中一个结束后再试",
   );
   assert.match(workspaceError(new Error("ai_timeout")), /接着写/);
+  assert.match(workspaceError(new Error("official_auth_expired")), /重新登录/);
+  assert.match(workspaceError(new Error("official_model_unavailable")), /当前账号/);
   // A run that ended between the reload and the re-attach is not an error worth
   // alarming the operator with; it reads as a finished turn.
   assert.equal(

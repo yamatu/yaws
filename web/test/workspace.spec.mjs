@@ -1207,3 +1207,64 @@ browserTest(
     expect(failures).toEqual([]);
   },
 );
+
+// The OAuth exchange itself is integration-tested against an injected local
+// provider on the server. Here the browser only mocks those API responses: no
+// test should open a real login page or touch a third-party account.
+browserTest("official model login can be completed in the model panel", async ({ page }) => {
+  let authorized = false;
+  const native = {
+    id: "openai-codex", name: "OpenAI Codex",
+    baseUrl: "https://chatgpt.com/backend-api",
+    models: [{ id: "gpt-5.3-codex", name: "GPT Codex" }],
+  };
+  await page.route("**/api/ai/official/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const response = path.endsWith("/providers")
+      ? { providers: [{ ...native, connected: authorized }] }
+      : path.endsWith("/login") && route.request().method() === "POST"
+        ? { loginId: "fake-login-id" }
+        : path.endsWith("/fake-login-id") && route.request().method() === "GET"
+          ? authorized
+            ? { status: "done", provider: native.id, event: null, authEvent: null }
+            : { status: "running", provider: native.id, event: null,
+              authEvent: { type: "device_code", userCode: "TEST-CODE",
+                verificationUri: "https://auth.example.test/device" } }
+          : { ok: true };
+    await route.fulfill({ status: 200, contentType: "application/json",
+      body: JSON.stringify(response) });
+  });
+  await page.goto(f.url + "/login");
+  await page.getByPlaceholder("请输入用户名").fill("fixture");
+  await page.getByPlaceholder("请输入密码").fill(f.password);
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto(f.url + "/app/machines/1/ssh");
+  await page.getByRole("tab", { name: "AI", exact: true }).click();
+  await page.getByRole("button", { name: "AI 设置", exact: true }).click();
+  const panel = page.locator(".ai-official");
+  await expect(panel.getByText("登录官方模型（pi 授权）")).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 760 });
+  expect(await panel.evaluate((node) => node.scrollWidth - node.clientWidth))
+    .toBeLessThanOrEqual(1);
+  await panel.getByRole("button", { name: "登录官方账号" }).click();
+  await expect(panel.getByText("TEST-CODE")).toBeVisible();
+  await expect(panel.getByRole("link", { name: /打开官方授权页面/ }))
+    .toHaveAttribute("href", "https://auth.example.test/device");
+  // A reload does not abandon the authorization attempt; the login id stays
+  // in this tab's session storage and the new page resumes polling it.
+  await page.reload();
+  await page.getByRole("tab", { name: "AI", exact: true }).click();
+  await page.getByRole("button", { name: "AI 设置", exact: true }).click();
+  await expect(panel.getByText("TEST-CODE")).toBeVisible();
+  authorized = true;
+  await expect(panel.getByRole("button", { name: "添加到模型配置（然后保存）" }))
+    .toBeVisible();
+  await panel.getByRole("button", { name: "添加到模型配置（然后保存）" }).click();
+  await expect(page.locator(".ai-profiles input[readonly]").first())
+    .toHaveValue(native.baseUrl);
+  await page.getByRole("button", { name: "保存全部配置" }).click();
+  await expect(page.getByRole("button", { name: "AI 设置", exact: true }))
+    .toBeVisible();
+  const saved = f.db.prepare("SELECT value FROM settings WHERE key='ai_profiles_enc'").get();
+  expect(saved?.value).toBeTruthy();
+});

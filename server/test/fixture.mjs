@@ -153,7 +153,7 @@ function lastUserText(history, chat) {
   return "";
 }
 
-export async function harness(port = 0) {
+export async function harness(port = 0, officialFactory) {
   const secret = "fixture-only-secret-123456789";
   const db = openDb(":memory:");
   const password = "Fixture-Password-Only";
@@ -772,7 +772,8 @@ export async function harness(port = 0) {
   // binaries committed in agent/bin (and never execute them).
   app.get("/api/agent/binary/:asset", agentBinaryHandler(agentEnv));
   app.use("/api/machines", auth, admin, agentInstallRouter(db, secret, agentEnv));
-  app.use("/api/ai", auth, admin, aiRouter(db, secret));
+  app.use("/api/ai", auth, admin,
+    aiRouter(db, secret, officialFactory?.(db, secret)));
   app.use("/api/ping", auth, admin, ping.router);
   app.get("/api/ssh/sessions", auth, admin, (_req, res) =>
     res.json({

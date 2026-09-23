@@ -1384,6 +1384,9 @@ async function turn(options: TurnOptions): Promise<string> {
       messages.push({
         role: "assistant",
         content: result.content || null,
+        // Native providers need signed thinking/response identifiers on the
+        // next tool round; a reconstructed text-only message loses those.
+        ...(result.native ? { native: result.native } : {}),
         ...(calls.length
           ? {
               tool_calls: calls.map((call) => ({

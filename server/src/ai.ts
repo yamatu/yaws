@@ -21,6 +21,7 @@ import {
 import { route, audit, requestSignal } from "./workspace.js";
 import { chatRouter } from "./ai-chat.js";
 import { aiRuns } from "./ai-runs.js";
+import { OfficialModels, checkOfficialConfig } from "./ai-official.js";
 import { ExtensionManager } from "./extensions.js";
 import { dataDir, extensionsDir, loadEnv } from "./env.js";
 import { secretPath } from "./ai-safety.js";
@@ -263,6 +264,8 @@ export type ModelTurn = {
   usage: ModelUsage | null;
   /** Responses protocol: the output items to replay as history. */
   output: unknown[];
+  /** Native pi message retained in this run for signed reasoning/tool replay. */
+  native?: unknown;
   /**
    * The provider stopped because it hit its own output-token cap, so `content`
    * is the beginning of an answer rather than all of it. The turn loop asks it
@@ -757,7 +760,9 @@ type Proposal = {
 };
 export { secretPath };
 
-export function aiRouter(db: Db, secret: string) {
+export function aiRouter(
+  db: Db, secret: string, official = new OfficialModels(db, secret),
+) {
   const router = Router({ mergeParams: true });
   const mcp = new McpManager(db, secret);
   // Extension packages are checked out under the data directory so a backup of
@@ -773,9 +778,33 @@ export function aiRouter(db: Db, secret: string) {
     if (!profile) throw new WorkspaceError(409, "ai_not_configured");
     const bad = endpointError(profile.baseUrl);
     if (bad) throw new WorkspaceError(400, bad);
+    checkOfficialConfig(profile);
     const { id, name, ...config } = profile;
     return { id, name, config };
   };
+  router.get("/official/providers", route(async (_req, res) => {
+    res.json({ providers: await official.catalog() });
+  }));
+  router.post("/official/login", (req, res) => {
+    const { provider } = z.object({ provider: z.string().max(40) }).parse(req.body);
+    res.json(official.start(provider, (req as AuthedRequest).user.id));
+  });
+  router.get("/official/login/:id", (req, res) => {
+    res.json(official.status(req.params.id, (req as AuthedRequest).user.id));
+  });
+  router.post("/official/login/:id/answer", (req, res) => {
+    const { value } = z.object({ value: z.string().max(4096) }).parse(req.body);
+    official.answer(req.params.id, (req as AuthedRequest).user.id, value);
+    res.json({ ok: true });
+  });
+  router.delete("/official/login/:id", (req, res) => {
+    official.cancel(req.params.id, (req as AuthedRequest).user.id);
+    res.json({ ok: true });
+  });
+  router.delete("/official/providers/:id", route(async (req, res) => {
+    await official.logout(String(req.params.id));
+    res.json({ ok: true });
+  }));
   router.get("/profiles", (_req, res) => {
     res.json(publicProfiles(readProfiles(db, secret), activeProfileId(db)));
   });
@@ -789,6 +818,7 @@ export function aiRouter(db: Db, secret: string) {
       if (bad) throw new WorkspaceError(400, bad);
     }
     const next = mergeProfileKeys(body.profiles, readProfiles(db, secret));
+    for (const profile of next) checkOfficialConfig(profile);
     writeProfiles(db, secret, next, body.activeId);
     res.json(publicProfiles(next, body.activeId));
   });
@@ -949,6 +979,7 @@ export function aiRouter(db: Db, secret: string) {
             : p,
         )
       : [{ id: "default", name: "默认配置", ...body }];
+    for (const profile of next) checkOfficialConfig(profile);
     writeProfiles(db, secret, next, current?.id ?? "default");
     res.json({ ok: true, profileId: current?.id ?? "default" });
   });
@@ -959,6 +990,9 @@ export function aiRouter(db: Db, secret: string) {
         userId = (req as AuthedRequest).user.id;
       sshMachine(db, machineId);
       const config = load().config;
+      // The old JSON-only endpoint predates provider-native streaming.
+      if (config.officialProvider)
+        throw new WorkspaceError(400, "official_use_chat");
       const body = Run.parse(req.body);
       remotePath(body.root);
       const signal = AbortSignal.any([
@@ -1238,7 +1272,9 @@ export function aiRouter(db: Db, secret: string) {
       secret,
       load,
       stream: (config, body, signal, onDelta) =>
-        streamModel(config, body as Record<string, unknown>, signal, onDelta),
+        config.officialProvider
+          ? official.stream(config, body as Record<string, unknown>, signal, onDelta)
+          : streamModel(config, body as Record<string, unknown>, signal, onDelta),
       mcp,
       extensions,
     }),
