@@ -159,7 +159,11 @@ test("pi official login and native model work through authenticated routes", asy
     assert.match(reply, /来自官方模型的测试回答/);
     assert.equal(seen.length, 2);
     assert.equal(seen[0].messages.at(-1).content, "你好");
-    assert.ok(seen[0].tools.length > 0);
+    // pi >=0.86 normalizes Context into a transcript: the prompt and tools
+    // arrive as a leading system message instead of `systemPrompt`/`tools`.
+    assert.equal(seen[0].messages[0].role, "system");
+    assert.ok(seen[0].messages[0].content.length > 0);
+    assert.ok(seen[0].messages[0].toolsAdded.length > 0);
     assert.equal(seen[1].messages.at(-1).role, "toolResult");
     assert.equal(seen[1].messages.at(-1).toolName, "run_command");
     assert.equal(seen[1].messages.at(-2).content[0].thinkingSignature,

@@ -9,7 +9,7 @@
     "start": "node -e \"process.env.NODE_ENV='production'; import('./dist/index.js')\""
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-ai": "0.87.1",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^13.0.1",
     "cors": "^2.8.5",

@@ -11,6 +11,7 @@ import {
   type Api,
   type Context,
   type AssistantMessage,
+  type JsonObject,
   type Tool,
 } from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
@@ -427,7 +428,7 @@ export function toContext(
       const content: AssistantMessage["content"] = [];
       if (item.content) content.push({ type: "text", text: String(item.content) });
       for (const call of item.tool_calls ?? []) {
-        let args: Record<string, unknown> = {};
+        let args: JsonObject = {};
         try { args = JSON.parse(call.function.arguments); } catch { /* old call */ }
         content.push({ type: "toolCall", id: call.id,
           name: call.function.name, arguments: args });
