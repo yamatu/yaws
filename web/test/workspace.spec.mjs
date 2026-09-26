@@ -1208,6 +1208,79 @@ browserTest(
   },
 );
 
+browserTest(
+  "closing every terminal leaves the bastion picker on the page",
+  async ({ page }) => {
+    const failures = [];
+    page.on("pageerror", (e) => failures.push(e.message));
+    await page.goto(f.url + "/login");
+    await page.getByPlaceholder("请输入用户名").fill("fixture");
+    await page.getByPlaceholder("请输入密码").fill(f.password);
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    const visible = page.locator(".remote-workspace:not([hidden])");
+    await page.goto(f.url + "/app/machines/1/ssh");
+    const knowsKey = !!f.db
+      .prepare("SELECT ssh_host_fingerprint as fp FROM machines WHERE id=1")
+      .get().fp;
+    if (!knowsKey) {
+      await visible
+        .getByRole("button", { name: "读取主机指纹", exact: true })
+        .click();
+      await visible.getByRole("button", { name: "确认并信任此指纹" }).click();
+    }
+    await expect(page.locator(".ssh-session")).toHaveCount(1);
+    // A second server joins the strip, then every tab is closed by hand.
+    await page
+      .getByRole("button", { name: "打开其他服务器的终端", exact: true })
+      .click();
+    await page
+      .getByRole("dialog", { name: "选择服务器" })
+      .locator(".ssh-picker-item")
+      .filter({ hasText: "Fixture 2" })
+      .click();
+    await expect(page.locator(".ssh-session")).toHaveCount(2);
+    await page
+      .getByRole("button", { name: "关闭 Fixture 2 的终端", exact: true })
+      .click();
+    await expect(page.locator(".ssh-session")).toHaveCount(1);
+    // The last tab closes too: the workspace is gone rather than pinned to a
+    // server that is no longer wanted.
+    await page
+      .getByRole("button", { name: "关闭 Fixture 1 的终端", exact: true })
+      .click();
+    await expect(page.locator(".ssh-session")).toHaveCount(0);
+    await expect(page.locator(".ssh-multi-body")).toHaveCount(0);
+    // The page becomes the bastion: pick a server to open a terminal again.
+    const picker = page.locator(".ssh-idle");
+    await expect(picker).toBeVisible();
+    await expect(picker).toContainText("堡垒机");
+    await expect(picker).toContainText("未连接任何服务器");
+    await picker
+      .getByPlaceholder("搜索主机名称、分组或地址")
+      .fill("Fixture 2");
+    await expect(picker.locator(".ssh-idle-item")).toHaveCount(1);
+    await picker
+      .getByRole("link", { name: "打开 Fixture 2 的终端", exact: true })
+      .click();
+    await expect(page.locator(".ssh-session")).toHaveCount(1);
+    await expect(page.locator(".ssh-idle")).toHaveCount(0);
+    await expect(visible.locator(".workspace-header")).toContainText(
+      "Fixture 2",
+    );
+    // Closing the last tab also survives a reload: no phantom session is
+    // restored and the picker is still there.
+    await page
+      .getByRole("button", { name: "关闭 Fixture 2 的终端", exact: true })
+      .click();
+    await expect(picker).toBeVisible();
+    await page.reload();
+    await expect(picker).toBeVisible();
+    await expect(page.locator(".ssh-session")).toHaveCount(0);
+    await expect(page.locator(".ssh-multi-body")).toHaveCount(0);
+    expect(failures).toEqual([]);
+  },
+);
+
 // The OAuth exchange itself is integration-tested against an injected local
 // provider on the server. Here the browser only mocks those API responses: no
 // test should open a real login page or touch a third-party account.
