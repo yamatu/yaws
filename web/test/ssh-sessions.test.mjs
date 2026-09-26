@@ -9,7 +9,6 @@ import {
   parseSessions,
   sanitizeSessions,
   sessionRoom,
-  shouldPinAddress,
 } from "../src/ui/sshSessions.ts";
 
 test("only real machine ids survive a stored session list", () => {
@@ -64,29 +63,7 @@ test("closing the active terminal hands over to a neighbour", () => {
   assert.equal(nextActiveSession([1, 2, 3], 2, 2), 3);
   assert.equal(nextActiveSession([1, 2, 3], 3, 3), 2);
   assert.equal(nextActiveSession([1, 2, 3], 1, 1), 2);
-  // The last terminal leaves nothing behind, so the page shows the picker.
+  // The last terminal leaves nothing behind, so the page navigates away.
   assert.equal(nextActiveSession([4], 4, 4), 0);
   assert.equal(nextActiveSession([], 4, 4), 0);
-});
-
-test("the strip can be emptied down to the last terminal", () => {
-  // Closing one by one always lands on the neighbour that is still open...
-  let ids = [1, 2, 3];
-  let active = 1;
-  active = nextActiveSession(ids, 1, active);
-  ids = closeSession(ids, 1);
-  assert.equal(active, 2);
-  active = nextActiveSession(ids, 2, active);
-  ids = closeSession(ids, 2);
-  assert.equal(active, 3);
-  // ...and closing the very last one is allowed: 0 means "show the picker".
-  assert.equal(nextActiveSession(ids, 3, active), 0);
-  assert.deepEqual(closeSession(ids, 3), []);
-});
-
-test("an empty strip stops pinning the machine in the address bar", () => {
-  assert.equal(shouldPinAddress([1]), true);
-  assert.equal(shouldPinAddress([]), false);
-  // A broken stored list counts as empty rather than pinning a phantom tab.
-  assert.equal(shouldPinAddress(sanitizeSessions([0, -1, NaN, "x"])), false);
 });

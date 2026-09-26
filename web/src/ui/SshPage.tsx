@@ -1,13 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import {
-  Plus,
-  RotateCw,
-  Search,
-  ShieldCheck,
-  TerminalSquare,
-  X,
-} from "lucide-react";
+import { useNavigate, useParams } from "react-router-dom";
+import { Plus, Search, TerminalSquare, X } from "lucide-react";
 import { apiFetch, type Machine } from "./api";
 import { useDocumentTitle } from "./documentTitle";
 import { MachineWorkspace, type SshStatus } from "./MachineWorkspace";
@@ -19,7 +12,6 @@ import {
   ensureSession,
   nextActiveSession,
   parseSessions,
-  shouldPinAddress,
   sessionRoom,
 } from "./sshSessions";
 
@@ -36,19 +28,6 @@ function rememberSessions(ids: number[]) {
     localStorage.setItem(SESSIONS_KEY, JSON.stringify(ids));
   } catch {
     // private mode: the open terminals are simply not remembered
-  }
-}
-
-/**
- * A browser that closed every terminal must not have the last server pushed
- * back into the strip on reload: an empty stored list means "show the picker".
- * Opening any terminal clears it again by writing a real list.
- */
-function storedDetached(): boolean {
-  try {
-    return localStorage.getItem(SESSIONS_KEY) === "[]";
-  } catch {
-    return false;
   }
 }
 
@@ -88,13 +67,6 @@ export function SshPage() {
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
 
-  // Set while the strip is being emptied by hand: it holds the id of the server
-  // that was just closed, so the address bar does not pull it straight back in
-  // and the last terminal can actually close. It is remembered for this tab, so
-  // a reload keeps the picker instead of resurrecting the closed server.
-  const [detached, setDetached] = useState(() =>
-    storedDetached() ? Number(id) : 0,
-  );
   const labelFor = useCallback(
     (value: number) =>
       machines.find((m) => m.id === value)?.name ??
@@ -124,19 +96,14 @@ export function SshPage() {
   }, [ids]);
 
   // The machine in the address bar is always open, so a bookmark or a link from
-  // the bastion page never lands on an empty workspace. Once every terminal has
-  // been closed the URL points at nothing, and the picker takes over instead of
-  // reopening the server that was just closed — until another server is picked
-  // from the bastion list, which clears the marker again.
+  // the bastion page never lands on an empty workspace.
   useEffect(() => {
     if (isBadId) return;
-    if (detached === machineId) return;
-    if (detached) setDetached(0);
     setIds((old) => {
       const next = ensureSession(old, machineId);
       return next.length === old.length ? old : next;
     });
-  }, [isBadId, machineId, detached, setDetached]);
+  }, [isBadId, machineId]);
 
   const open = useCallback(
     (value: number, activate = true) => {
@@ -146,7 +113,6 @@ export function SshPage() {
         return false;
       }
       setError("");
-      setDetached(0);
       if (next.length !== ids.length) setIds(next);
       if (activate) navigate(`/app/machines/${value}/ssh`, { replace: true });
       return true;
@@ -155,27 +121,15 @@ export function SshPage() {
   );
 
   const close = (value: number) => {
-    const rest = closeSession(ids, value);
-    setIds(rest);
-    // The strip is never pinned to a server: closing the active terminal hands
-    // over to a neighbour, and closing the last one leaves the picker open on
-    // an otherwise empty page.
-    const target = nextActiveSession(rest, 0, machineId);
-    if (target) {
-      navigate(`/app/machines/${target}/ssh`, { replace: true });
-      return;
-    }
-    // The last terminal is gone: the page stays where it is and turns into the
-    // bastion picker, so the operator chooses what to connect next. Remembering
-    // which server was closed keeps it from being reopened on the next render.
-    setDetached(value);
-    setError("");
+    const next = closeSession(ids, value);
+    setIds(next);
+    if (value !== machineId) return;
+    const target = nextActiveSession(ids, value, machineId);
+    if (target) navigate(`/app/machines/${target}/ssh`, { replace: true });
+    else navigate("/app/bastion", { replace: true });
   };
 
   const room = sessionRoom(ids);
-  // Nothing is connected: the picker fills the page instead of sitting on top
-  // of a workspace that is not there.
-  const idle = !shouldPinAddress(ids);
   const filtered = useMemo(() => {
     const text = query.trim().toLowerCase();
     return machines.filter((m) =>
@@ -207,7 +161,6 @@ export function SshPage() {
       return;
     }
     setIds(next);
-    setDetached(0);
     setPicker(false);
     // Every connectable server opens in one go; only a completely full strip can
     // leave some behind, and then the operator is told exactly how many.
@@ -285,78 +238,7 @@ export function SshPage() {
         </div>
       ) : null}
 
-      {idle ? (
-        <div className="ssh-idle">
-          <div className="yaws-card ssh-idle-card">
-            <div className="ssh-idle-head">
-              <ShieldCheck size={18} />
-              <strong className="flex-1 min-w-0">堡垒机</strong>
-              <span className="text-xs text-white/40">
-                未连接任何服务器
-              </span>
-            </div>
-            <p className="ssh-idle-note">
-              选择一台服务器打开终端。SSH 凭据只在主控解密，主机指纹确认后才建立连接；标记「内网」的主机会先连到中转服务器再转发。
-            </p>
-            <label className="ssh-picker-search ssh-idle-search">
-              <Search size={15} />
-              <input
-                className="yaws-input"
-                aria-label="搜索服务器"
-                placeholder="搜索主机名称、分组或地址"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </label>
-            <div className="ssh-idle-list">
-              {filtered.map((machine) => {
-                const ready = sshReady(machine);
-                return (
-                  <div key={machine.id} className="ssh-idle-item">
-                    <span
-                      className={
-                        machine.online ? "yaws-dot-online" : "yaws-dot-offline"
-                      }
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-semibold">
-                        {machine.name}
-                        {machine.viaName ? (
-                          <span className="ssh-picker-tag ml-2">
-                            内网 · 经由 {machine.viaName}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="truncate text-xs text-white/40">
-                        {machine.sshUser || "—"}@{machine.sshHost || "未配置"}:
-                        {machine.sshPort ?? 22}
-                      </div>
-                    </div>
-                    <Link
-                      className="yaws-btn tool-text"
-                      aria-label={`打开 ${machine.name} 的终端`}
-                      to={`/app/machines/${machine.id}/ssh`}
-                    >
-                      <TerminalSquare size={15} />
-                    </Link>
-                  </div>
-                );
-              })}
-              {!filtered.length ? (
-                <div className="ssh-picker-empty">暂无匹配主机</div>
-              ) : null}
-            </div>
-            <div className="ssh-idle-foot">
-              <Link className="yaws-btn tool-text" to="/app/bastion">
-                <RotateCw size={15} />
-                打开堡垒机总览
-              </Link>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {!idle && picker ? (
+      {picker ? (
         <>
           <div
             className="ssh-picker-backdrop"
@@ -451,20 +333,18 @@ export function SshPage() {
         </>
       ) : null}
 
-      {!idle ? (
-        <div className="ssh-multi-body">
-          {ids.map((value) => (
-            <MachineWorkspace
-              key={value}
-              machineId={value}
-              label={labelFor(value)}
-              active={value === machineId}
-              onStatus={onStatus}
-              hidden={value !== machineId}
-            />
-          ))}
-        </div>
-      ) : null}
+      <div className="ssh-multi-body">
+        {ids.map((value) => (
+          <MachineWorkspace
+            key={value}
+            machineId={value}
+            label={labelFor(value)}
+            active={value === machineId}
+            onStatus={onStatus}
+            hidden={value !== machineId}
+          />
+        ))}
+      </div>
     </div>
   );
 }

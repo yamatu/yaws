@@ -82,10 +82,6 @@ export function sessionRoom(ids: number[], max = MAX_SESSIONS): number {
  * Which terminal takes over when the active one is closed: the next tab, then
  * the previous one, and only when nothing is left zero (the caller leaves the
  * workspace). Closing a background tab keeps the active terminal in place.
- *
- * Every tab carries a close button, so the strip can always be emptied — the
- * page then shows the server picker instead of refusing to let go of the last
- * server.
  */
 export function nextActiveSession(
   ids: number[],
@@ -102,13 +98,4 @@ export function nextActiveSession(
       if (rest.includes(ids[i])) return ids[i];
   }
   return rest[0] ?? 0;
-}
-
-/**
- * The URL only pins a terminal while one is open. With an empty strip the
- * address bar must not keep demanding a server, otherwise closing the active
- * terminal would immediately reopen it and the last tab could never close.
- */
-export function shouldPinAddress(ids: number[]): boolean {
-  return sanitizeSessions(ids).length > 0;
 }
