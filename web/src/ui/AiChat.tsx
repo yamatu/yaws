@@ -1120,7 +1120,7 @@ export function AiChat({
   const selectedNames = hostNames(hosts, hostOptions, primaryName);
 
   return (
-    <div className={`ai-chat${compact ? " compact" : ""}`}>
+    <div className={`ai-chat${compact ? " compact" : ""}${settings ? " ai-settings-open" : ""}`}>
       <div className="workspace-toolbar ai-chat-head">
         <Sparkles size={16} />
         <strong className="flex-1 min-w-0 truncate text-sm">AI 助手</strong>
@@ -1172,7 +1172,7 @@ export function AiChat({
           aria-label="AI 设置"
           aria-expanded={settings}
           aria-controls="ai-settings-panel"
-          onClick={() => setSettings(true)}
+          onClick={() => setSettings((v) => !v)}
         >
           <Settings2 size={17} />
         </button>

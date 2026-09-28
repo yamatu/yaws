@@ -1295,12 +1295,13 @@ browserTest("AI settings stay reachable and offer a third-party API entry", asyn
   await visible.getByRole("tab", { name: "AI", exact: true }).click();
   const settings = page.getByRole("button", { name: "AI 设置", exact: true });
   await expect(settings).toBeVisible({ timeout: 20000 });
-  // The editor may open by itself (first run, nothing configured) or stay
-  // closed (profiles already saved). Either way the settings button has to open
-  // it, and pressing it again must leave it on screen instead of toggling shut.
+  // The editor may open by itself on a first run (nothing configured yet).
+  // Normalise to open, then check the gear really toggles it both ways.
   const form = page.locator(".ai-settings");
   if ((await form.count()) === 0) await settings.click();
   await expect(form).toBeVisible();
+  await settings.click();
+  await expect(form).toHaveCount(0);
   await settings.click();
   await expect(form).toBeVisible();
   // 添加三方 API is the discoverable entry point for a custom endpoint, and it
@@ -1324,5 +1325,51 @@ browserTest("AI settings stay reachable and offer a third-party API entry", asyn
   await settings.click();
   await expect(form.getByLabel("API 地址", { exact: true }))
     .toHaveValue("https://api.example.test/v1");
+  await page.close();
+});
+
+browserTest("the dock editor stays clickable and can return to the chat", async () => {
+  const page = await browser.newPage();
+  page.on("pageerror", (e) => { throw e; });
+  await page.goto(f.url + "/login");
+  await page.getByPlaceholder("请输入用户名").fill("fixture");
+  await page.getByPlaceholder("请输入密码").fill(f.password);
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  const visible = page.locator(".remote-workspace:not([hidden])");
+  await page.goto(f.url + "/app/machines/1/ssh");
+  const knowsKey = !!f.db
+    .prepare("SELECT ssh_host_fingerprint AS fp FROM machines WHERE id=1")
+    .get().fp;
+  if (!knowsKey) {
+    await visible.getByRole("button", { name: "读取主机指纹", exact: true }).click();
+    await visible.getByRole("button", { name: "确认并信任此指纹" }).click();
+  }
+  // The floating dock renders the compact chat from a non-AI tab. Its header is
+  // opaque and painted above the editor, so an absolutely positioned panel used
+  // to hide 添加三方 API / 收起 behind it and there was no way back to the chat.
+  await expect(page.locator(".ai-fab")).toBeVisible({ timeout: 20000 });
+  await page.locator(".ai-fab").click();
+  const dock = page.locator(".ai-dock");
+  const settings = dock.getByRole("button", { name: "AI 设置", exact: true });
+  await expect(settings).toBeVisible({ timeout: 20000 });
+  const form = dock.locator(".ai-settings");
+  if ((await form.count()) === 0) await settings.click();
+  await expect(form).toBeVisible();
+  expect(await dock.locator(".ai-chat-body").isVisible()).toBe(false);
+  // Playwright fails a click that another element intercepts, which is exactly
+  // what the header did before: reaching these controls proves they are exposed.
+  await dock.getByRole("button", { name: "收起设置", exact: true }).click();
+  await expect(form).toHaveCount(0);
+  expect(await dock.locator(".ai-chat-body").isVisible()).toBe(true);
+  await settings.click();
+  await expect(form).toBeVisible();
+  const add = dock.getByRole("button", { name: "添加三方 API", exact: true });
+  const before = await dock.locator(".ai-profile-chip").count();
+  await add.click();
+  await expect(dock.locator(".ai-profile-chip")).toHaveCount(before + 1);
+  // The gear itself is a second way out of the editor.
+  await settings.click();
+  await expect(form).toHaveCount(0);
+  expect(await dock.locator(".ai-chat-body").isVisible()).toBe(true);
   await page.close();
 });

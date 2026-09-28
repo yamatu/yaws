@@ -140,10 +140,15 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-chat.compact .ai-chat-session { flex: 1 1 40%; }
 .ai-chat.compact .ai-chat-hint, .ai-chat.compact .ai-chat-clear { display: none; }
 .ai-chat.compact .ai-chat-working { padding: 6px 10px; }
-/* Opening the profile editor covers the transcript instead of squeezing it. */
-.ai-chat.compact .ai-settings { position: absolute; inset: 0; z-index: 5; max-height: none; align-content: start; background: #181b1f; }
-/* …and the header stays opaque above it so the form scrolls behind it. */
-.ai-chat.compact .ai-chat-head { background: #181b1f; }
+/* The dock is short, so the editor takes the space under the header instead of
+   being painted over the transcript. As an absolute overlay its first row
+   (添加三方 API / 收起) sat underneath the opaque header, where the pointer
+   could not reach it — leaving no way back to the chat. Held in the flex flow
+   the panel fills the area below the header and every control stays operable. */
+.ai-chat.compact .ai-settings { position: static; flex: 1 1 auto; max-height: none; min-height: 0; align-content: start; }
+/* The transcript steps aside while the editor is open; the composer below it
+   stays, so the model dropdown is still a way out of the editor. */
+.ai-chat.compact.ai-settings-open .ai-chat-body { display: none; }
 .ai-settings label,.ai-chat-composer label,.monitor-form label { display: grid; gap: 6px; font-size: 12px; color: #b5bec8; }
 .ai-answer { line-height: 1.7; font-size: 14px; overflow-wrap: anywhere; max-width: 92%; min-width: 0; }
 /* Markdown answers (see Markdown.tsx): block spacing inside one answer bubble. */
