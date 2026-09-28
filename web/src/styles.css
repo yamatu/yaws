@@ -228,8 +228,8 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-conv-rename .yaws-input { flex: 1; min-width: 0; }
 .ai-conv-foot { flex: 0 0 auto; padding: 6px 10px; border-top: 1px solid #2c3238; font-size: 11px; color: #7b848e; }
 .ai-profiles-top { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.ai-profiles-label { font-size: 12px; color: #b5bec8; }
-.ai-profile-mini { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border: 1px solid #3d4249; border-radius: 999px; background: #23272c; color: #c6ced6; font-size: 11px; }
+.ai-profiles-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }.ai-profiles-label { font-size: 12px; color: #b5bec8; }
+.ai-profile-mini { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; white-space: nowrap; border: 1px solid #3d4249; border-radius: 999px; background: #23272c; color: #c6ced6; font-size: 11px; }
 .ai-profile-mini:hover { border-color: #38bdf8; color: #7dd3fc; }
 .ai-profile-list { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
 .ai-profile-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid #3d4249; border-radius: 999px; background: #1c2025; color: #c6ced6; font-size: 12px; }

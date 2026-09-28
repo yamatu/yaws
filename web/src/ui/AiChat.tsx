@@ -20,6 +20,7 @@ import {
   Terminal,
   Trash2,
   Undo2,
+  X,
 } from "lucide-react";
 import { diffLines } from "diff";
 import { apiFetch } from "./api";
@@ -1133,7 +1134,12 @@ export function AiChat({
           }
           value={activeProfile}
           disabled={busy || !profiles.length}
-          onChange={(e) => void activate(e.target.value)}
+          onChange={(e) => {
+            // Choosing the model for the next question also ends the editing
+            // session, so the chat is not left covered by the settings panel.
+            setSettings(false);
+            void activate(e.target.value);
+          }}
         >
           {profiles.length === 0 && <option value="">未配置</option>}
           {profiles.map((profile) => (
@@ -1165,13 +1171,15 @@ export function AiChat({
           title="AI 设置"
           aria-label="AI 设置"
           aria-expanded={settings}
-          onClick={() => setSettings((v) => !v)}
+          aria-controls="ai-settings-panel"
+          onClick={() => setSettings(true)}
         >
           <Settings2 size={17} />
         </button>
       </div>
       {settings && (
         <form
+          id="ai-settings-panel"
           className="ai-settings ai-profiles"
           onSubmit={(e) => {
             e.preventDefault();
@@ -1180,14 +1188,27 @@ export function AiChat({
         >
           <div className="ai-profiles-top">
             <span className="ai-profiles-label">模型配置</span>
-            <button
-              type="button"
-              className="ai-profile-mini"
-              onClick={addProfile}
-            >
-              <Plus size={13} />
-              新建配置
-            </button>
+            <div className="ai-profiles-actions">
+              <button
+                type="button"
+                className="ai-profile-mini"
+                title="添加一个自定义（第三方）API 配置"
+                onClick={addProfile}
+              >
+                <Plus size={13} />
+                添加三方 API
+              </button>
+              <button
+                type="button"
+                className="ai-profile-mini"
+                aria-label="收起设置"
+                title="收起设置"
+                onClick={() => setSettings(false)}
+              >
+                <X size={13} />
+                收起
+              </button>
+            </div>
           </div>
           <OfficialModels onAdd={addOfficialProfile} />
           <div className="ai-profile-list">

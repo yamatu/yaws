@@ -318,6 +318,22 @@ npm run dev
 - Web 开发端口：`http://localhost:5173`
 - API/WS：`http://localhost:3001`
 
+### Pi 后台任务扩展（pi-background-tasks）
+
+`.pi/settings.json` 声明了 [`pi-background-tasks`](https://pi.dev/packages/pi-background-tasks)，它给 Pi 提供真正的后台 shell 任务：`bg_run`、`bg_status`、`bg_logs`、`bg_kill`，以及 `/bg`、`/jobs`、`/logs`、`/kill`、`/tasks` 命令。安装一次即可：
+
+```bash
+pi install npm:pi-background-tasks    # 用户级（所有项目可用）
+pi install -l npm:pi-background-tasks  # 项目级（写入 .pi/settings.json）
+```
+
+项目级扩展只有在该项目被授予 trust 之后才会加载（`pi` 会提示确认）。任务产物写在 `.pi/tasks/`，属于运行时文件，已由 `.pi/.gitignore` 排除。确认是否生效：
+
+```bash
+pi list                                # 应看到 Project packages: npm:pi-background-tasks
+pi --no-session -p "列出所有 bg_ 开头的工具"  # 应列出 bg_run / bg_status / bg_logs / bg_kill
+```
+
 ## 安全基线
 
 代码层面已经内置以下防护，运维时请一并确认：

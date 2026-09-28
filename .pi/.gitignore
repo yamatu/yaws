@@ -1,0 +1,6 @@
+# Pi runtime state: installed packages, task output and delegate artifacts are
+# per-machine. The package *declaration* in settings.json is tracked so a fresh
+# clone installs the same extensions with `pi install`.
+npm/
+tasks/
+delegate/

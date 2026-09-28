@@ -375,21 +375,28 @@ browserTest(
     );
     await expect(page.locator(".ai-chat-profile")).toContainText("主力模型");
     await expect(page.locator(".ai-chip")).toHaveCount(3);
-    // A second configuration can be added and switched to.
+    // A second configuration can be added and switched to. The panel opens
+    // with the settings button and is dismissed with its own 收起 control, so
+    // pressing 设置 again never hides an editor that is already on screen.
     await page.getByRole("button", { name: "AI 设置", exact: true }).click();
     await expect(page.locator(".ai-profile-chip")).toHaveCount(1);
-    await page.getByRole("button", { name: "新建配置", exact: true }).click();
+    await page.getByRole("button", { name: "添加三方 API", exact: true }).click();
     await form.getByLabel("名称", { exact: true }).fill("快速模型");
     await form.getByLabel("API 地址", { exact: true }).fill(f.modelUrl);
     await form.getByLabel("模型", { exact: true }).fill("fixture-model");
     await form.getByLabel("API Key", { exact: true }).fill("second-key");
     await form.getByLabel("允许内网 / HTTP 接口", { exact: true }).check();
     await page.getByRole("button", { name: "保存全部配置", exact: true }).click();
+    // Saving closes the editor; reopening shows both saved chips.
+    await expect(page.locator(".ai-settings")).toHaveCount(0);
     await page.getByRole("button", { name: "AI 设置", exact: true }).click();
     await expect(page.locator(".ai-profile-chip")).toHaveCount(2);
     await expect(page.locator(".ai-profile-chip").first()).toContainText(
       "主力模型",
     );
+    // The 收起 control leaves the editor without touching the saved profiles.
+    await page.getByRole("button", { name: "收起设置", exact: true }).click();
+    await expect(page.locator(".ai-settings")).toHaveCount(0);
     await page.getByRole("button", { name: "AI 设置", exact: true }).click();
     await page.getByLabel("模型配置", { exact: true }).selectOption("主力模型");
     await expect(page.locator(".ai-settings")).toHaveCount(0);
@@ -1267,4 +1274,55 @@ browserTest("official model login can be completed in the model panel", async ({
     .toBeVisible();
   const saved = f.db.prepare("SELECT value FROM settings WHERE key='ai_profiles_enc'").get();
   expect(saved?.value).toBeTruthy();
+});
+
+browserTest("AI settings stay reachable and offer a third-party API entry", async () => {
+  const page = await browser.newPage();
+  page.on("pageerror", (e) => { throw e; });
+  await page.goto(f.url + "/login");
+  await page.getByPlaceholder("请输入用户名").fill("fixture");
+  await page.getByPlaceholder("请输入密码").fill(f.password);
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  const visible = page.locator(".remote-workspace:not([hidden])");
+  await page.goto(f.url + "/app/machines/1/ssh");
+  const knowsKey = !!f.db
+    .prepare("SELECT ssh_host_fingerprint AS fp FROM machines WHERE id=1")
+    .get().fp;
+  if (!knowsKey) {
+    await visible.getByRole("button", { name: "读取主机指纹", exact: true }).click();
+    await visible.getByRole("button", { name: "确认并信任此指纹" }).click();
+  }
+  await visible.getByRole("tab", { name: "AI", exact: true }).click();
+  const settings = page.getByRole("button", { name: "AI 设置", exact: true });
+  await expect(settings).toBeVisible({ timeout: 20000 });
+  // The editor may open by itself (first run, nothing configured) or stay
+  // closed (profiles already saved). Either way the settings button has to open
+  // it, and pressing it again must leave it on screen instead of toggling shut.
+  const form = page.locator(".ai-settings");
+  if ((await form.count()) === 0) await settings.click();
+  await expect(form).toBeVisible();
+  await settings.click();
+  await expect(form).toBeVisible();
+  // 添加三方 API is the discoverable entry point for a custom endpoint, and it
+  // stays reachable: scrolling back to the top brings it into view again.
+  const add = page.getByRole("button", { name: "添加三方 API", exact: true });
+  await expect(add).toBeVisible();
+  await form.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  await form.evaluate((el) => { el.scrollTop = 0; });
+  await expect(add).toBeVisible();
+  const before = await page.locator(".ai-profile-chip").count();
+  await add.click();
+  await expect(page.locator(".ai-profile-chip")).toHaveCount(before + 1);
+  // A custom endpoint and API key are editable for the new configuration.
+  await form.getByLabel("API 地址", { exact: true }).fill("https://api.example.test/v1");
+  await form.getByLabel("API Key", { exact: true }).fill("third-party-key");
+  await expect(form.getByLabel("API Key", { exact: true }))
+    .toHaveValue("third-party-key");
+  // 收起 closes the editor without discarding the draft.
+  await page.getByRole("button", { name: "收起设置", exact: true }).click();
+  await expect(page.locator(".ai-settings")).toHaveCount(0);
+  await settings.click();
+  await expect(form.getByLabel("API 地址", { exact: true }))
+    .toHaveValue("https://api.example.test/v1");
+  await page.close();
 });
