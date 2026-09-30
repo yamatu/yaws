@@ -1326,6 +1326,15 @@ browserTest("AI settings stay reachable and offer a third-party API entry", asyn
   await expect(speed.locator("option")).toHaveCount(4);
   await speed.selectOption("priority");
   await expect(speed).toHaveValue("priority");
+  // Claude's native Messages API is the third protocol; the OpenAI-only speed
+  // tier is not offered for it, and switching back brings it back.
+  const protocol = form.getByLabel("协议", { exact: true });
+  await protocol.selectOption("anthropic");
+  await expect(protocol).toHaveValue("anthropic");
+  await expect(form.getByLabel("输出速度", { exact: true })).toHaveCount(0);
+  await protocol.selectOption("chat");
+  await expect(form.getByLabel("输出速度", { exact: true }))
+    .toHaveValue("priority");
   // 收起 closes the editor without discarding the draft.
   await page.getByRole("button", { name: "收起设置", exact: true }).click();
   await expect(page.locator(".ai-settings")).toHaveCount(0);

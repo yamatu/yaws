@@ -18,6 +18,7 @@ const errors: Record<string, string> = {
   official_model_unavailable: "该官方模型未对当前账号开放，请选择其它模型",
   official_model_failed: "官方模型请求失败，请检查账号权限或重新登录",
   official_use_chat: "官方模型请使用 AI 对话页，旧版单次运行接口不支持",
+  anthropic_use_chat: "Anthropic 协议请使用 AI 对话页，旧版单次运行接口不支持",
   official_login_busy: "该提供商正在授权，请先完成或取消",
   official_login_step: "授权步骤已变化，请刷新状态后再提交",
   ai_busy: "同时运行的 AI 任务太多，请等其中一个结束后再试",
@@ -84,6 +85,7 @@ const errors: Record<string, string> = {
   model_http_401: "AI 密钥无效",
   model_http_400: "AI 接口拒绝请求，请检查模型、协议和推理级别",
   model_http_404: "AI 接口路径或模型不存在",
+  model_no_answer: "AI 接口没有返回任何内容，请检查模型名称和协议是否匹配",
   file_path_changed: "文件路径发生变化，请重新生成方案",
   mcp_command_required: "请填写 MCP 服务的启动命令",
   mcp_url_invalid: "MCP 服务地址无效，需要 http(s) 地址",
@@ -119,6 +121,9 @@ export function workspaceError(error: unknown) {
   if (errors[text]) return errors[text];
   // MCP failures carry dynamic detail (method, exit code, HTTP status).
   if (text.startsWith("mcp_timeout")) return "MCP 服务响应超时";
+  // Model gateways answer with statuses the fixed map above does not list.
+  if (text.startsWith("model_http_"))
+    return `AI 接口返回 HTTP ${text.slice("model_http_".length)}`;
   if (text.startsWith("mcp_http_"))
     return `MCP 服务返回 HTTP ${text.slice("mcp_http_".length)}`;
   if (text.startsWith("mcp_exit")) return "MCP 服务进程已退出";

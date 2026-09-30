@@ -17,6 +17,14 @@ test("ai run failures are explained", () => {
   assert.match(workspaceError(new Error("ai_timeout")), /接着写/);
   assert.match(workspaceError(new Error("official_auth_expired")), /重新登录/);
   assert.match(workspaceError(new Error("official_model_unavailable")), /当前账号/);
+  // A Claude endpoint reached with an OpenAI protocol (or the other way round)
+  // answers with nothing, which is the one case the panel used to call "done".
+  assert.match(workspaceError(new Error("model_no_answer")), /没有返回任何内容/);
+  assert.match(workspaceError(new Error("anthropic_use_chat")), /对话页/);
+  assert.match(workspaceError(new Error("model_invalid_json")), /无法解析/);
+  // Statuses the fixed table does not list still read as sentences.
+  assert.equal(workspaceError(new Error("model_http_429")), "AI 接口返回 HTTP 429");
+  assert.equal(workspaceError(new Error("model_http_401")), "AI 密钥无效");
   // A run that ended between the reload and the re-attach is not an error worth
   // alarming the operator with; it reads as a finished turn.
   assert.equal(

@@ -10,7 +10,11 @@ import type { Db } from "./db.js";
  */
 export const AIConfigSchema = z.object({
   baseUrl: z.string().url().max(2048),
-  protocol: z.enum(["chat", "responses"]).default("chat"),
+  /**
+   * `chat` and `responses` are the two OpenAI wire formats; `anthropic` is the
+   * Claude Messages API, which needs its own endpoint and request shape.
+   */
+  protocol: z.enum(["chat", "responses", "anthropic"]).default("chat"),
   model: z.string().trim().min(1).max(200),
   reasoning: z
     .string()

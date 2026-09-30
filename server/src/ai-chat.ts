@@ -1328,6 +1328,13 @@ async function turn(options: TurnOptions): Promise<string> {
     }
   };
 
+  // The Messages protocol is fed by pi through `toContext`, which reads the
+  // OpenAI chat history, so only the responses API needs its own shape.
+  const openaiResponses = config.protocol === "responses";
+  // Some models answer with reasoning and no visible text; that is a finished
+  // turn, unlike a provider that returned nothing at all.
+  let sawReasoning = false;
+
   for (;;) {
     if (signal.aborted) throw new WorkspaceError(499, "cancelled");
     // Tokens are forwarded as they arrive instead of after the whole completion,
@@ -1335,7 +1342,7 @@ async function turn(options: TurnOptions): Promise<string> {
     // streams stays visibly separate from the answer itself.
     const result = await deps.stream(
       config,
-      config.protocol === "chat"
+      !openaiResponses
         ? {
             model: config.model,
             messages,
@@ -1372,6 +1379,7 @@ async function turn(options: TurnOptions): Promise<string> {
             // ignored
           }
         } else if (delta.type === "thinking") {
+          sawReasoning = true;
           emit({ type: "thinking", text: delta.text });
         } else if (delta.type === "usage") {
           emit({ type: "usage", usage: delta.usage });
@@ -1382,7 +1390,7 @@ async function turn(options: TurnOptions): Promise<string> {
       },
     );
     const calls = result.toolCalls;
-    if (config.protocol === "chat") {
+    if (!openaiResponses) {
       messages.push({
         role: "assistant",
         content: result.content || null,
@@ -1453,7 +1461,14 @@ async function turn(options: TurnOptions): Promise<string> {
     // The steps just ran are worth keeping even if the next model call hangs.
     checkpoint(answer);
   }
-  if (!answer.trim()) answer = "已完成。";
+  if (!answer.trim()) {
+    // A model that says nothing at all usually means the request and the
+    // endpoint disagree (an OpenAI-shaped body sent to a Messages endpoint, or
+    // a relay answering with a landing page). Saying "done" here would hide it.
+    if (!sawReasoning)
+      throw new WorkspaceError(502, "model_no_answer");
+    answer = "已完成。";
+  }
   return answer;
 }
 

@@ -114,6 +114,22 @@ test("ai profiles", async (t) => {
     assert.equal(publicProfiles([], "gone").activeId, "");
   });
 
+  await t.test("the wire protocol is one of the three implementations", () => {
+    // Chat completions and responses are the OpenAI shapes; anthropic is the
+    // Claude Messages API, which needs its own request and reply handling.
+    assert.equal(AIProfileSchema.parse(profile()).protocol, "chat");
+    for (const protocol of ["chat", "responses", "anthropic"])
+      assert.equal(AIProfileSchema.parse(profile({ protocol })).protocol, protocol);
+    // Profiles written before the third protocol existed keep loading.
+    const legacy = profile();
+    delete legacy.protocol;
+    assert.equal(AIProfileSchema.parse(legacy).protocol, "chat");
+    assert.equal(
+      AIProfileSchema.safeParse(profile({ protocol: "gemini" })).success,
+      false,
+    );
+  });
+
   await t.test("the output speed tier is validated and defaults to auto", () => {
     // Empty means "let the provider decide", so nothing is sent downstream.
     assert.equal(AIProfileSchema.parse(profile()).speed, "");

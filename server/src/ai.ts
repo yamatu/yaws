@@ -1,6 +1,7 @@
 import { Router } from "express";
 import https from "node:https";
 import http from "node:http";
+import zlib from "node:zlib";
 import path from "node:path";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { lookup } from "node:dns/promises";
@@ -22,6 +23,7 @@ import { route, audit, requestSignal } from "./workspace.js";
 import { chatRouter } from "./ai-chat.js";
 import { aiRuns } from "./ai-runs.js";
 import { OfficialModels, checkOfficialConfig } from "./ai-official.js";
+import { streamAnthropic } from "./ai-anthropic.js";
 import { ExtensionManager } from "./extensions.js";
 import { dataDir, extensionsDir, loadEnv } from "./env.js";
 import { secretPath } from "./ai-safety.js";
@@ -95,6 +97,13 @@ type ModelTarget = {
 async function modelTarget(
   config: AIConfig,
   signal: AbortSignal,
+  /**
+   * What the OpenAI-shaped protocols append to the base URL. The Anthropic
+   * adapter builds its own path, so it passes null and only the address checks
+   * below apply.
+   */
+  suffix: string | null =
+    config.protocol === "responses" ? "/responses" : "/chat/completions",
 ): Promise<ModelTarget> {
   const endpoint = new URL(config.baseUrl);
   if (
@@ -109,9 +118,10 @@ async function modelTarget(
     (endpoint.protocol !== "https:" && !config.allowPrivate)
   )
     throw new WorkspaceError(400, "https_required");
-  const suffix =
-    config.protocol === "responses" ? "/responses" : "/chat/completions";
-  if (!endpoint.pathname.replace(/\/$/, "").endsWith(suffix))
+  if (
+    suffix &&
+    !endpoint.pathname.replace(/\/$/, "").endsWith(suffix)
+  )
     endpoint.pathname = endpoint.pathname.replace(/\/$/, "") + suffix;
   const hostname = endpoint.hostname.replace(/^\[|\]$/g, "");
   const addresses = await new Promise<Array<{ address: string; family: number }>>(
@@ -130,6 +140,50 @@ async function modelTarget(
   )
     throw new WorkspaceError(403, "private_ai_endpoint_blocked");
   return { endpoint, hostname, address: addresses[0] };
+}
+
+/**
+ * Relays have been seen to prefix a body with a UTF-8 BOM and to append a
+ * trailing newline; `JSON.parse` rejects both, so strip them first.
+ */
+function parseModelJson(raw: string): unknown {
+  return JSON.parse(raw.replace(/^\uFEFF/, "").trim());
+}
+
+/**
+ * A stream is recognized by its body, not only by its content type: relays
+ * label `text/event-stream` payloads as `text/plain` or drop the header
+ * entirely, and the frames themselves are unambiguous.
+ */
+function looksLikeSse(raw: string): boolean {
+  const first = raw
+    .replace(/^\uFEFF/, "")
+    .split("\n")
+    .find((line) => line.trim() !== "");
+  return !!first && /^(data|event|id|retry)\s*:|^:/.test(first.trim());
+}
+
+/**
+ * Relays and the CDNs in front of them sometimes compress the body even though
+ * the request asked for `identity`, which would otherwise reach the parsers as
+ * garbage. Returns the stream to read from, or null to read the response as is.
+ */
+function decodeBody(
+  response: IncomingMessage,
+): NodeJS.ReadableStream | null {
+  const encoding = String(
+    response.headers["content-encoding"] ?? "",
+  ).toLowerCase();
+  const decoder = encoding.includes("gzip")
+    ? zlib.createGunzip()
+    : encoding.includes("br")
+      ? zlib.createBrotliDecompress()
+      : encoding.includes("deflate")
+        ? zlib.createInflate()
+        : null;
+  if (!decoder) return null;
+  response.pipe(decoder);
+  return decoder;
 }
 
 type ModelResponseHandler = (
@@ -165,6 +219,9 @@ function modelPost(
           "content-type": "application/json",
           "content-length": String(payload.length),
           accept: "text/event-stream, application/json",
+          // Some relays compress regardless, but asking for identity keeps the
+          // body readable so a JSON or SSE reply cannot be mistaken for junk.
+          "accept-encoding": "identity",
           ...(config.apiKey
             ? { authorization: `Bearer ${config.apiKey}` }
             : {}),
@@ -214,7 +271,7 @@ export async function modelRequest(
             new WorkspaceError(502, `model_http_${response.statusCode}`),
           );
         try {
-          result = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          result = parseModelJson(Buffer.concat(chunks).toString("utf8"));
           resolve();
         } catch {
           reject(new WorkspaceError(502, "model_invalid_json"));
@@ -369,6 +426,12 @@ export async function streamModel(
   signal: AbortSignal,
   onDelta: (delta: ModelDelta) => void,
 ): Promise<ModelTurn> {
+  if (config.protocol === "anthropic") {
+    // pi's Anthropic adapter owns the request, so this only re-runs the shared
+    // endpoint checks (https, public address) before handing over the key.
+    await modelTarget(config, signal, null);
+    return streamAnthropic(config, body, signal, onDelta);
+  }
   const target = await modelTarget(config, signal);
   const chat = config.protocol === "chat";
 
@@ -549,30 +612,6 @@ export async function streamModel(
           return reject(new WorkspaceError(502, `model_http_${status}`));
         }
         const contentType = String(response.headers["content-type"] ?? "");
-        // The endpoint ignored `stream` and answered with one JSON body.
-        if (!contentType.includes("text/event-stream")) {
-          let size = 0;
-          const chunks: Buffer[] = [];
-          response.on("data", (chunk: Buffer) => {
-            size += chunk.length;
-            if (size > MODEL_BODY_LIMIT) {
-              request.destroy();
-              reject(new WorkspaceError(413, "model_response_too_large"));
-            } else chunks.push(chunk);
-          });
-          response.on("end", () => {
-            try {
-              applyBuffered(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-              resolve();
-            } catch {
-              reject(new WorkspaceError(502, "model_invalid_json"));
-            }
-          });
-          response.on("error", () =>
-            reject(new WorkspaceError(502, "model_network_error")),
-          );
-          return;
-        }
         let buffer = "";
         let size = 0;
         let pending: string[] = [];
@@ -589,14 +628,7 @@ export async function streamModel(
             // A keep-alive or a provider-specific frame we do not understand.
           }
         };
-        response.setEncoding("utf8");
-        response.on("data", (chunk: string) => {
-          size += Buffer.byteLength(chunk);
-          if (size > MODEL_STREAM_LIMIT) {
-            request.destroy();
-            reject(new WorkspaceError(413, "model_response_too_large"));
-            return;
-          }
+        const feed = (chunk: string) => {
           buffer += chunk;
           for (;;) {
             const at = buffer.indexOf("\n");
@@ -606,16 +638,62 @@ export async function streamModel(
             if (!line) flush();
             else if (line.startsWith("data:"))
               pending.push(line.slice(5).replace(/^ /, ""));
+            // Some relays skip the `data:` prefix and frame one JSON object per
+            // line; the payload is what matters, so accept it either way.
+            else if (line.startsWith("{") || line.startsWith("["))
+              pending.push(line);
             // `event:`/`id:`/`:` lines carry nothing the payload lacks.
           }
-        });
-        response.on("end", () => {
-          flush();
-          resolve();
-        });
+        };
         response.on("error", () =>
           reject(new WorkspaceError(502, "model_network_error")),
         );
+        const body = decodeBody(response) ?? response;
+        body.on("error", () =>
+          reject(new WorkspaceError(502, "model_network_error")),
+        );
+        if (contentType.includes("text/event-stream")) {
+          body.setEncoding("utf8");
+          body.on("data", (chunk: string) => {
+            size += Buffer.byteLength(chunk);
+            if (size > MODEL_STREAM_LIMIT) {
+              request.destroy();
+              reject(new WorkspaceError(413, "model_response_too_large"));
+              return;
+            }
+            feed(chunk);
+          });
+          body.on("end", () => {
+            flush();
+            resolve();
+          });
+          return;
+        }
+        // The endpoint ignored `stream` and answered with one JSON body, or
+        // sent a stream under the wrong content type.
+        const chunks: Buffer[] = [];
+        body.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > MODEL_BODY_LIMIT) {
+            request.destroy();
+            reject(new WorkspaceError(413, "model_response_too_large"));
+          } else chunks.push(chunk);
+        });
+        body.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          if (looksLikeSse(raw)) {
+            feed(raw.endsWith("\n") ? raw : `${raw}\n`);
+            flush();
+            resolve();
+            return;
+          }
+          try {
+            applyBuffered(parseModelJson(raw));
+            resolve();
+          } catch {
+            reject(new WorkspaceError(502, "model_invalid_json"));
+          }
+        });
       },
     );
 
@@ -993,6 +1071,8 @@ export function aiRouter(
       // The old JSON-only endpoint predates provider-native streaming.
       if (config.officialProvider)
         throw new WorkspaceError(400, "official_use_chat");
+      if (config.protocol === "anthropic")
+        throw new WorkspaceError(400, "anthropic_use_chat");
       const body = Run.parse(req.body);
       remotePath(body.root);
       const signal = AbortSignal.any([

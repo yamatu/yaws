@@ -4,6 +4,7 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import ssh2 from "ssh2";
@@ -429,6 +430,10 @@ export async function harness(port = 0, officialFactory) {
     let calls = [];
     const marker = lastUserText(history, chat);
     const markdown = marker.includes("[md]");
+    // `[nothing]` imitates a provider that accepts the request and then answers
+    // with an empty completion, which the client must report rather than pass
+    // off as a finished turn.
+    const nothing = marker.includes("[nothing]");
     // `[loop]` keeps asking for tools: a long task has to finish in one answer
     // instead of stopping at some step limit.
     const loop = marker.includes("[loop]");
@@ -455,6 +460,7 @@ export async function harness(port = 0, officialFactory) {
     // How many rounds of this answer the model has already written.
     const rounds = history.filter((m) => m.role === "assistant").length;
     if (continuing || cutAll) calls = [];
+    else if (nothing) calls = [];
     else if (loop && count < 12) calls = [{ name: "list_files", args: { path: "/srv/app" } }];
     else if (markdown) calls = [];
     else if (/\[(run|write|danger|file|list|stats|log|secret|many)\]/.test(marker))
@@ -484,7 +490,9 @@ export async function harness(port = 0, officialFactory) {
           ? "第一段：答案太长，在中间就被切开了"
           : markdown
             ? MD_ANSWER
-            : "已生成配置修改与验证命令。";
+            : nothing
+              ? ""
+              : "已生成配置修改与验证命令。";
     // The stop reason a real provider reports when it hits its output cap.
     const stopReason = cutAll || (cut && !continuing) ? "length" : "stop";
     // `[slow]` keeps the model thinking long enough for a browser test to read
@@ -517,7 +525,12 @@ export async function harness(port = 0, officialFactory) {
     if (body.stream && streaming) {
       const pieces = (value) => value.match(/[\s\S]{1,4}/g) ?? [];
       const spoken = calls.length ? preamble : answer;
-      res.setHeader("content-type", "text/event-stream");
+      // `[mislabelled]` sends the same stream under the wrong content type, the
+      // way a relay in front of the provider has been seen to do.
+      res.setHeader(
+        "content-type",
+        marker.includes("[mislabelled]") ? "text/plain; charset=utf-8" : "text/event-stream",
+      );
       res.setHeader("cache-control", "no-store");
       const send = (frame) => res.write(`data: ${JSON.stringify(frame)}\n\n`);
       if (chat) {
@@ -633,7 +646,9 @@ export async function harness(port = 0, officialFactory) {
       return;
     }
     res.setHeader("content-type", "application/json");
-    res.end(
+    // `[gzip]` and `[bom]` imitate relays that keep compressing after the
+    // request asked for `identity`, or that hand back a BOM-prefixed body.
+    const json = Buffer.from(
       JSON.stringify(
         chat
           ? {
@@ -672,6 +687,16 @@ export async function harness(port = 0, officialFactory) {
                   ],
             },
       ),
+    );
+    if (marker.includes("[gzip]")) {
+      res.setHeader("content-encoding", "gzip");
+      res.end(zlib.gzipSync(json));
+      return;
+    }
+    res.end(
+      marker.includes("[bom]")
+        ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), json])
+        : json,
     );
   });
   await new Promise((resolve) => model.listen(0, "127.0.0.1", resolve));

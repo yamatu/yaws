@@ -608,6 +608,38 @@ test("ai chat", async (t) => {
     assert.equal(turn.events.at(-1).type, "done");
   });
 
+  // Relays in front of a provider are the usual source of "无法解析的数据":
+  // the payload is fine, only the framing is unusual, so the parser looks at
+  // the body instead of trusting the content type.
+  await t.test("a relay that frames the reply oddly is still understood", async () => {
+    for (const [marker, label] of [
+      ["[md][bom]", "a UTF-8 BOM"],
+      ["[md][gzip]", "a compressed body"],
+      ["[md][sse][mislabelled]", "a stream labelled text/plain"],
+    ]) {
+      const turn = await chat(f, {
+        root: "/srv/app",
+        message: `${marker} 看一下磁盘`,
+        autoRun: "read",
+      });
+      assert.equal(turn.status, 200, turn.body);
+      const answer = turn.events.find((e) => e.type === "answer");
+      assert.match(answer?.text ?? "", /磁盘排查结论/, `${label}: ${turn.body}`);
+      assert.equal(turn.events.at(-1).type, "done", label);
+    }
+  });
+
+  await t.test("an empty completion is reported instead of passed off as done", async () => {
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[nothing] 看一下磁盘",
+      autoRun: "read",
+    });
+    assert.equal(turn.status, 200, turn.body);
+    assert.equal(turn.events.find((e) => e.type === "error")?.error, "model_no_answer");
+    assert.equal(turn.events.some((e) => e.type === "answer"), false, turn.body);
+  });
+
   await t.test("the responses protocol streams the same way", async () => {
     assert.equal(
       (await request(f, "/api/ai/settings", "PUT", {

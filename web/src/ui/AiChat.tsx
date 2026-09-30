@@ -71,7 +71,7 @@ type Profile = {
   name: string;
   baseUrl: string;
   model: string;
-  protocol: "chat" | "responses";
+  protocol: "chat" | "responses" | "anthropic";
   reasoning: string;
   speed: string;
   allowPrivate: boolean;
@@ -1255,7 +1255,11 @@ export function AiChat({
                   value={current.baseUrl}
                   required
                   readOnly={!!current.officialProvider}
-                  placeholder="https://api.example.com/v1"
+                  placeholder={
+                    current.protocol === "anthropic"
+                      ? "https://api.anthropic.com"
+                      : "https://api.example.com/v1"
+                  }
                   onChange={(e) =>
                     patch(current.id, { baseUrl: e.target.value })
                   }
@@ -1268,6 +1272,11 @@ export function AiChat({
                   value={current.model}
                   required
                   readOnly={!!current.officialProvider}
+                  placeholder={
+                    current.protocol === "anthropic"
+                      ? "claude-sonnet-4-5"
+                      : ""
+                  }
                   onChange={(e) => patch(current.id, { model: e.target.value })}
                 />
               </label>
@@ -1275,6 +1284,7 @@ export function AiChat({
                 协议
                 <select
                   className="yaws-select w-full"
+                  aria-label="协议"
                   value={current.protocol}
                   disabled={!!current.officialProvider}
                   onChange={(e) =>
@@ -1285,6 +1295,7 @@ export function AiChat({
                 >
                   <option value="chat">Chat Completions</option>
                   <option value="responses">Responses</option>
+                  <option value="anthropic">Anthropic Messages</option>
                 </select>
               </label>
               <label>
@@ -1305,7 +1316,9 @@ export function AiChat({
                 </datalist>
               </label>
               {(!current.officialProvider ||
-                current.officialProvider === "openai-codex") && (
+                current.officialProvider === "openai-codex") &&
+                // `service_tier` is an OpenAI field; the Messages API rejects it.
+                current.protocol !== "anthropic" && (
                 <label>
                   输出速度
                   <select
