@@ -336,3 +336,19 @@ test("provider-neutral history keeps assistant calls paired with tool results", 
   assert.equal(context.messages[2].content[0].text, "50%");
   assert.equal(context.tools[0].name, "run_command");
 });
+
+test("the model panel exposes the current pi-ai official models", () => {
+  // The login panel reads this catalog, so a stale pi-ai silently drops the
+  // newest models from the UI. GPT-6.1 arrived in pi-ai 0.99; keep it visible.
+  const codex = officialCatalog().find((item) => item.id === "openai-codex");
+  assert.ok(codex, "openai-codex must stay in the catalog");
+  assert.ok(
+    codex.models.some((model) => model.id === "gpt-6.1-sol"),
+    "gpt-6.1-sol must be offerable",
+  );
+  // Saved configurations name older models too, so they must not disappear.
+  assert.ok(codex.models.some((model) => model.id === "gpt-6-sol"));
+  for (const provider of officialCatalog()) {
+    assert.ok(provider.models.length > 0, `${provider.id} has no models`);
+  }
+});
