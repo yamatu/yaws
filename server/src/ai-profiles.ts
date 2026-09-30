@@ -17,6 +17,26 @@ export const AIConfigSchema = z.object({
     .max(32)
     .regex(/^[a-z0-9_-]*$/)
     .default(""),
+  /**
+   * OpenAI's processing tier, which is what the operator means by "output
+   * speed". Empty lets the provider decide; `priority` (Fast mode) is faster
+   * for roughly twice the token price, `flex` is about half price but slower,
+   * and `ultrafast` is the access-controlled tier for models such as
+   * gpt-5.6-sol. Requested as `service_tier`; providers that do not support it
+   * are simply left on the default when this stays empty.
+   */
+  speed: z
+    .enum([
+      "",
+      "auto",
+      "default",
+      "flex",
+      "scale",
+      "priority",
+      "fast",
+      "ultrafast",
+    ])
+    .default(""),
   apiKey: z.string().max(4096).default(""),
   allowPrivate: z.boolean().default(false),
   /** Empty for custom API keys; official providers use pi's native transport. */
@@ -174,6 +194,7 @@ export function publicProfiles(profiles: AIProfile[], activeId: string) {
       protocol: p.protocol,
       model: p.model,
       reasoning: p.reasoning,
+      speed: p.speed,
       allowPrivate: p.allowPrivate,
       officialProvider: p.officialProvider,
       hasKey: !!p.apiKey,

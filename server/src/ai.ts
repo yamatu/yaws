@@ -1056,6 +1056,7 @@ export function aiRouter(
                   ...(config.reasoning
                     ? { reasoning_effort: config.reasoning }
                     : {}),
+                  ...(config.speed ? { service_tier: config.speed } : {}),
                 },
                 signal,
               ),
@@ -1092,6 +1093,7 @@ export function aiRouter(
                   ...(config.reasoning
                     ? { reasoning: { effort: config.reasoning } }
                     : {}),
+                  ...(config.speed ? { service_tier: config.speed } : {}),
                 },
                 signal,
               ),

@@ -1344,6 +1344,7 @@ async function turn(options: TurnOptions): Promise<string> {
               function: tool,
             })),
             ...(config.reasoning ? { reasoning_effort: config.reasoning } : {}),
+            ...(config.speed ? { service_tier: config.speed } : {}),
           }
         : {
             model: config.model,
@@ -1356,6 +1357,7 @@ async function turn(options: TurnOptions): Promise<string> {
             })),
             store: false,
             ...(config.reasoning ? { reasoning: { effort: config.reasoning } } : {}),
+            ...(config.speed ? { service_tier: config.speed } : {}),
           },
       signal,
       (delta) => {

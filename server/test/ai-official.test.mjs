@@ -5,7 +5,8 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { harness } from "./fixture.mjs";
 import { hashPassword, signToken } from "../dist/auth.js";
 import {
-  OfficialModels, OfficialCredentials, officialCatalog, toContext,
+  OfficialModels, OfficialCredentials, officialCatalog, officialServiceTier,
+  toContext,
 } from "../dist/ai-official.js";
 
 const original = builtinProviders().find((item) => item.id === "openai-codex");
@@ -318,6 +319,56 @@ test("expired official tokens are refreshed and encrypted before streaming", asy
     const cipher = f.db.prepare("SELECT value FROM settings WHERE key='ai_official_auth_openai-codex'").get().value;
     assert.ok(!cipher.includes("rotated-local-secret"));
   } finally { await f.close(); }
+});
+
+test("the output speed tier rides along as service_tier on Codex", async () => {
+  const f = await harness();
+  try {
+    const bodies = [];
+    const base = fakeProvider();
+    const provider = {
+      ...base,
+      streamSimple(model, context, options) {
+        const body = { model: model.id };
+        bodies.push(options?.onPayload ? options.onPayload(body, model) : body);
+        return base.streamSimple(model, context, options);
+      },
+    };
+    const service = new OfficialModels(f.db, f.secret, [provider]);
+    await service.credentials.modify("openai-codex", async () => ({
+      type: "oauth", access: "local-secret-access",
+      refresh: "local-secret-refresh", expires: Date.now() + 3600_000,
+    }));
+    const run = (speed) => service.stream({
+      officialProvider: "openai-codex", baseUrl: catalog.baseUrl,
+      model: modelId, apiKey: "", protocol: "chat", reasoning: "", speed,
+      allowPrivate: false,
+    }, { messages: [
+      { role: "system", content: "help" },
+      { role: "user", content: "hello" },
+    ], tools: [] }, new AbortController().signal, () => {});
+    await run("priority");
+    assert.deepEqual(bodies.at(-1), { model: modelId, service_tier: "priority" });
+    await run("ultrafast");
+    assert.equal(bodies.at(-1).service_tier, "ultrafast");
+    // The default tier must not rewrite the body at all.
+    await run("");
+    assert.equal("service_tier" in bodies.at(-1), false);
+  } finally { await f.close(); }
+});
+
+test("only OpenAI official providers are offered a service tier", () => {
+  // Fast mode is an OpenAI request field; the others reject unknown body keys.
+  assert.equal(
+    officialServiceTier({ officialProvider: "openai-codex", speed: "flex" }),
+    "flex",
+  );
+  assert.equal(
+    officialServiceTier({ officialProvider: "anthropic", speed: "priority" }),
+    "",
+  );
+  // A custom API-key profile never goes through this path and stays untouched.
+  assert.equal(officialServiceTier({ officialProvider: "", speed: "priority" }), "");
 });
 
 test("provider-neutral history keeps assistant calls paired with tool results", () => {

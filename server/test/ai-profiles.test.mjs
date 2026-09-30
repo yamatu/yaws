@@ -114,6 +114,28 @@ test("ai profiles", async (t) => {
     assert.equal(publicProfiles([], "gone").activeId, "");
   });
 
+  await t.test("the output speed tier is validated and defaults to auto", () => {
+    // Empty means "let the provider decide", so nothing is sent downstream.
+    assert.equal(AIProfileSchema.parse(profile()).speed, "");
+    assert.equal(
+      AIProfileSchema.parse(profile({ speed: "priority" })).speed,
+      "priority",
+    );
+    // A tier the OpenAI API would reject must fail before it is stored.
+    assert.equal(
+      AIProfileSchema.safeParse(profile({ speed: "turbo" })).success,
+      false,
+    );
+    // Profiles written before the field existed keep loading on the default.
+    const legacy = profile();
+    delete legacy.speed;
+    assert.equal(AIProfileSchema.parse(legacy).speed, "");
+    assert.equal(
+      publicProfiles([profile({ speed: "flex" })], "one").profiles[0].speed,
+      "flex",
+    );
+  });
+
   await t.test("stored profiles round trip and follow the active one", () => {
     const db = openDb(":memory:");
     try {

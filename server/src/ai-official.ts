@@ -70,6 +70,15 @@ export function checkOfficialConfig(config: AIConfig) {
 }
 
 /**
+ * Fast mode (`service_tier`) is an OpenAI request field. The other official
+ * providers reject unknown body keys, so only Codex is ever offered a tier —
+ * an empty value means "let the provider decide".
+ */
+export function officialServiceTier(config: AIConfig): string {
+  return config.officialProvider === "openai-codex" ? config.speed : "";
+}
+
+/**
  * The app's encrypted settings table is the credential store, not pi's
  * ~/.pi/agent/auth.json (which would mix yaws and a local CLI installation).
  * pi-ai performs refresh under `modify`; serialize modifications per provider
@@ -324,8 +333,18 @@ export class OfficialModels {
     const context = toContext(body, model);
     let message: AssistantMessage | null = null;
     try {
+      // `streamSimple` has no service-tier knob, but the OpenAI responses
+      // adapters read `service_tier` from the request body, so Fast mode rides
+      // along through `onPayload`.
+      const tier = officialServiceTier(config);
       const events = this.models.streamSimple(model, context, {
         signal,
+        ...(tier ? {
+          onPayload: (payload: unknown) =>
+            payload && typeof payload === "object"
+              ? { ...(payload as Record<string, unknown>), service_tier: tier }
+              : undefined,
+        } : {}),
         ...(config.reasoning ? {
           reasoning: config.reasoning as "minimal" | "low" | "medium" |
             "high" | "xhigh" | "max",

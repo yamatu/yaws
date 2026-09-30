@@ -1319,12 +1319,21 @@ browserTest("AI settings stay reachable and offer a third-party API entry", asyn
   await form.getByLabel("API Key", { exact: true }).fill("third-party-key");
   await expect(form.getByLabel("API Key", { exact: true }))
     .toHaveValue("third-party-key");
+  // OpenAI's Fast mode is surfaced as a plain output-speed choice, defaulting
+  // to "let the provider decide".
+  const speed = form.getByLabel("输出速度", { exact: true });
+  await expect(speed).toHaveValue("");
+  await expect(speed.locator("option")).toHaveCount(4);
+  await speed.selectOption("priority");
+  await expect(speed).toHaveValue("priority");
   // 收起 closes the editor without discarding the draft.
   await page.getByRole("button", { name: "收起设置", exact: true }).click();
   await expect(page.locator(".ai-settings")).toHaveCount(0);
   await settings.click();
   await expect(form.getByLabel("API 地址", { exact: true }))
     .toHaveValue("https://api.example.test/v1");
+  await expect(form.getByLabel("输出速度", { exact: true }))
+    .toHaveValue("priority");
   await page.close();
 });
 

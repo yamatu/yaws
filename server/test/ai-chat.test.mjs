@@ -644,6 +644,61 @@ test("ai chat", async (t) => {
     );
   });
 
+  await t.test("the output speed tier reaches the provider", async () => {
+    // Chat Completions carries the tier as `service_tier` on the body.
+    assert.equal(
+      (await request(f, "/api/ai/settings", "PUT", {
+        ...settings(f),
+        speed: "priority",
+      })).status,
+      200,
+    );
+    const chatFrom = f.modelRequests.length;
+    await chat(f, {
+      root: "/srv/app",
+      message: "[run] 用快速档看一下磁盘",
+      autoRun: "read",
+    });
+    const chatSent = f.modelRequests.slice(chatFrom);
+    assert.ok(chatSent.length > 0);
+    assert.ok(chatSent.every((r) => r.service_tier === "priority"));
+
+    // The Responses protocol sends the same field.
+    assert.equal(
+      (await request(f, "/api/ai/settings", "PUT", {
+        ...settings(f),
+        protocol: "responses",
+        speed: "flex",
+      })).status,
+      200,
+    );
+    const responseFrom = f.modelRequests.length;
+    await chat(f, {
+      root: "/srv/app",
+      message: "[run] 用经济档看一下磁盘",
+      autoRun: "read",
+    });
+    const responseSent = f.modelRequests.slice(responseFrom);
+    assert.ok(responseSent.length > 0);
+    assert.ok(responseSent.every((r) => r.service_tier === "flex"));
+
+    // An empty tier means "let the provider decide", so the field is omitted
+    // rather than sent as an empty string that a strict gateway would reject.
+    assert.equal(
+      (await request(f, "/api/ai/settings", "PUT", settings(f))).status,
+      200,
+    );
+    const plainFrom = f.modelRequests.length;
+    await chat(f, {
+      root: "/srv/app",
+      message: "[run] 用默认档看一下磁盘",
+      autoRun: "read",
+    });
+    const plainSent = f.modelRequests.slice(plainFrom);
+    assert.ok(plainSent.length > 0);
+    assert.ok(plainSent.every((r) => !("service_tier" in r)));
+  });
+
   await t.test("an answer cut off at the output cap is finished", async () => {
     // Buffered provider first: `finish_reason: length` has to be noticed even
     // when the endpoint ignores `stream`.

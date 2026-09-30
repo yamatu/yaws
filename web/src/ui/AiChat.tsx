@@ -73,6 +73,7 @@ type Profile = {
   model: string;
   protocol: "chat" | "responses";
   reasoning: string;
+  speed: string;
   allowPrivate: boolean;
   hasKey?: boolean;
   officialProvider?: string;
@@ -161,6 +162,7 @@ function blankDraft(): Draft {
     model: "",
     protocol: "chat",
     reasoning: "",
+    speed: "",
     allowPrivate: false,
     officialProvider: "",
     apiKey: "",
@@ -1302,6 +1304,23 @@ export function AiChat({
                   ))}
                 </datalist>
               </label>
+              {(!current.officialProvider ||
+                current.officialProvider === "openai-codex") && (
+                <label>
+                  输出速度
+                  <select
+                    className="yaws-select w-full"
+                    aria-label="输出速度"
+                    value={current.speed}
+                    onChange={(e) => patch(current.id, { speed: e.target.value })}
+                  >
+                    <option value="">默认</option>
+                    <option value="priority">快速 Fast（约 2× 费用）</option>
+                    <option value="flex">经济 Flex（约 0.5× 费用）</option>
+                    <option value="ultrafast">极速 Ultrafast（限部分模型）</option>
+                  </select>
+                </label>
+              )}
               {!current.officialProvider && <label>
                 API Key
                 <input
