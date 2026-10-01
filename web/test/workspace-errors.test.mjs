@@ -20,6 +20,9 @@ test("ai run failures are explained", () => {
   // A Claude endpoint reached with an OpenAI protocol (or the other way round)
   // answers with nothing, which is the one case the panel used to call "done".
   assert.match(workspaceError(new Error("model_no_answer")), /没有返回任何内容/);
+  // A relay that reports its own failure in the body has to read as one, not
+  // as an unparseable answer the operator cannot act on.
+  assert.match(workspaceError(new Error("model_upstream_error")), /上游返回错误/);
   assert.match(workspaceError(new Error("anthropic_use_chat")), /对话页/);
   assert.match(workspaceError(new Error("model_invalid_json")), /无法解析/);
   // Statuses the fixed table does not list still read as sentences.

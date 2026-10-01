@@ -31,6 +31,230 @@ const REASONING_LEVELS = [
 ] as const;
 
 /**
+ * What a relay in front of the Messages API actually answered with.
+ *
+ * Relays are not the Messages API: they answer `stream: true` with the whole
+ * message as JSON, they write an error object straight into the stream with no
+ * framing at all, or they leave the SSE `event:` name to the caller because the
+ * official SDK dispatches on the JSON `type` instead. Frames are repaired on
+ * the way in, and this record of what arrived keeps a 200 that never became a
+ * stream from being reported as unparseable data.
+ */
+export type AnthropicReply = {
+  /** JSON frames the endpoint delivered, repaired or not. */
+  frames: number;
+  /** Whether the endpoint sent any body bytes at all. */
+  empty: boolean;
+  /** Whether the endpoint reported a failure in-band. */
+  error: boolean;
+};
+
+/** The event names a Claude stream may carry. */
+const REPLY_EVENTS = new Set([
+  "message_start",
+  "message_delta",
+  "message_stop",
+  "content_block_start",
+  "content_block_delta",
+  "content_block_stop",
+  "error",
+]);
+
+/** `JSON.parse` for values that are usually not JSON at all. */
+function parseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A whole `message` object rewritten as the frames a streaming client would
+ * have received, so a relay that ignores `stream` still produces a turn.
+ * Returns null for every other payload.
+ */
+export function anthropicFrames(raw: unknown): string | null {
+  const parsed = typeof raw === "string" ? parseJson(raw) : raw;
+  if (!parsed || typeof parsed !== "object") return null;
+  const message = parsed as Record<string, unknown>;
+  if (message.type !== "message" || !Array.isArray(message.content))
+    return null;
+  const frames: string[] = [];
+  const frame = (name: string, body: unknown) => {
+    frames.push(`event: ${name}\ndata: ${JSON.stringify(body)}\n\n`);
+  };
+  frame("message_start", {
+    type: "message_start",
+    message: { ...message, content: [] },
+  });
+  message.content.forEach((entry, index) => {
+    const block = entry as Record<string, any>;
+    const start = (content: unknown, delta?: unknown) => {
+      frame("content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: content,
+      });
+      if (delta)
+        frame("content_block_delta", {
+          type: "content_block_delta",
+          index,
+          delta,
+        });
+      frame("content_block_stop", { type: "content_block_stop", index });
+    };
+    // Blocks are opened empty and filled by a delta, the way a stream would:
+    // the reader finalizes a tool call from its deltas, not from the opening
+    // frame, so arguments have to travel as `partial_json` to survive.
+    if (block?.type === "text")
+      start(
+        { type: "text", text: "" },
+        block.text ? { type: "text_delta", text: block.text } : undefined,
+      );
+    else if (block?.type === "thinking")
+      start(
+        { type: "thinking", thinking: "", signature: block.signature ?? "" },
+        block.thinking
+          ? { type: "thinking_delta", thinking: block.thinking }
+          : undefined,
+      );
+    else if (block?.type === "tool_use")
+      start({ type: "tool_use", id: block.id, name: block.name, input: {} }, {
+        type: "input_json_delta",
+        partial_json: JSON.stringify(block.input ?? {}),
+      });
+    else start(block);
+  });
+  frame("message_delta", {
+    type: "message_delta",
+    delta: {
+      stop_reason: message.stop_reason ?? "end_turn",
+      stop_sequence: message.stop_sequence ?? null,
+    },
+    usage: message.usage ?? {},
+  });
+  frame("message_stop", { type: "message_stop" });
+  return frames.join("");
+}
+
+/**
+ * One SSE line of the reply, with the event name restored when the relay left
+ * it out and whole messages expanded into frames. Everything else passes
+ * through untouched, including the `:` keep-alives relays send while they wait.
+ */
+function repairLine(raw: string, reply: AnthropicReply): string {
+  if (raw.startsWith("event:")) {
+    if (raw.slice("event:".length).trim() === "error") reply.error = true;
+    return `${raw}\n`;
+  }
+  if (
+    raw === "" ||
+    raw.startsWith(":") ||
+    raw.startsWith("id:") ||
+    raw.startsWith("retry:")
+  )
+    return `${raw}\n`;
+  const body = raw.startsWith("data:") ? raw.slice(5).trim() : raw.trim();
+  const payload = parseJson(body) as
+    | { type?: unknown; error?: unknown }
+    | null;
+  const whole = anthropicFrames(payload);
+  if (whole) {
+    reply.frames += 1;
+    return whole;
+  }
+  const declared =
+    typeof payload?.type === "string" && REPLY_EVENTS.has(payload.type)
+      ? payload.type
+      : null;
+  // A relay may report a failure without the `type` the API uses to mark one.
+  const name =
+    declared ?? (payload?.error !== undefined ? "error" : null);
+  if (name === "error") reply.error = true;
+  if (!raw.startsWith("data:")) {
+    // A relay that writes its error object straight into the stream without
+    // any framing still has to reach the caller as a failure.
+    if (!name) return `${raw}\n`;
+    reply.frames += 1;
+    return `event: ${name}\ndata: ${body}\n\n`;
+  }
+  reply.frames += 1;
+  return `${name ? `event: ${name}\n` : ""}${raw}\n`;
+}
+
+/** Repairs a body that was read whole, which is what a non-stream reply is. */
+function repairText(text: string, reply: AnthropicReply): string {
+  if (text !== "") reply.empty = false;
+  return text
+    .split("\n")
+    .map((line) => repairLine(line, reply))
+    .join("");
+}
+
+/** The same repair, applied as the bytes arrive so streaming still streams. */
+function repairStream(
+  reply: AnthropicReply,
+): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+  const push = (
+    text: string,
+    controller: TransformStreamDefaultController<Uint8Array>,
+    end: boolean,
+  ) => {
+    buffer += text;
+    let index = buffer.indexOf("\n");
+    while (index !== -1) {
+      controller.enqueue(encoder.encode(repairLine(buffer.slice(0, index), reply)));
+      buffer = buffer.slice(index + 1);
+      index = buffer.indexOf("\n");
+    }
+    if (end && buffer) {
+      controller.enqueue(encoder.encode(repairLine(buffer, reply)));
+      buffer = "";
+    }
+  };
+  return new TransformStream({
+    transform(chunk, controller) {
+      if (chunk.byteLength > 0) reply.empty = false;
+      push(decoder.decode(chunk, { stream: true }), controller, false);
+    },
+    flush(controller) {
+      push(decoder.decode(), controller, true);
+    },
+  });
+}
+
+/**
+ * The `fetch` pi's Anthropic client goes through. Requests are untouched; the
+ * reply is repaired so a relay cannot turn a working conversation into a parse
+ * failure. A failing status is returned as it came, because the SDK already
+ * turns those into an error carrying the status yaws reports.
+ */
+function anthropicFetch(reply: AnthropicReply): typeof fetch {
+  return async (input, init) => {
+    const response = await fetch(input, init);
+    if (!response.ok || !response.body) return response;
+    const type = response.headers.get("content-type") ?? "";
+    if (type.includes("event-stream"))
+      return new Response(response.body.pipeThrough(repairStream(reply)), {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    // Not an event stream: a finished message, a gateway error page, or SSE
+    // under the wrong content type. All three are read whole either way.
+    return new Response(repairText(await response.text(), reply), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+}
+
+/**
  * The Anthropic SDK appends `/v1/messages` to whatever base URL it is given.
  * A relay base the other protocols accept (`https://host/v1`) or the endpoint
  * pasted straight from the docs would therefore become `/v1/v1/messages`, so
@@ -86,15 +310,32 @@ export function anthropicModel(config: AIConfig): Model<Api> {
  * the codes the panel already explains, and never echo the provider body: it
  * can quote the request back, including the key.
  */
-export function anthropicFailure(message: AssistantMessage): WorkspaceError {
+export function anthropicFailure(
+  message: AssistantMessage,
+  reply?: AnthropicReply,
+): WorkspaceError {
   if (message.stopReason === "aborted")
     return new WorkspaceError(499, "cancelled");
   const text = String(message.errorMessage ?? "");
   const status = /^\s*(\d{3})\b/.exec(text)?.[1];
   if (status) return new WorkspaceError(502, `model_http_${status}`);
-  // A 200 that never became an Anthropic stream means the URL is not the
-  // Messages endpoint, which is the common relay mistake.
-  if (/without a stop reason|refused|sensitive/i.test(text))
+  // A 200 whose body never became a Claude turn has to be reported as what it
+  // was: nothing at all, or something that is not this protocol.
+  if (reply) {
+    if (reply.frames === 0)
+      return new WorkspaceError(
+        502,
+        reply.empty ? "model_no_answer" : "model_invalid_json",
+      );
+    if (reply.error) return new WorkspaceError(502, "model_upstream_error");
+  }
+  // A stream that stopped before its stop reason means the relay cut the turn
+  // short, and a body that is not JSON means the URL is not the API at all.
+  if (
+    /without a stop reason|before message_stop|refused|sensitive|Could not parse/i.test(
+      text,
+    )
+  )
     return new WorkspaceError(502, "model_invalid_json");
   return new WorkspaceError(502, "model_network_error");
 }
@@ -128,6 +369,7 @@ export async function streamAnthropic(
     throw new WorkspaceError(400, "model_http_400");
   const model = anthropicModel(config);
   const context = toContext(body, model);
+  const reply: AnthropicReply = { frames: 0, empty: true, error: false };
   let message: AssistantMessage | null = null;
   const events = anthropicMessagesApi().streamSimple(
     model,
@@ -135,6 +377,7 @@ export async function streamAnthropic(
     {
       apiKey: config.apiKey,
       signal,
+      fetch: anthropicFetch(reply),
       ...(config.reasoning
         ? { reasoning: config.reasoning as ThinkingLevel }
         : {}),
@@ -162,7 +405,7 @@ export async function streamAnthropic(
         message = event.message;
         break;
       case "error":
-        throw anthropicFailure(event.error);
+        throw anthropicFailure(event.error, reply);
       default:
         break;
     }

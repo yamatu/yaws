@@ -6,6 +6,7 @@ import { officialModel } from "../dist/ai-official.js";
 import {
   anthropicBaseUrl,
   anthropicFailure,
+  anthropicFrames,
   anthropicModel,
 } from "../dist/ai-anthropic.js";
 
@@ -172,6 +173,57 @@ test("anthropic endpoints", async (t) => {
     );
     assert.equal(failure("Connection error."), "model_network_error");
     assert.equal(failure(undefined, "aborted"), "cancelled");
+    // What the reply turned out to be is reported when it is known, because
+    // "unparseable data" describes nothing the user can act on.
+    const shape = (reply) =>
+      anthropicFailure({ stopReason: "error" }, reply).message;
+    assert.equal(shape({ frames: 0, empty: true, error: false }), "model_no_answer");
+    assert.equal(shape({ frames: 0, empty: false, error: false }), "model_invalid_json");
+    assert.equal(shape({ frames: 3, empty: false, error: true }), "model_upstream_error");
+    assert.equal(shape({ frames: 3, empty: false, error: false }), "model_network_error");
+  });
+
+  await t.test("a finished message replays as the frames a stream would send", () => {
+    const frames = anthropicFrames({
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-sonnet-4-5",
+      content: [
+        { type: "text", text: "磁盘用了 50%。" },
+        { type: "tool_use", id: "toolu_1", name: "read_file", input: { path: "/srv" } },
+      ],
+      stop_reason: "tool_use",
+      stop_sequence: null,
+      usage: { input_tokens: 11, output_tokens: 7 },
+    });
+    const events = frames
+      .split("\n\n")
+      .filter(Boolean)
+      .map((chunk) => JSON.parse(chunk.split("\n").at(-1).slice("data: ".length)));
+    assert.deepEqual(
+      events.map((event) => event.type),
+      [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+      ],
+    );
+    // Text and arguments arrive as deltas: the reader opens blocks empty and
+    // finalizes a call from what it streamed, never from the opening frame.
+    assert.equal(events[2].delta.text, "磁盘用了 50%。");
+    assert.equal(events[5].delta.partial_json, '{"path":"/srv"}');
+    assert.equal(events[7].delta.stop_reason, "tool_use");
+    assert.equal(events[7].usage.output_tokens, 7);
+    // Anything that is not a whole message is left to the reader.
+    assert.equal(anthropicFrames("not json"), null);
+    assert.equal(anthropicFrames({ type: "message_start" }), null);
   });
 
   const f = await harness();
@@ -286,6 +338,59 @@ test("anthropic endpoints", async (t) => {
     assert.equal(result.is_error, false);
   });
 
+  await t.test("a relay that answers with the whole message instead of a stream", async () => {
+    const api = await relay((req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4-5",
+          content: [{ type: "text", text: "磁盘用了 50%。" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 11, output_tokens: 7 },
+        }),
+      );
+    });
+    t.after(() => api.server.close());
+    assert.equal((await request(f, "/api/ai/settings", "PUT", settings(api.base))).status, 200);
+    const turn = await chat(f, { root: "/srv/app", message: "磁盘怎么样", autoRun: "read" });
+    assert.equal(turn.status, 200, turn.body);
+    assert.equal(turn.events.find((e) => e.type === "answer").text, "磁盘用了 50%。");
+    const usage = turn.events.find((e) => e.type === "usage");
+    assert.equal(usage.usage.promptTokens, 11);
+    assert.equal(usage.usage.completionTokens, 7);
+  });
+
+  await t.test("a relay that streams without SSE event names", async () => {
+    // The official client dispatches on the JSON `type`, so plenty of relays
+    // never write an `event:` line. pi's reader needs it, so it is restored.
+    const payloads = [
+      started,
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "磁盘用了 50%。" } },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 7 },
+      },
+      { type: "message_stop" },
+    ];
+    const api = await relay((req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      for (const payload of payloads) res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      res.end();
+    });
+    t.after(() => api.server.close());
+    assert.equal((await request(f, "/api/ai/settings", "PUT", settings(api.base))).status, 200);
+    const turn = await chat(f, { root: "/srv/app", message: "磁盘怎么样", autoRun: "read" });
+    assert.equal(turn.status, 200, turn.body);
+    assert.equal(turn.events.find((e) => e.type === "answer").text, "磁盘用了 50%。");
+  });
+
   await t.test("a relay that answers oddly reports why", async () => {
     const cases = [
       [
@@ -311,6 +416,34 @@ test("anthropic endpoints", async (t) => {
           res.end("<html><body>welcome</body></html>");
         },
         "model_invalid_json",
+      ],
+      [
+        "an empty stream",
+        (req, res) => {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.end();
+        },
+        "model_no_answer",
+      ],
+      [
+        "an error object with a 200",
+        (req, res) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({ error: { type: "overloaded_error", message: "Overloaded" } }),
+          );
+        },
+        "model_upstream_error",
+      ],
+      [
+        "an error written into the stream unframed",
+        (req, res) => {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write(frame(started));
+          res.write(`${JSON.stringify({ error: { type: "overloaded_error" } })}\n`);
+          res.end();
+        },
+        "model_upstream_error",
       ],
     ];
     for (const [label, handler, code] of cases) {

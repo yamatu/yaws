@@ -86,6 +86,7 @@ const errors: Record<string, string> = {
   model_http_400: "AI 接口拒绝请求，请检查模型、协议和推理级别",
   model_http_404: "AI 接口路径或模型不存在",
   model_no_answer: "AI 接口没有返回任何内容，请检查模型名称和协议是否匹配",
+  model_upstream_error: "AI 接口上游返回错误，请检查模型名称、额度或渠道设置",
   file_path_changed: "文件路径发生变化，请重新生成方案",
   mcp_command_required: "请填写 MCP 服务的启动命令",
   mcp_url_invalid: "MCP 服务地址无效，需要 http(s) 地址",
