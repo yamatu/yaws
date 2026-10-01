@@ -391,6 +391,75 @@ test("anthropic endpoints", async (t) => {
     assert.equal(turn.events.find((e) => e.type === "answer").text, "磁盘用了 50%。");
   });
 
+  await t.test("a relay that only serves Claude Code clients", async () => {
+    // Plenty of relays resell a Claude Code subscription and refuse anything
+    // that is not Claude Code, naming what the request is missing. That is a
+    // property of the endpoint, so the request is sent again with it.
+    const seen = [];
+    const api = await relay(async (req, res) => {
+      const body = JSON.parse(await drain(req));
+      const agent = String(req.headers["user-agent"] ?? "");
+      seen.push({ agent, user: body.metadata?.user_id });
+      if (!agent.startsWith("claude-cli/") || !body.metadata?.user_id) {
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: {
+              code: "claude_code_required",
+              message: "This channel only supports Claude Code or Claude Desktop requests to /v1/messages.",
+            },
+            type: "new_api_error",
+          }),
+        );
+        return;
+      }
+      speak(req, res);
+    });
+    t.after(() => api.server.close());
+    assert.equal((await request(f, "/api/ai/settings", "PUT", settings(api.base))).status, 200);
+
+    const turn = await chat(f, { root: "/srv/app", message: "磁盘怎么样", autoRun: "read" });
+    assert.equal(turn.status, 200, turn.body);
+    assert.equal(turn.events.find((e) => e.type === "answer").text, "磁盘用了 50%。");
+    // The first request went out as yaws, the refusal was answered, and the
+    // identity the relay asked for carries the metadata it asked for.
+    assert.equal(seen.length, 2, JSON.stringify(seen));
+    assert.equal(seen[0].agent.startsWith("claude-cli/"), false);
+    assert.equal(seen[0].user, undefined);
+    assert.equal(seen[1].agent.startsWith("claude-cli/"), true);
+    assert.equal(typeof seen[1].user, "string");
+    // Having asked once, the endpoint is remembered: no third request, and no
+    // second refusal, for the next turn.
+    const again = await chat(f, { root: "/srv/app", message: "磁盘怎么样", autoRun: "read" });
+    assert.equal(again.events.find((e) => e.type === "answer").text, "磁盘用了 50%。");
+    assert.equal(seen.length, 3, JSON.stringify(seen));
+  });
+
+  await t.test("a refusal that is not that gate is reported as it came", async () => {
+    const reasons = [
+      ["permission", { error: { type: "permission_error", message: "no access to this model" } }],
+      [
+        "a gate that keeps refusing",
+        { error: { code: "claude_code_required", message: "still not Claude Code" }, type: "new_api_error" },
+      ],
+    ];
+    for (const [label, payload] of reasons) {
+      let calls = 0;
+      const api = await relay((req, res) => {
+        calls += 1;
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify(payload));
+      });
+      assert.equal((await request(f, "/api/ai/settings", "PUT", settings(api.base))).status, 200);
+      const turn = await chat(f, { root: "/srv/app", message: "磁盘怎么样", autoRun: "read" });
+      const error = turn.events.find((e) => e.type === "error");
+      assert.equal(error?.error, "model_http_403", `${label}: ${turn.body}`);
+      // Asked once, plus one retry when the relay named the identity it wants.
+      assert.equal(calls, label === "permission" ? 1 : 2, label);
+      api.server.close();
+    }
+  });
+
   await t.test("a relay that answers oddly reports why", async () => {
     const cases = [
       [

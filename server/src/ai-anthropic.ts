@@ -228,13 +228,75 @@ function repairStream(
 }
 
 /**
+ * Relays that resell a Claude Code subscription gate `/v1/messages` on the
+ * identity Claude Code presents, and refuse everything else with 403
+ * `claude_code_required`. The refusal says which part is missing, so the
+ * request is sent again with it. An endpoint that asked once is remembered and
+ * later requests carry the identity from the start, which is why only the
+ * first call pays for the extra round trip. Keyed by request URL, which holds
+ * no secret: the key travels in a header.
+ */
+const claudeCodeRelays = new Set<string>();
+
+/**
+ * What such a relay checks for. The version is the one pi's own Anthropic
+ * adapter sends for an OAuth token, so both paths look like the same client.
+ */
+const CLAUDE_CODE_HEADERS: Record<string, string> = {
+  "user-agent": "claude-cli/2.1.280",
+  "x-app": "cli",
+};
+
+/**
+ * Claude Code identifies itself with `metadata.user_id`, a JSON string holding
+ * its device and session. yaws is not Claude Code, so it sends the same shape
+ * with a fixed id of its own rather than inventing a device per installation.
+ */
+const CLAUDE_CODE_USER_ID = JSON.stringify({
+  device_id: `yaws-${"0".repeat(59)}`,
+  account_uuid: "",
+  session_id: "",
+});
+
+/** Whether a refusal is that gate asking for an identity, not a real denial. */
+async function claudeCodeGate(response: Response): Promise<boolean> {
+  if (response.status !== 403) return false;
+  try {
+    return (await response.clone().text()).includes("claude_code_required");
+  } catch {
+    return false;
+  }
+}
+
+/** The same request, carrying the identity a Claude Code relay insists on. */
+function asClaudeCode(init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers);
+  for (const [name, value] of Object.entries(CLAUDE_CODE_HEADERS))
+    headers.set(name, value);
+  let body = init?.body;
+  if (typeof body === "string") {
+    const params = parseJson(body) as Record<string, unknown> | null;
+    if (params && typeof params === "object") {
+      const sent = params.metadata;
+      const metadata: Record<string, unknown> =
+        sent && typeof sent === "object" ? { ...sent } : {};
+      if (!metadata.user_id) metadata.user_id = CLAUDE_CODE_USER_ID;
+      body = JSON.stringify({ ...params, metadata });
+      // The body changed length, so a stale header would break the request.
+      headers.delete("content-length");
+    }
+  }
+  return { ...init, headers, body };
+}
+
+/**
  * The `fetch` pi's Anthropic client goes through. Requests are untouched; the
  * reply is repaired so a relay cannot turn a working conversation into a parse
  * failure. A failing status is returned as it came, because the SDK already
  * turns those into an error carrying the status yaws reports.
  */
 function anthropicFetch(reply: AnthropicReply): typeof fetch {
-  return async (input, init) => {
+  const send = async (input: RequestInfo | URL, init?: RequestInit) => {
     const response = await fetch(input, init);
     if (!response.ok || !response.body) return response;
     const type = response.headers.get("content-type") ?? "";
@@ -251,6 +313,22 @@ function anthropicFetch(reply: AnthropicReply): typeof fetch {
       statusText: response.statusText,
       headers: { "content-type": "text/event-stream" },
     });
+  };
+  const endpointOf = (input: RequestInfo | URL) =>
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+  return async (input, init) => {
+    const endpoint = endpointOf(input);
+    const response = await send(
+      input,
+      claudeCodeRelays.has(endpoint) ? asClaudeCode(init) : init,
+    );
+    if (!(await claudeCodeGate(response))) return response;
+    claudeCodeRelays.add(endpoint);
+    return send(input, asClaudeCode(init));
   };
 }
 
