@@ -308,6 +308,9 @@ function migrate(db: Db) {
   ensureColumns(db, "ai_runs", [
     { name: "conversation_id", sql: "ALTER TABLE ai_runs ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''" },
     { name: "trace", sql: "ALTER TABLE ai_runs ADD COLUMN trace TEXT NOT NULL DEFAULT ''" },
+    // Token usage of the turn, so the panel can show what a conversation has
+    // cost as soon as it is reopened instead of only while an answer streams.
+    { name: "usage", sql: "ALTER TABLE ai_runs ADD COLUMN usage TEXT NOT NULL DEFAULT ''" },
   ]);
   // The picker shows which model produced a conversation.
   ensureColumns(db, "ai_conversations", [

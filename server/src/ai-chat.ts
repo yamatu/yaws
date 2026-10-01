@@ -31,7 +31,8 @@ import {
   type CommandClass,
 } from "./ai-safety.js";
 import type { AIConfig, LoadedProfile } from "./ai-profiles.js";
-import type { ModelDelta, ModelTurn } from "./ai.js";
+import { addUsage } from "./ai.js";
+import type { ModelDelta, ModelTurn, ModelUsage } from "./ai.js";
 import type { McpManager, MappedMcpTool } from "./mcp.js";
 import {
   expandExtensionPrompt,
@@ -294,6 +295,35 @@ export const CHAT_HISTORY_BUDGET = 80_000;
 export function decodeField(secret: string, text: string): string {
   const value = decryptText(text, secret);
   return value === "\0" ? "" : value;
+}
+
+/**
+ * What a conversation has been billed so far: the usage of its stored turns
+ * added up.
+ *
+ * Each turn contributes the last usage its model requests reported, so a turn
+ * that called tools several times is counted once rather than once per round —
+ * some protocols repeat the same numbers mid-stream, and adding those would
+ * inflate the total. A turn that reported nothing contributes nothing.
+ */
+function conversationUsage(
+  db: Db,
+  secret: string,
+  conversationId: string,
+): ModelUsage {
+  const rows = db
+    .prepare("SELECT usage FROM ai_runs WHERE conversation_id = ?")
+    .all(conversationId) as Array<{ usage: string }>;
+  let total = addUsage(null, null);
+  for (const row of rows) {
+    if (!row.usage) continue;
+    try {
+      total = addUsage(total, JSON.parse(decodeField(secret, row.usage)) as ModelUsage);
+    } catch {
+      // A row whose usage cannot be read simply adds nothing.
+    }
+  }
+  return total;
 }
 
 function parseResult(secret: string, text: string) {
@@ -705,6 +735,11 @@ export function chatRouter(deps: ChatDeps) {
        * process lost (a restart) and should be shown as stopped.
        */
       liveRunId: liveRunIdFor(conversation.id),
+      /**
+       * What the conversation has been billed in total, so a reopened chat shows
+       * the same usage line the live stream last printed instead of an empty one.
+       */
+      usage: conversationUsage(db, secret, conversation.id),
       turns: runs.map((run) => {
         let trace: ToolEvent[] = [];
         try {
@@ -897,6 +932,10 @@ export function chatRouter(deps: ChatDeps) {
 
         const runId = randomUUID();
         const startedAt = Date.now();
+        // What this conversation was billed before this question, so the usage
+        // line is a running total rather than a per-answer number that vanishes
+        // with the next one.
+        const priorUsage = conversationUsage(db, secret, conversationId);
         db.prepare(
           "INSERT INTO ai_runs (id,machine_id,user_id,root,prompt,status,created_at,conversation_id) VALUES (?,?,?,?,?,'running',?,?)",
         ).run(
@@ -929,7 +968,16 @@ export function chatRouter(deps: ChatDeps) {
         // is still writing is never cut off. The pings are the one exception:
         // they keep the connection alive, they do not prove work is happening.
         const guard = runGuard();
+        // The usage this turn's own requests reported. A protocol may report it
+        // more than once with the same numbers, so the last one stands.
+        let turnUsage: ModelUsage | null = null;
         const emit = (event: Record<string, unknown>) => {
+          if (event.type === "usage") {
+            turnUsage = event.usage as ModelUsage;
+            // The page shows one running total for the conversation; adding the
+            // stored turns here keeps live and reopened views at the same number.
+            event = { type: "usage", usage: addUsage(priorUsage, turnUsage) };
+          }
           if (event.type !== "ping") guard.reset();
           runStreams.emit(runStream, event);
         };
@@ -952,12 +1000,15 @@ export function chatRouter(deps: ChatDeps) {
           if (!force && now - progress.lastWrite < 1_000) return;
           progress.lastWrite = now;
           db.prepare(
-            "UPDATE ai_runs SET result=?, trace=? WHERE id=? AND status='running'",
+            "UPDATE ai_runs SET result=?, trace=?, usage=? WHERE id=? AND status='running'",
           ).run(
             // The `\0` sentinel keeps "no answer yet" decryptable, unlike an
             // empty-string ciphertext.
             encryptText(answer || "\0", secret),
             encryptText(JSON.stringify(trace), secret),
+            // `null` when nothing was reported yet, which adds nothing to the
+            // conversation total while the turn is still running.
+            encryptText(JSON.stringify(turnUsage), secret),
             runId,
           );
         };
@@ -1016,10 +1067,11 @@ export function chatRouter(deps: ChatDeps) {
             guard,
           });
           db.prepare(
-            "UPDATE ai_runs SET status='completed', result=?, trace=? WHERE id=?",
+            "UPDATE ai_runs SET status='completed', result=?, trace=?, usage=? WHERE id=?",
           ).run(
             encryptText(answer || "已完成检查。", secret),
             encryptText(JSON.stringify(trace), secret),
+            encryptText(JSON.stringify(turnUsage), secret),
             runId,
           );
           db.prepare(
@@ -1046,11 +1098,12 @@ export function chatRouter(deps: ChatDeps) {
               ? e.message
               : "ai_failed";
           db.prepare(
-            "UPDATE ai_runs SET status=?, result=?, trace=? WHERE id=?",
+            "UPDATE ai_runs SET status=?, result=?, trace=?, usage=? WHERE id=?",
           ).run(
             timedOut ? "failed" : signal.aborted ? "cancelled" : "failed",
             encryptText(progress.answer || "\0", secret),
             encryptText(JSON.stringify(trace), secret),
+            encryptText(JSON.stringify(turnUsage), secret),
             runId,
           );
           emit({ type: "error", error, status: code });

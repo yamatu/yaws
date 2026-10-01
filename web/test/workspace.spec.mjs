@@ -30,6 +30,10 @@ function browserTest(name, fn) {
     }
   });
 }
+/** The usage line is a row of flex items and `innerText` breaks it into one line
+ *  per item; the text is what matters, not how it was laid out. */
+const usageText = (text) => text.replace(/\s+/g, " ").trim();
+
 /** Message rows must never be squeezed by the flex layout: a tool card that
  *  needs 31px but gets 2px both hides its text and overlaps its neighbours. */
 async function expectNoSqueezedMessages(page, scope = ".ai-chat-transcript") {
@@ -400,7 +404,9 @@ browserTest(
     await page.getByRole("button", { name: "AI 设置", exact: true }).click();
     await page.getByLabel("模型配置", { exact: true }).selectOption("主力模型");
     await expect(page.locator(".ai-settings")).toHaveCount(0);
-    await page.getByLabel("问题").fill("[slow][pre][run] 看一下磁盘");
+    // The questions stream (`[sse]`) so the provider also reports token usage,
+    // which is what the usage line is built from.
+    await page.getByLabel("问题").fill("[sse][slow][pre][run] 看一下磁盘");
     await page.getByRole("button", { name: "发送", exact: true }).click();
     // The status line describes the whole run, not just the last tool call.
     const status = page.locator(".ai-chat-working");
@@ -419,6 +425,15 @@ browserTest(
     );
     // Only the end of the stream reports a finished run, together with its time.
     await expect(status).toContainText("已完成 · 用时");
+    // What the chat has cost is part of its chrome, not of the answer: the line
+    // stays once the run is over, and its cache figure does not disappear with
+    // the next question. The fixture reports 21 prompt / 8 completion / 12
+    // cached tokens per turn.
+    const usageLine = page.locator(".ai-chat .ai-usage");
+    await expect(usageLine).toContainText("本对话");
+    await expect(usageLine).toContainText("输入 21");
+    await expect(usageLine).toContainText("共 29 tokens");
+    await expect(usageLine.locator(".ai-usage-cache")).toContainText("命中率 57%");
     // The model streamed a sentence before it called the tool, so the assistant
     // entry was created first — the transcript still lists the finished step
     // above the answer, and the answer closes the turn.
@@ -466,6 +481,9 @@ browserTest(
       ),
     ).toBeLessThanOrEqual(24);
     // Each configuration carries its own API key.
+    // The total is the conversation's, not the answer's: a second question adds
+    // to the first one's numbers.
+    await expect(usageLine).toContainText("共 58 tokens");
     expect(f.modelRequests.at(-1).headers.authorization).toBe(
       "Bearer fixture-key",
     );
@@ -569,10 +587,15 @@ browserTest(
     await page.getByLabel("保存名称", { exact: true }).click();
     await expect(page.locator(".ai-conv-row").first()).toContainText("磁盘排查");
     // A fresh conversation from the picker is kept next to the first one.
+    // Its usage line is there from the start: an empty line would read like a
+    // provider that never reports anything.
+    const keptUsage = usageText(await usageLine.innerText());
     await page
       .locator(".ai-conv-pop")
       .getByRole("button", { name: "新对话", exact: true })
       .click();
+    await expect(usageLine).toContainText("共 0 tokens");
+    await expect(usageLine.locator(".ai-usage-cache")).toHaveCount(0);
     await expect(page.locator(".ai-chat-transcript")).not.toContainText(
       "看一下磁盘",
     );
@@ -594,6 +617,11 @@ browserTest(
     await expect(page.locator(".ai-chat-transcript")).toContainText(
       "看一下磁盘",
     );
+    // The total is stored with the conversation, so opening it again shows what
+    // it had cost instead of starting from zero.
+    await expect
+      .poll(async () => usageText(await usageLine.innerText()))
+      .toBe(keptUsage);
     // Escape closes the popover.
     await page.getByRole("button", { name: "选择对话", exact: true }).click();
     await expect(page.locator(".ai-conv-pop")).toBeVisible();

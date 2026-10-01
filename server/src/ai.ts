@@ -297,6 +297,28 @@ export type ModelUsage = {
   cachedTokens: number | null;
 };
 
+/**
+ * Adds two usage reports together, for the running total of a conversation.
+ *
+ * The counts add up. The cached share stays null until some report states one,
+ * because "the provider said nothing" must not be turned into a measured zero;
+ * a stated 0 is a real answer and keeps counting as one.
+ */
+export function addUsage(
+  a: ModelUsage | null | undefined,
+  b: ModelUsage | null | undefined,
+): ModelUsage {
+  const left = a?.cachedTokens ?? null;
+  const right = b?.cachedTokens ?? null;
+  return {
+    promptTokens: (a?.promptTokens ?? 0) + (b?.promptTokens ?? 0),
+    completionTokens: (a?.completionTokens ?? 0) + (b?.completionTokens ?? 0),
+    totalTokens: (a?.totalTokens ?? 0) + (b?.totalTokens ?? 0),
+    cachedTokens:
+      left === null && right === null ? null : (left ?? 0) + (right ?? 0),
+  };
+}
+
 export type ModelToolCall = {
   id: string;
   name: string;

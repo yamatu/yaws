@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import Database from "better-sqlite3";
 import { harness } from "./fixture.mjs";
 import { runGuard, MAX_CONTINUATIONS } from "../dist/ai-chat.js";
 
@@ -577,6 +581,54 @@ test("ai chat", async (t) => {
     assert.equal(turn.events.at(-1).type, "done");
   });
 
+  await t.test("the usage line keeps a running total for the conversation", async () => {
+    // The panel shows the cost of the whole chat rather than of the last
+    // answer, so a second question adds to the first one's numbers.
+    const first = await chat(f, {
+      root: "/srv/app",
+      message: "[sse][md] 这台机器的磁盘怎么样",
+      autoRun: "read",
+    });
+    const conversationId = first.events.find((e) => e.type === "start").conversationId;
+    assert.equal(first.events.find((e) => e.type === "usage").usage.totalTokens, 29);
+
+    const second = await chat(f, {
+      root: "/srv/app",
+      message: "[sse][md] 那内存呢",
+      conversationId,
+      autoRun: "read",
+    });
+    assert.equal(second.status, 200, second.body);
+    const usage = second.events.find((e) => e.type === "usage");
+    assert.deepEqual(
+      usage.usage,
+      { promptTokens: 42, completionTokens: 16, totalTokens: 58, cachedTokens: 24 },
+      "the second turn reports both turns' tokens",
+    );
+
+    // Reopening the conversation reports the same total the stream printed, so
+    // the page does not have to start counting again from zero.
+    const detail = await request(f, `/api/ai/conversations/${conversationId}`);
+    assert.equal(detail.status, 200, JSON.stringify(detail.body));
+    assert.deepEqual(detail.body.usage, {
+      promptTokens: 42,
+      completionTokens: 16,
+      totalTokens: 58,
+      cachedTokens: 24,
+    });
+
+    // A turn whose provider reported nothing adds nothing to the total.
+    const third = await chat(f, {
+      root: "/srv/app",
+      message: "[strict][sse][md] 换个端点再试",
+      conversationId,
+      autoRun: "read",
+    });
+    assert.equal(third.events.some((e) => e.type === "usage"), false);
+    const after = await request(f, `/api/ai/conversations/${conversationId}`);
+    assert.equal(after.body.usage.totalTokens, 58);
+  });
+
   await t.test("tool calls are reassembled from streamed fragments", async () => {
     const turn = await chat(f, {
       root: "/srv/app",
@@ -1019,4 +1071,37 @@ test("a run is stopped for stalling, not for taking long", async (t) => {
   stopped.stop();
   await sleep(50);
   assert.equal(stopped.signal.aborted, false);
+});
+
+/**
+ * The usage column arrives through a migration in installations that already
+ * have a database, so the upgrade itself is worth a test: an old turn has to
+ * survive it and count as "nothing was reported" rather than break the total.
+ */
+test("a database from before the usage column keeps its turns", async () => {
+  const { openDb } = await import("../dist/db.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yaws-usage-"));
+  const file = path.join(dir, "old.sqlite");
+  const old = new Database(file);
+  old.exec(`CREATE TABLE ai_runs (id TEXT PRIMARY KEY, machine_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL, root TEXT NOT NULL, prompt TEXT NOT NULL,
+      status TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+    CREATE TABLE ai_conversations (id TEXT PRIMARY KEY, machine_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL, title TEXT NOT NULL, root TEXT NOT NULL,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+    INSERT INTO ai_runs VALUES ('r1',1,1,'/srv/app','旧问题','completed','旧回答',1);`);
+  old.close();
+  const db = openDb(file);
+  try {
+    const row = db.prepare("SELECT * FROM ai_runs WHERE id='r1'").get();
+    assert.equal(row.prompt, "旧问题");
+    assert.equal(row.usage, "", "an old turn reported no usage");
+  } finally {
+    db.close();
+  }
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // A leftover temp file is not what this test is about.
+  }
 });

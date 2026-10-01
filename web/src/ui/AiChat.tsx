@@ -40,7 +40,7 @@ import { McpSettings } from "./McpSettings";
 import { ExtensionSettings } from "./ExtensionSettings";
 import { Markdown } from "./MarkdownView";
 import { orderTurnEntries } from "./chatOrder";
-import { cacheStats } from "./aiUsage";
+import { cacheStats, formatTokens } from "./aiUsage";
 import type { Usage } from "./aiUsage";
 import {
   hostChoices,
@@ -288,7 +288,9 @@ export function AiChat({
   });
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
   const [openThinking, setOpenThinking] = useState<Record<string, boolean>>({});
-  // Tokens reported by the provider for the last answer; shown after it ends.
+  // Tokens the provider has reported for this conversation so far. Kept for as
+  // long as the chat is open: the numbers are a running total, not a comment on
+  // the answer that just ended.
   const [usage, setUsage] = useState<Usage | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   // A run that is still going on the server after this view left, e.g. the
@@ -424,7 +426,14 @@ export function AiChat({
 
   /** Rebuilds the transcript from a stored conversation. */
   const applyConversation = useCallback(
-    (id: string, data: { conversation: StoredConversation; turns: ChatTurn[] }) => {
+    (
+      id: string,
+      data: {
+        conversation: StoredConversation;
+        turns: ChatTurn[];
+        usage?: Usage;
+      },
+    ) => {
       const restored: Entry[] = [];
       for (const turn of data.turns) {
         restored.push({ key: `e${++counter.current}`, kind: "user", text: turn.prompt });
@@ -448,7 +457,9 @@ export function AiChat({
       cursor.current = NEW_CURSOR;
       setInput("");
       setConversationId(id);
-      setUsage(null);
+      // The stored total the server kept, so the usage line is complete the
+      // moment a conversation is opened rather than after the next answer.
+      setUsage(data.usage ?? null);
       if (data.conversation.root) setRoot(data.conversation.root);
       // Opened with the servers it last ran on, so adding a follow-up question
       // reaches the same machines instead of silently dropping back to one.
@@ -656,6 +667,7 @@ export function AiChat({
         const data = await apiFetch<{
           conversation: StoredConversation;
           turns: ChatTurn[];
+          usage?: Usage;
           liveRunId?: string;
         }>(`/api/ai/conversations/${id}`);
         syncFollow(applyConversation(id, data), data.liveRunId ?? "");
@@ -667,8 +679,12 @@ export function AiChat({
   );
 
   // A different machine means a different conversation: drop the extra hosts
-  // of the previous one before the stored conversation restores its own.
-  useEffect(() => setHosts([]), [machineId]);
+  // and the usage total of the previous one before the stored conversation
+  // restores its own.
+  useEffect(() => {
+    setHosts([]);
+    setUsage(null);
+  }, [machineId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -965,7 +981,8 @@ export function AiChat({
     push({ key: nextKey(), kind: "user", text: message });
     setBusy(true);
     setProgress(startProgress());
-    setUsage(null);
+    // The running total stays on screen while the new question is answered: it
+    // grows as the provider reports, instead of going blank until the end.
     clock.current = { start: Date.now(), end: 0 };
     attached.current = { runId: "", frames: 0 };
     const ac = new AbortController();
@@ -1111,9 +1128,11 @@ export function AiChat({
   const elapsed = clock.current.start
     ? Math.max(0, (clock.current.end || Date.now()) - clock.current.start)
     : 0;
-  // Only shown once the turn is over, and only when the provider told us how
-  // much of the prompt it served from its cache.
-  const cache = busy ? null : cacheStats(usage);
+  // Shown for the whole conversation, from the stored total and every report
+  // that follows. The cache part appears once the provider has said how much of
+  // the prompt it served from its cache; a provider that stays quiet is not
+  // shown as a permanent miss.
+  const cache = cacheStats(usage);
   const choices = hostChoices(hostOptions, machineId);
   // Falls back to the id when the machine list is unavailable (viewer account),
   // so the picker still names the host a turn will use.
@@ -1643,25 +1662,31 @@ export function AiChat({
           {progressLabel(progress, elapsed, pending)}
         </div>
       ) : null}
-      {usage && !busy ? (
-        <div className="ai-usage">
-          <span>输入 {usage.promptTokens}</span>
-          <span>输出 {usage.completionTokens}</span>
-          <span>共 {usage.totalTokens} tokens</span>
-          {cache ? (
-            <span
-              className="ai-usage-cache"
-              data-hit={cache.cached > 0 ? "yes" : "no"}
-              title={`提示词缓存命中 ${cache.cached} / ${cache.prompt} tokens`}
-            >
-              缓存 {cache.cached}/{cache.prompt} · 命中率 {cache.rate}%
-              <i className="ai-usage-bar">
-                <b style={{ width: `${Math.min(100, cache.rate)}%` }} />
-              </i>
-            </span>
-          ) : null}
-        </div>
-      ) : null}
+      {/* What this conversation has cost, kept on screen like the footer of a
+          terminal agent: an answer ending does not make the numbers stop being
+          true, and the cache rate is what makes a long chat cheap. */}
+      <div
+        className="ai-usage"
+        title="本对话累计：每一轮上报的输入/输出 tokens 相加，缓存命中率按累计提示词计算"
+      >
+        <span className="ai-usage-scope">本对话</span>
+        <span>输入 {formatTokens(usage?.promptTokens ?? 0)}</span>
+        <span>输出 {formatTokens(usage?.completionTokens ?? 0)}</span>
+        <span>共 {formatTokens(usage?.totalTokens ?? 0)} tokens</span>
+        {cache ? (
+          <span
+            className="ai-usage-cache"
+            data-hit={cache.cached > 0 ? "yes" : "no"}
+            title={`本对话提示词缓存命中 ${cache.cached} / ${cache.prompt} tokens`}
+          >
+            缓存 {formatTokens(cache.cached)}/{formatTokens(cache.prompt)} ·{" "}
+            命中率 {cache.rate}%
+            <i className="ai-usage-bar">
+              <b style={{ width: `${Math.min(100, cache.rate)}%` }} />
+            </i>
+          </span>
+        ) : null}
+      </div>
       {error && (
         <div role="alert" className="yaws-alert-error">
           {error}

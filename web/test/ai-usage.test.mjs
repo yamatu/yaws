@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cacheStats } from "../src/ui/aiUsage.ts";
+import { cacheStats, formatTokens } from "../src/ui/aiUsage.ts";
 
 const usage = (extra = {}) => ({
   promptTokens: 100,
@@ -54,4 +54,20 @@ test("garbage counts do not produce a rate", () => {
   assert.equal(cacheStats(usage({ cachedTokens: -1 })), null);
   assert.equal(cacheStats(usage({ cachedTokens: Number.NaN })), null);
   assert.equal(cacheStats(usage({ cachedTokens: "many" })), null);
+});
+
+test("running totals stay short enough for one line", () => {
+  assert.equal(formatTokens(0), "0");
+  assert.equal(formatTokens(29), "29");
+  assert.equal(formatTokens(999), "999");
+  assert.equal(formatTokens(1000), "1.0k");
+  assert.equal(formatTokens(1500), "1.5k");
+  assert.equal(formatTokens(9999), "10.0k");
+  assert.equal(formatTokens(10000), "10k");
+  assert.equal(formatTokens(150000), "150k");
+  assert.equal(formatTokens(1500000), "1.5M");
+  assert.equal(formatTokens(15000000), "15M");
+  // A missing count reads as zero rather than as NaN on the page.
+  assert.equal(formatTokens(Number.NaN), "0");
+  assert.equal(formatTokens(undefined), "0");
 });
