@@ -399,8 +399,22 @@ test("anthropic endpoints", async (t) => {
     const api = await relay(async (req, res) => {
       const body = JSON.parse(await drain(req));
       const agent = String(req.headers["user-agent"] ?? "");
-      seen.push({ agent, user: body.metadata?.user_id });
-      if (!agent.startsWith("claude-cli/") || !body.metadata?.user_id) {
+      const session = req.headers["x-claude-code-session-id"];
+      seen.push({ agent, session, user: body.metadata?.user_id });
+      // The identity of the official client, as its own headers spell it.
+      let identity;
+      try {
+        identity = JSON.parse(body.metadata?.user_id ?? "null");
+      } catch {
+        identity = null;
+      }
+      if (
+        !/^claude-cli\/\d+\.\d+\.\d+ \(external, cli\)$/.test(agent) ||
+        req.headers["x-app"] !== "cli" ||
+        !session ||
+        identity?.session_id !== session ||
+        !/^[0-9a-f]{64}$/.test(identity?.device_id ?? "")
+      ) {
         res.writeHead(403, { "content-type": "application/json" });
         res.end(
           JSON.stringify({
@@ -422,17 +436,39 @@ test("anthropic endpoints", async (t) => {
     assert.equal(turn.status, 200, turn.body);
     assert.equal(turn.events.find((e) => e.type === "answer").text, "磁盘用了 50%。");
     // The first request went out as yaws, the refusal was answered, and the
-    // identity the relay asked for carries the metadata it asked for.
+    // identity the relay asked for carries what it asked for.
     assert.equal(seen.length, 2, JSON.stringify(seen));
     assert.equal(seen[0].agent.startsWith("claude-cli/"), false);
     assert.equal(seen[0].user, undefined);
-    assert.equal(seen[1].agent.startsWith("claude-cli/"), true);
+    assert.match(seen[1].agent, /^claude-cli\/\d+\.\d+\.\d+ \(external, cli\)$/);
     assert.equal(typeof seen[1].user, "string");
     // Having asked once, the endpoint is remembered: no third request, and no
     // second refusal, for the next turn.
     const again = await chat(f, { root: "/srv/app", message: "磁盘怎么样", autoRun: "read" });
     assert.equal(again.events.find((e) => e.type === "answer").text, "磁盘用了 50%。");
     assert.equal(seen.length, 3, JSON.stringify(seen));
+    assert.equal(seen[2].agent, seen[1].agent);
+  });
+
+  await t.test("a gate behind an auth proxy answers 401", async () => {
+    let calls = 0;
+    const api = await relay(async (req, res) => {
+      calls += 1;
+      if (!String(req.headers["user-agent"] ?? "").startsWith("claude-cli/")) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({ error: { code: "claude_code_required", message: "Claude Code only" } }),
+        );
+        return;
+      }
+      speak(req, res);
+    });
+    t.after(() => api.server.close());
+    assert.equal((await request(f, "/api/ai/settings", "PUT", settings(api.base))).status, 200);
+    const turn = await chat(f, { root: "/srv/app", message: "磁盘怎么样", autoRun: "read" });
+    assert.equal(turn.status, 200, turn.body);
+    assert.equal(turn.events.find((e) => e.type === "answer").text, "磁盘用了 50%。");
+    assert.equal(calls, 2);
   });
 
   await t.test("a refusal that is not that gate is reported as it came", async () => {

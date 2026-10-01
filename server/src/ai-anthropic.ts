@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import type {
@@ -229,43 +230,56 @@ function repairStream(
 
 /**
  * Relays that resell a Claude Code subscription gate `/v1/messages` on the
- * identity Claude Code presents, and refuse everything else with 403
- * `claude_code_required`. The refusal says which part is missing, so the
- * request is sent again with it. An endpoint that asked once is remembered and
- * later requests carry the identity from the start, which is why only the
+ * identity Claude Code presents, and refuse everything else with a
+ * `claude_code_required` error. The refusal names what is missing, so the
+ * request is sent again carrying it. An endpoint that asked once is remembered
+ * and later requests carry the identity from the start, which is why only the
  * first call pays for the extra round trip. Keyed by request URL, which holds
  * no secret: the key travels in a header.
  */
 const claudeCodeRelays = new Set<string>();
 
+/** The error code such a relay reports, as its own message spells it. */
+const CLAUDE_CODE_REQUIRED = "claude_code_required";
+
 /**
- * What such a relay checks for. The version is the one pi's own Anthropic
- * adapter sends for an OAuth token, so both paths look like the same client.
+ * The identity of the official client, read off the shipped one (2.1.286): its
+ * `uw()` returns exactly `x-app`, `User-Agent` and `X-Claude-Code-Session-Id`,
+ * and `qNe()` builds `metadata.user_id` out of a 64 hex `device_id` (its own
+ * regexp insists on that shape), the account's uuid, and the very session uuid
+ * the header carries. yaws sends values of its own under that shape -- a fixed
+ * device id that hashes back to it, no account, one session per run -- rather
+ * than claiming a real installation's identity or an account it does not have.
+ * What such a relay checks is that the fields are present and well formed,
+ * which is also what it must do to serve the real client.
  */
 const CLAUDE_CODE_HEADERS: Record<string, string> = {
-  "user-agent": "claude-cli/2.1.280",
+  "user-agent": "claude-cli/2.1.286 (external, cli)",
   "x-app": "cli",
 };
 
-/**
- * Claude Code identifies itself with `metadata.user_id`, a JSON string holding
- * its device and session. yaws is not Claude Code, so it sends the same shape
- * with a fixed id of its own rather than inventing a device per installation.
- */
-const CLAUDE_CODE_USER_ID = JSON.stringify({
-  device_id: `yaws-${"0".repeat(59)}`,
-  account_uuid: "",
-  session_id: "",
-});
+/** `device_id` is 64 hex characters in the client, so yaws uses 64 too. */
+const CLAUDE_CODE_DEVICE_ID = createHash("sha256").update("yaws").digest("hex");
 
-/** Whether a refusal is that gate asking for an identity, not a real denial. */
-async function claudeCodeGate(response: Response): Promise<boolean> {
-  if (response.status !== 403) return false;
-  try {
-    return (await response.clone().text()).includes("claude_code_required");
-  } catch {
-    return false;
-  }
+/** One session per run, the way the client has one session per conversation. */
+const CLAUDE_CODE_SESSION_ID = randomUUID();
+
+/**
+ * Whether a refusal is that gate asking for an identity rather than a real
+ * denial. The body is read here, once, so the caller still gets one to report:
+ * a body left half-read would hold the connection open.
+ */
+async function claudeCodeGate(response: Response) {
+  // Gates behind an auth proxy answer 401 instead of 403 for the same reason.
+  if (response.status !== 403 && response.status !== 401)
+    return { gate: false, response };
+  const body = await response.text();
+  const refusal = new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+  return { gate: body.includes(CLAUDE_CODE_REQUIRED), response: refusal };
 }
 
 /** The same request, carrying the identity a Claude Code relay insists on. */
@@ -273,6 +287,7 @@ function asClaudeCode(init?: RequestInit): RequestInit {
   const headers = new Headers(init?.headers);
   for (const [name, value] of Object.entries(CLAUDE_CODE_HEADERS))
     headers.set(name, value);
+  headers.set("x-claude-code-session-id", CLAUDE_CODE_SESSION_ID);
   let body = init?.body;
   if (typeof body === "string") {
     const params = parseJson(body) as Record<string, unknown> | null;
@@ -280,7 +295,12 @@ function asClaudeCode(init?: RequestInit): RequestInit {
       const sent = params.metadata;
       const metadata: Record<string, unknown> =
         sent && typeof sent === "object" ? { ...sent } : {};
-      if (!metadata.user_id) metadata.user_id = CLAUDE_CODE_USER_ID;
+      if (!metadata.user_id)
+        metadata.user_id = JSON.stringify({
+          device_id: CLAUDE_CODE_DEVICE_ID,
+          account_uuid: "",
+          session_id: CLAUDE_CODE_SESSION_ID,
+        });
       body = JSON.stringify({ ...params, metadata });
       // The body changed length, so a stale header would break the request.
       headers.delete("content-length");
@@ -326,7 +346,8 @@ function anthropicFetch(reply: AnthropicReply): typeof fetch {
       input,
       claudeCodeRelays.has(endpoint) ? asClaudeCode(init) : init,
     );
-    if (!(await claudeCodeGate(response))) return response;
+    const refusal = await claudeCodeGate(response);
+    if (!refusal.gate) return refusal.response;
     claudeCodeRelays.add(endpoint);
     return send(input, asClaudeCode(init));
   };
