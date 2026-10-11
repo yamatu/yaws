@@ -4,8 +4,6 @@ import { apiFetch } from "./api";
 import {
   rememberedUsername,
   rememberUsername,
-  rememberPersist,
-  setRememberPersist,
   setToken,
 } from "./auth";
 import { useDocumentTitle } from "./documentTitle";
@@ -17,7 +15,7 @@ export function LoginPage() {
   const cachedUser = rememberedUsername();
   const [username, setUsername] = useState(cachedUser);
   const [password, setPassword] = useState("");
-  const [remember, setRemember] = useState(() => rememberPersist());
+  const [remember, setRemember] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const passwordRef = useRef<HTMLInputElement | null>(null);
@@ -44,7 +42,6 @@ export function LoginPage() {
       });
       setToken(res.token, remember);
       rememberUsername(username, remember);
-      setRememberPersist(remember);
       nav(next ?? "/app", { replace: true });
     } catch (e: any) {
       const message =
