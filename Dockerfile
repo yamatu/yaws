@@ -1,4 +1,4 @@
-FROM node:22-trixie AS build
+FROM node:22.23.4-trixie AS build
 
 WORKDIR /app
 
@@ -14,7 +14,7 @@ COPY README.md ./
 
 RUN npm run build && npm prune --omit=dev --workspaces --include-workspace-root
 
-FROM node:22-trixie-slim AS runtime
+FROM node:22.23.4-trixie-slim AS runtime
 
 ENV NODE_ENV=production
 
