@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { harness } from "./fixture.mjs";
+import { MAX_CHAT_HOSTS } from "../dist/ai-hosts.js";
 
 /** Chat replies arrive as newline delimited JSON. */
 async function chat(f, body, token = f.token, machineId = 1) {
@@ -240,7 +241,7 @@ test("multi-host chat", async (t) => {
       root: "/srv/app",
       message: "你好",
       autoRun: "read",
-      hosts: [2, 3, 4, 5, 6, 7, 8, 9, 10],
+      hosts: Array.from({ length: MAX_CHAT_HOSTS + 1 }, (_, i) => i + 2),
     });
     assert.equal(tooMany.status, 400);
     assert.match(tooMany.body, /bad_request/);

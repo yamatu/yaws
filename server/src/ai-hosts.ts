@@ -12,11 +12,12 @@ import {
 /**
  * How many hosts one conversation may work on: the machine the chat was opened
  * from (the primary host) plus the extra ones the operator ticks in the UI.
- * Eight is a hand-picked number: it is large enough for a real cluster and
+ * Fifteen is a hand-picked number: it is large enough for a real cluster and
  * small enough that one careless "run this everywhere" stays a reviewable
- * action instead of a fleet-wide accident.
+ * action instead of a fleet-wide accident. Keep `MAX_EXTRA_HOSTS` in the web
+ * picker at this value minus one.
  */
-export const MAX_CHAT_HOSTS = 8;
+export const MAX_CHAT_HOSTS = 15;
 /**
  * SSH sessions one `run_on_hosts` call opens at a time. A fan-out to every host
  * at once would exhaust the server's connection limits (and the remote

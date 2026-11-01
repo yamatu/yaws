@@ -8,7 +8,7 @@
 export type HostOption = { id: number; name: string };
 
 /** How many *extra* servers one conversation may add (server cap minus the primary). */
-export const MAX_EXTRA_HOSTS = 7;
+export const MAX_EXTRA_HOSTS = 14;
 
 /**
  * Adds or removes one extra host. The primary host is always part of the
