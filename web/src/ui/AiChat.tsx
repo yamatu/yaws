@@ -226,6 +226,17 @@ async function readFrames(
   }
 }
 
+/** Lines added/removed by a file card, for the pending list. */
+function diffStat(proposal: Pick<Proposal, "before" | "after">) {
+  let added = 0;
+  let removed = 0;
+  for (const part of diffLines(proposal.before, proposal.after)) {
+    if (part.added) added += part.count ?? 0;
+    else if (part.removed) removed += part.count ?? 0;
+  }
+  return { added, removed };
+}
+
 const TOOL_ICON: Record<string, typeof Terminal> = {
   list_files: FolderTree,
   read_file: FileCode2,
@@ -279,6 +290,8 @@ export function AiChat({
   const [hosts, setHosts] = useState<number[]>([]);
   const [hostOptions, setHostOptions] = useState<HostOption[]>([]);
   const [hostOpen, setHostOpen] = useState(false);
+  const [pendingOpen, setPendingOpen] = useState(false);
+  const [focusedProposal, setFocusedProposal] = useState("");
   // The picker is drawn in a portal anchored to this button; an in-flow menu is
   // clipped by the dock's overflow.
   const hostButton = useRef<HTMLButtonElement | null>(null);
@@ -729,6 +742,19 @@ export function AiChat({
     if (intent === "down") setStick(stickAfterScroll(stick.current, node).stick);
   }
 
+  /** Scrolls the transcript (not the page) to one approval card and flashes it. */
+  function locateProposal(id: string) {
+    const node = transcript.current;
+    const card = node?.querySelector<HTMLElement>(`[data-proposal="${CSS.escape(id)}"]`);
+    if (!node || !card) return;
+    setStick(false);
+    const offset =
+      card.getBoundingClientRect().top - node.getBoundingClientRect().top + node.scrollTop;
+    node.scrollTo({ top: Math.max(0, offset - 12), behavior: "smooth" });
+    setFocusedProposal(id);
+    window.setTimeout(() => setFocusedProposal((old) => (old === id ? "" : old)), 2000);
+  }
+
   /** The arrow in the transcript: come back to the newest content. */
   function jumpToEnd() {
     const node = transcript.current;
@@ -1121,9 +1147,16 @@ export function AiChat({
     );
   }
 
-  const pending = entries.filter(
-    (entry) => entry.kind === "proposal" && entry.proposal.status === "pending",
-  ).length;
+  const pendingList = useMemo(
+    () =>
+      entries.flatMap((entry) =>
+        entry.kind === "proposal" && entry.proposal.status === "pending"
+          ? [{ proposal: entry.proposal, stat: entry.proposal.kind === "file" ? diffStat(entry.proposal) : null }]
+          : [],
+      ),
+    [entries],
+  );
+  const pending = pendingList.length;
   // The elapsed time freezes as soon as the stream is over.
   const elapsed = clock.current.start
     ? Math.max(0, (clock.current.end || Date.now()) - clock.current.start)
@@ -1547,7 +1580,11 @@ export function AiChat({
           const { proposal } = entry;
           const dismissed = proposal.status === "rejected";
           return (
-            <section key={entry.key} className={`ai-proposal${dismissed ? " muted" : ""}`}>
+            <section
+              key={entry.key}
+              data-proposal={proposal.id}
+              className={`ai-proposal${dismissed ? " muted" : ""}${focusedProposal === proposal.id ? " focused" : ""}`}
+            >
               <div className="workspace-toolbar">
                 <strong className="min-w-0 flex-1 break-all text-sm">
                   {proposal.host ? (
@@ -1695,7 +1732,68 @@ export function AiChat({
       {notice && <div className="workspace-notice">{notice}</div>}
       {pending > 0 ? (
         <div className="ai-chat-pending">
-          有 {pending} 条操作等待你确认，确认后助手才能继续。
+          <button
+            type="button"
+            className="ai-pending-toggle"
+            aria-expanded={pendingOpen}
+            onClick={() => setPendingOpen((open) => !open)}
+          >
+            {pendingOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <AlertTriangle size={13} />
+            <span>有 {pending} 条操作等待你确认，确认后助手才能继续。</span>
+            <span className="ai-pending-hint">{pendingOpen ? "收起" : "点击查看待确认列表"}</span>
+          </button>
+          {pendingOpen ? (
+            <ol className="ai-pending-list" aria-label="待确认操作">
+              {pendingList.map(({ proposal, stat }, index) => (
+                <li key={proposal.id} className="ai-pending-item">
+                  <div className="ai-pending-head">
+                    <span className="ai-pending-index">{index + 1}</span>
+                    {proposal.host ? <span className="ai-tag host">{proposal.host}</span> : null}
+                    <span className="ai-tag">{proposal.kind === "command" ? "执行命令" : "修改文件"}</span>
+                    <span className="ai-pending-path">
+                      {proposal.kind === "command" ? `目录 ${proposal.path || root}` : proposal.path}
+                    </span>
+                    <span className="ai-pending-actions">
+                      <button
+                        type="button"
+                        className="yaws-btn tool-text"
+                        onClick={() => locateProposal(proposal.id)}
+                      >
+                        定位
+                      </button>
+                      <button
+                        type="button"
+                        className="yaws-btn tool-text"
+                        onClick={() => void decide(proposal, "reject")}
+                      >
+                        忽略
+                      </button>
+                      <button
+                        type="button"
+                        className="yaws-btn-primary tool-text"
+                        onClick={() => void decide(proposal, "apply")}
+                      >
+                        {proposal.kind === "file" ? <Check size={14} /> : <Play size={14} />}
+                        {proposal.kind === "file" ? "应用" : "执行"}
+                      </button>
+                    </span>
+                  </div>
+                  {proposal.summary ? (
+                    <div className="ai-pending-summary">{proposal.summary}</div>
+                  ) : null}
+                  {proposal.kind === "command" ? (
+                    <pre className="ai-pending-cmd">{proposal.after}</pre>
+                  ) : stat ? (
+                    <div className="ai-pending-summary">
+                      <span className="diff-add">+{stat.added}</span>{" "}
+                      <span className="diff-remove">-{stat.removed}</span> 行
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          ) : null}
         </div>
       ) : null}
       <form

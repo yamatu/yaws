@@ -331,7 +331,20 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-chat-working[data-tone="ok"] { color: #6ee7b7; }
 .ai-chat-working[data-tone="warn"] { color: #fcd34d; }
 .ai-chat-working[data-tone="bad"] { color: #fda4af; }
-.ai-chat-pending { padding: 7px 12px; background: #3b2f10; color: #fcd34d; font-size: 12px; }
+.ai-chat-pending { flex: 0 0 auto; background: #3b2f10; color: #fcd34d; font-size: 12px; }
+.ai-pending-toggle { display: flex; width: 100%; align-items: center; gap: 6px; padding: 7px 12px; text-align: left; color: inherit; cursor: pointer; }
+.ai-pending-toggle:hover { background: #4a3b14; }
+.ai-pending-hint { margin-left: auto; flex: 0 0 auto; color: #e3c46c; text-decoration: underline; text-underline-offset: 2px; }
+/* Capped so a long queue scrolls inside itself and the composer stays visible. */
+.ai-pending-list { display: grid; gap: 6px; max-height: min(40dvh, 360px); overflow: auto; margin: 0; padding: 6px 8px 8px; list-style: none; border-top: 1px solid #4a3b14; background: #1d1a12; }
+.ai-pending-item { padding: 6px 8px; border: 1px solid #4a3b14; border-radius: 6px; background: #181b1f; color: #d9e0e6; }
+.ai-pending-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ai-pending-index { flex: 0 0 auto; min-width: 18px; padding: 0 4px; border-radius: 999px; background: #4a3b14; color: #fcd34d; text-align: center; font-size: 11px; }
+.ai-pending-path { flex: 1 1 140px; min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #b5bec8; }
+.ai-pending-actions { display: flex; gap: 4px; margin-left: auto; }
+.ai-pending-summary { margin-top: 4px; color: #a9b2bc; }
+.ai-pending-cmd { max-height: 120px; overflow: auto; margin: 4px 0 0; padding: 6px 8px; border-radius: 4px; background: #111417; color: #e5e7eb; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-proposal.focused { outline: 2px solid #fcd34d; outline-offset: -2px; }
 .ai-chat-composer { flex: 0 0 auto; display: grid; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid #373c43; }
 .ai-chat-meta { display: flex; flex-wrap: wrap; gap: 10px; }
 .ai-chat-meta label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #b5bec8; }
