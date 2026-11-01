@@ -14,10 +14,13 @@ export type JwtUser = {
 };
 
 /** How long a login lasts before it has to be renewed. */
-export const TOKEN_TTL_SEC = 7 * 24 * 60 * 60;
+export const TOKEN_TTL_SEC = 30 * 24 * 60 * 60;
 
-/** A session in active use is renewed once it has less than this left. */
-export const TOKEN_RENEW_WITHIN_SEC = 3 * 24 * 60 * 60;
+/**
+ * A session in active use is renewed once it has less than this left, i.e. at
+ * most once a day, so opening the panel within 30 days keeps it signed in.
+ */
+export const TOKEN_RENEW_WITHIN_SEC = 29 * 24 * 60 * 60;
 
 export function hashPassword(password: string) {
   return bcrypt.hash(password, 12);

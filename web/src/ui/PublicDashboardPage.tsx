@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, type PublicMachine } from "./api";
+import { getToken } from "./auth";
 import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, pct } from "./format";
 import { fractionLevel, meterValue } from "./serverStats";
 import { UsageMeter } from "./UsageMeter";
@@ -125,8 +126,8 @@ export function PublicDashboardPage() {
             列表
           </button>
         </div>
-        <Link className="yaws-btn" to="/login">
-          登录后台
+        <Link className="yaws-btn" to={getToken() ? "/app" : "/login"}>
+          {getToken() ? "进入后台" : "登录后台"}
         </Link>
       </div>
 

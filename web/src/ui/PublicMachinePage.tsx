@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { apiFetch, type PublicMachineDetail, type UptimeSummary } from "./api";
+import { getToken } from "./auth";
 import { daysLeft, fmtTime, formatBps, formatBytes, pct } from "./format";
 import { fractionLevel, meterValue } from "./serverStats";
 import { UsageMeter } from "./UsageMeter";
@@ -114,8 +115,8 @@ export function PublicMachinePage() {
         <Link className="yaws-btn" to="/">
           返回
         </Link>
-        <Link className="yaws-btn" to="/login">
-          登录后台
+        <Link className="yaws-btn" to={getToken() ? "/app" : "/login"}>
+          {getToken() ? "进入后台" : "登录后台"}
         </Link>
       </div>
 

@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "./api";
 import {
+  getToken,
   rememberedUsername,
   rememberUsername,
   setToken,
 } from "./auth";
 import { useDocumentTitle } from "./documentTitle";
-import { safeNext } from "./session";
+import { loadSession, safeNext } from "./session";
 
 export function LoginPage() {
   const nav = useNavigate();
@@ -21,13 +22,31 @@ export function LoginPage() {
   const passwordRef = useRef<HTMLInputElement | null>(null);
   const expired = params.get("expired") === "1";
   const next = safeNext(params.get("next"));
+  const [restoring, setRestoring] = useState(() => Boolean(getToken()));
 
   useDocumentTitle("登录");
 
+  // Someone who is still signed in skips the form instead of typing the
+  // password again; a token the server rejects is dropped by `apiFetch`.
+  useEffect(() => {
+    if (!getToken()) return;
+    let alive = true;
+    loadSession()
+      .then(() => {
+        if (alive) nav(next ?? "/app", { replace: true });
+      })
+      .catch(() => {
+        if (alive) setRestoring(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [nav, next]);
+
   // A remembered username means only the password is left to type.
   useEffect(() => {
-    if (cachedUser) passwordRef.current?.focus();
-  }, [cachedUser]);
+    if (cachedUser && !restoring) passwordRef.current?.focus();
+  }, [cachedUser, restoring]);
 
   const canSubmit = useMemo(() => username.trim() && password.trim(), [username, password]);
 
@@ -55,6 +74,10 @@ export function LoginPage() {
       setLoading(false);
     }
   };
+
+  if (restoring) {
+    return <div className="p-5 text-white/50">正在恢复登录状态…</div>;
+  }
 
   return (
     <div className="mx-auto max-w-6xl px-5 py-5">
@@ -106,7 +129,7 @@ export function LoginPage() {
               <span>
                 记住我
                 <span className="ml-1.5 text-xs text-white/35">
-                  （勾选后关闭浏览器仍保持登录，7 天有效）
+                  （勾选后关闭浏览器仍保持登录，30 天内访问过会自动续期）
                 </span>
               </span>
             </label>

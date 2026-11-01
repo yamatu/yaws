@@ -74,6 +74,21 @@ browserTest(
     await expect(page.getByRole("button", { name: "退出", exact: true })).toBeVisible();
     await expect(page.getByPlaceholder("请输入密码")).toHaveCount(0);
     await expect(page).toHaveTitle("控制台 · YAWS");
+    // Closing the browser and opening the site again: the public page offers the
+    // console directly and the login form does not ask for the password again.
+    {
+      const reopened = await browser.newContext({
+        storageState: await page.context().storageState(),
+      });
+      const again = await reopened.newPage();
+      await again.goto(f.url + "/");
+      await again.getByRole("link", { name: "进入后台", exact: true }).click();
+      await expect(again.getByRole("button", { name: "退出", exact: true })).toBeVisible();
+      await again.goto(f.url + "/login");
+      await expect(again).toHaveURL(/\/app$/);
+      await expect(again.getByPlaceholder("请输入密码")).toHaveCount(0);
+      await reopened.close();
+    }
     // The home page meters must pick their colour from the load (green → yellow
     // → red, i.e. yellow from 50% and red from 70%) and look like frosted glass,
     // instead of painting every bar with the same fixed rainbow gradient.
@@ -557,6 +572,14 @@ browserTest(
     expect(f.commands.some((c) => c.includes("systemctl restart nginx"))).toBe(
       false,
     );
+    // The banner opens a list of every waiting card with what it would run.
+    await page.locator(".ai-pending-toggle").click();
+    const pendingItem = page.locator(".ai-pending-item");
+    await expect(pendingItem).toHaveCount(1);
+    await expect(pendingItem).toContainText("执行命令");
+    await expect(pendingItem).toContainText("systemctl restart nginx");
+    await pendingItem.getByRole("button", { name: "定位", exact: true }).click();
+    await expect(approval).toHaveClass(/focused/);
     await page.screenshot({
       path: "test-results/ai-desktop.png",
       fullPage: true,

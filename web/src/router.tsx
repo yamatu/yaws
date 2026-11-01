@@ -18,25 +18,38 @@ const CertificatesPage = lazy(() => import("./ui/CertificatesPage").then((m) => 
 /**
  * A cached login is only trusted after the server confirms it, so an expired
  * or revoked session lands on the login form instead of an empty dashboard.
+ * Only a 401 means the login is gone: a restarting server or a network blip
+ * keeps the token and retries instead of asking for the password again.
  */
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = getToken();
-  const [state, setState] = useState<"checking" | "ok" | "bad">(() =>
+  const [state, setState] = useState<"checking" | "ok" | "bad" | "offline">(() =>
     token ? "checking" : "bad",
   );
 
   useEffect(() => {
     if (!token) return;
     let alive = true;
-    loadSession()
-      .then(() => {
-        if (alive) setState("ok");
-      })
-      .catch(() => {
-        if (alive) setState("bad");
-      });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      loadSession()
+        .then(() => {
+          if (alive) setState("ok");
+        })
+        .catch((e: any) => {
+          if (!alive) return;
+          if (e?.status === 401 || e?.message === "missing_token") {
+            setState("bad");
+            return;
+          }
+          setState("offline");
+          timer = setTimeout(check, 3000);
+        });
+    };
+    check();
     return () => {
       alive = false;
+      if (timer) clearTimeout(timer);
     };
   }, [token]);
 
@@ -44,6 +57,9 @@ function RequireAuth({ children }: { children: ReactNode }) {
   if (state === "bad") return <Navigate to="/login?expired=1" replace />;
   if (state === "checking") {
     return <div className="p-5 text-white/50">正在恢复登录状态…</div>;
+  }
+  if (state === "offline") {
+    return <div className="p-5 text-white/50">暂时连不上服务器，正在重试…（登录状态已保留）</div>;
   }
   return <Suspense fallback={<div className="p-5 text-white/50">加载中…</div>}>{children}</Suspense>;
 }
