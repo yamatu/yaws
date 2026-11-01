@@ -9,6 +9,12 @@ export function formatBytes(bytes: number) {
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/** `user@host:port`, with an IPv6 address in brackets so the port stays readable. */
+export function sshTarget(user: string, host: string, port: number) {
+  const shown = host.includes(":") ? `[${host}]` : host;
+  return `${user}@${shown}:${port}`;
+}
+
 export function pct(used: number, total: number) {
   if (total <= 0) return 0;
   return Math.max(0, Math.min(1, used / total));

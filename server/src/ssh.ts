@@ -1,5 +1,6 @@
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2";
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import type { Db } from "./db.js";
 import { decryptText } from "./crypto.js";
 
@@ -48,7 +49,8 @@ export function sshMachine(db: Db, id: number, jump = false): SshMachine {
     )
     .get(id) as SshMachine | undefined;
   if (!machine) throw new WorkspaceError(404, "machine_not_found");
-  if (!machine.host.trim() || !machine.username.trim())
+  machine.host = sshHostname(machine.host);
+  if (!machine.host || !machine.username.trim())
     throw new WorkspaceError(409, jump ? "via_not_configured" : "ssh_not_configured");
   return machine;
 }
@@ -111,6 +113,22 @@ export function detachViaChildren(db: Db, id: number, now = Date.now()) {
   db.prepare(
     "UPDATE machines SET via_machine_id = 0, updated_at = ? WHERE via_machine_id = ?",
   ).run(now, id);
+}
+
+/**
+ * IPv6 addresses are usually written as `[2001:db8::1]` or `[2001:db8::1]:22`;
+ * the socket wants the bare address (the port has its own field), otherwise the
+ * brackets are sent to DNS as a hostname and the connection never starts.
+ */
+export function sshHostname(raw: string): string {
+  const text = String(raw ?? "").trim();
+  const bracketed = text.match(/^\[([^\]]+)\](?::\d{1,5})?$/);
+  return bracketed ? bracketed[1].trim() : text;
+}
+
+/** `host:port` for people to read, with IPv6 addresses in brackets. */
+export function displayAddress(host: string, port: number) {
+  return isIP(host) === 6 ? `[${host}]:${port}` : `${host}:${port}`;
 }
 
 export function address(machine: SshMachine) {

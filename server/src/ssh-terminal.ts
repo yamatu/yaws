@@ -4,7 +4,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { Db } from "./db.js";
 import type { JwtUser } from "./auth.js";
-import { connectMachine, sshMachine } from "./ssh.js";
+import { connectMachine, displayAddress, sshMachine } from "./ssh.js";
 
 const Message = z.discriminatedUnion("type", [
   z.object({
@@ -127,7 +127,7 @@ export function terminalSocket(
         machine.id,
         machine.name,
         user.username,
-        `${machine.username}@${machine.host}:${machine.port}`,
+        `${machine.username}@${displayAddress(machine.host, machine.port)}`,
         Date.now(),
       );
       sessions.set(sessionId, {

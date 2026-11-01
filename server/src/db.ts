@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
+import { sshHostname } from "./ssh.js";
 
 export type Db = Database.Database;
 
@@ -271,6 +272,17 @@ function migrate(db: Db) {
   ]);
 
   db.exec("CREATE INDEX IF NOT EXISTS idx_machines_deleted_sort ON machines(deleted_at, sort_order, id)");
+
+  // `[2001:db8::1]` was stored verbatim and could never connect; keep the bare
+  // address so the socket, the trust check and the certificate list agree.
+  const bracketed = db
+    .prepare("SELECT id, ssh_host as host FROM machines WHERE ssh_host LIKE '[%'")
+    .all() as Array<{ id: number; host: string }>;
+  const fixHost = db.prepare("UPDATE machines SET ssh_host = ? WHERE id = ?");
+  for (const row of bracketed) {
+    const host = sshHostname(row.host);
+    if (host !== row.host) fixHost.run(host, row.id);
+  }
 
   ensureColumns(db, "users", [{ name: "auth_version", sql: "ALTER TABLE users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 0" }]);
   const pingColumns = db.prepare("PRAGMA table_info(ping_monitors)").all() as Array<{ name: string }>;

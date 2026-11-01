@@ -17,7 +17,7 @@ import { decryptText, encryptText } from "./crypto.js";
 import { createPingService } from "./ping.js";
 import { workspaceRouter } from "./workspace.js";
 import { aiRouter } from "./ai.js";
-import { assertVia, detachViaChildren, WorkspaceError, shellQuote } from "./ssh.js";
+import { assertVia, detachViaChildren, WorkspaceError, shellQuote, sshHostname } from "./ssh.js";
 import { certificateRouter, startCertificateScheduler } from "./certificates.js";
 import { agentBinaryHandler } from "./agent-release.js";
 import { agentInstallRouter } from "./agent-install.js";
@@ -1398,7 +1398,7 @@ app.post("/api/machines", requireAuth, asyncRoute(async (req, res) => {
   const agentKeyHash = hashAgentKey(agentKey, agentKeySecret);
   const agentKeyEnc = encryptText(agentKey, agentKeySecret);
 
-  const sshHost = (body.data.sshHost ?? "").trim();
+  const sshHost = sshHostname(body.data.sshHost ?? "");
   const sshPort = body.data.sshPort ?? 22;
   const sshUser = (body.data.sshUser ?? "").trim();
   const sshAuthType = body.data.sshAuthType ?? "password";
@@ -1569,7 +1569,7 @@ app.put("/api/machines/:id", requireAuth, asyncRoute(async (req, res) => {
     keyHash,
     keyEnc,
     body.data.agentWsUrl ?? null,
-    body.data.sshHost != null ? String(body.data.sshHost).trim() : null,
+    body.data.sshHost != null ? sshHostname(String(body.data.sshHost)) : null,
     body.data.sshPort != null ? Number(body.data.sshPort) : null,
     body.data.sshUser != null ? String(body.data.sshUser).trim() : null,
     body.data.sshAuthType ?? null,

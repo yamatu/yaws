@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, Plug, Plus, Save } from "lucide-react";
 import { apiFetch, type Machine } from "./api";
 import { workspaceError } from "./workspaceErrors";
 import { viaChildren } from "./sshVia";
+import { sshTarget } from "./format";
 
 type Draft = {
   name: string;
@@ -246,8 +247,7 @@ export function InternalHosts({
             <div className="shortcut-item" key={host.id}>
               <strong>{host.name}</strong>
               <pre>
-                {host.sshUser || "—"}@{host.sshHost || "未配置"}:
-                {host.sshPort ?? 22}
+                {sshTarget(host.sshUser || "—", host.sshHost || "未配置", host.sshPort ?? 22)}
               </pre>
               <div className="flex gap-1">
                 <button

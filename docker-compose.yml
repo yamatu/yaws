@@ -32,4 +32,16 @@ services:
       CERT_USE_SERVER_CREDS: "${CERT_USE_SERVER_CREDS:-}"
     volumes:
       - ./data:/app/data
+    networks:
+      - yaws
     restart: unless-stopped
+
+# The default bridge network has no IPv6, so SSH to an IPv6 address would fail
+# with ENETUNREACH. Outbound IPv6 is NATed through ip6tables (Docker 27+ enables
+# it by default); the host itself still needs a working IPv6 route.
+networks:
+  yaws:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd79:6177:7300::/64

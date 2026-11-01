@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { apiFetch, type Machine, type Metric, type UptimeSummary } from "./api";
 import { connectUiWs } from "./ws";
-import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, formatMoneyCents, pct } from "./format";
+import { cycleLabel, daysLeft, fmtTime, formatBps, formatBytes, formatMoneyCents, pct, sshTarget } from "./format";
 import { fractionLevel, meterValue } from "./serverStats";
 import { UsageMeter } from "./UsageMeter";
 import { useDocumentTitle } from "./documentTitle";
@@ -631,7 +631,7 @@ export function MachinePage() {
               <div>
                 SSH：
                 {(machine.sshHost ?? "").trim() && (machine.sshUser ?? "").trim()
-                  ? `${machine.sshUser}@${machine.sshHost}:${machine.sshPort ?? 22} · ${(machine.sshAuthType ?? "password") === "key" ? "Key" : "Password"}`
+                  ? `${sshTarget(machine.sshUser ?? "", machine.sshHost ?? "", machine.sshPort ?? 22)} · ${(machine.sshAuthType ?? "password") === "key" ? "Key" : "Password"}`
                   : "未配置"}
                 {sshOk ? (
                   <Link className="ml-2 text-sky-200/90 hover:underline" to="ssh">

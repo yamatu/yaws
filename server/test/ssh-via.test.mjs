@@ -2,7 +2,25 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import WebSocket from "ws";
 import { harness } from "./fixture.mjs";
-import { assertVia, detachViaChildren, hopErrorCode, sshChain } from "../dist/ssh.js";
+import {
+  assertVia,
+  detachViaChildren,
+  displayAddress,
+  hopErrorCode,
+  sshChain,
+  sshHostname,
+} from "../dist/ssh.js";
+
+test("IPv6 SSH hosts are stored and dialled without brackets", () => {
+  assert.equal(sshHostname(" [2001:db8::1] "), "2001:db8::1");
+  assert.equal(sshHostname("[2001:db8::1]:2222"), "2001:db8::1");
+  assert.equal(sshHostname("2001:db8::1"), "2001:db8::1");
+  assert.equal(sshHostname("fe80::1%eth0"), "fe80::1%eth0");
+  assert.equal(sshHostname("example.com"), "example.com");
+  assert.equal(sshHostname("10.0.0.2"), "10.0.0.2");
+  assert.equal(displayAddress("2001:db8::1", 22), "[2001:db8::1]:22");
+  assert.equal(displayAddress("10.0.0.2", 22), "10.0.0.2:22");
+});
 
 async function request(f, url, method = "GET", body, token = f.token) {
   const response = await fetch(f.url + url, {
