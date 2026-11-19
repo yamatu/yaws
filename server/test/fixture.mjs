@@ -23,6 +23,7 @@ import { loadEnv } from "../dist/env.js";
 import { agentBinaryHandler } from "../dist/agent-release.js";
 import { agentInstallRouter } from "../dist/agent-install.js";
 import { z } from "zod";
+import { jsonBody } from "../dist/json-body.js";
 
 /** Reply for the workspace resource probe (see server/src/system-stats.ts). */const STATS_OUTPUT = [
   "K host fixture-ssh",
@@ -718,7 +719,7 @@ export async function harness(port = 0, officialFactory) {
     AGENT_RELEASE_TAG: "",
   };
   const app = express();
-  app.use(express.json({ limit: "1mb" }));
+  app.use(jsonBody());
   const server = http.createServer(app);
   const hub = attachWebSockets({
     server,

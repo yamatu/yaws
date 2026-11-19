@@ -11,6 +11,7 @@ import {
   type Api,
   type Context,
   type AssistantMessage,
+  type UserMessage,
   type JsonObject,
   type Tool,
 } from "@earendil-works/pi-ai";
@@ -418,6 +419,20 @@ function safeAuthUrl(value: string, id: OfficialProvider) {
   } catch { return false; }
 }
 
+/** Chat Completions text/image_url parts as pi content; pi drops images for
+ * models without vision. */
+function userContent(content: unknown): UserMessage["content"] {
+  if (!Array.isArray(content)) return String(content ?? "");
+  const parts: Exclude<UserMessage["content"], string> = [];
+  for (const part of content as Array<Record<string, any>>) {
+    if (part?.type === "text") parts.push({ type: "text", text: String(part.text ?? "") });
+    const url = part?.type === "image_url" ? String(part.image_url?.url ?? "") : "";
+    const match = /^data:([^;]+);base64,(.+)$/.exec(url);
+    if (match) parts.push({ type: "image", mimeType: match[1], data: match[2] });
+  }
+  return parts;
+}
+
 /** Translate yaws's Chat Completions history to pi's native, provider-neutral
  * messages. This preserves tool calls/results across every round; replayed
  * finished turns are text only, as they were before official login support. */
@@ -434,7 +449,7 @@ export function toContext(
     }
     if (item.role === "user") {
       context.messages.push({
-        role: "user", content: String(item.content ?? ""),
+        role: "user", content: userContent(item.content),
         timestamp: Date.now(),
       });
     } else if (item.role === "assistant") {

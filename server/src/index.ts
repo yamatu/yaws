@@ -1,5 +1,6 @@
 import express, { type Request } from "express";
 import cors from "cors";
+import { jsonBody } from "./json-body.js";
 import path from "node:path";
 import fs from "node:fs";
 import http from "node:http";
@@ -41,7 +42,7 @@ if (previousAgentKeySecret && previousAgentKeySecret !== agentKeySecret) {
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", parseTrustProxy(env.TRUST_PROXY));
-app.use(express.json({ limit: "1mb" }));
+app.use(jsonBody());
 app.use("/api", (_req, res, next) => { res.setHeader("cache-control", "no-store"); next(); });
 app.use((req, res, next) => {
   res.setHeader("x-content-type-options", "nosniff");

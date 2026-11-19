@@ -1468,3 +1468,90 @@ browserTest("the dock editor stays clickable and can return to the chat", async 
   expect(await dock.locator(".ai-chat-body").isVisible()).toBe(true);
   await page.close();
 });
+
+browserTest("pictures, steering and folded steps survive a reload", async ({ page }) => {
+  const failures = [];
+  page.on("pageerror", (e) => failures.push(e.message));
+  await page.goto(f.url + "/login");
+  await page.getByPlaceholder("请输入用户名").fill("fixture");
+  await page.getByPlaceholder("请输入密码").fill(f.password);
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("button", { name: "退出", exact: true })).toBeVisible();
+  await page.evaluate(async (baseUrl) => {
+    const token = localStorage.getItem("yaws_token");
+    await fetch("/api/ai/profiles", {
+      method: "PUT",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        activeId: "pics",
+        profiles: [{ id: "pics", name: "图片模型", baseUrl, protocol: "chat", model: "fixture-model", reasoning: "", apiKey: "fixture-key", allowPrivate: true }],
+      }),
+    });
+    // Start from a fresh conversation on this machine.
+    localStorage.removeItem("yaws.ai.chat.1");
+  }, f.modelUrl);
+  const visible = page.locator(".remote-workspace:not([hidden])");
+  await page.goto(f.url + "/app/machines/1/ssh");
+  if (!f.db.prepare("SELECT ssh_host_fingerprint AS fp FROM machines WHERE id=1").get().fp) {
+    await visible.getByRole("button", { name: "读取主机指纹", exact: true }).click();
+    await visible.getByRole("button", { name: "确认并信任此指纹" }).click();
+  }
+  await visible.getByRole("tab", { name: "AI", exact: true }).click();
+  const chat = visible.locator(".ai-chat");
+  const box = chat.getByLabel("问题", { exact: true });
+
+  // A picture goes with the question and shows in the bubble.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  await chat.locator('input[type="file"]').setInputFiles({ name: "err.png", mimeType: "image/png", buffer: png });
+  await expect(chat.locator(".ai-attachment img")).toHaveCount(1);
+  await box.fill("[many] 这个报错怎么回事");
+  await chat.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(chat.locator(".ai-attachment")).toHaveCount(0);
+  await expect(chat.locator(".ai-row.user .ai-image-thumb img")).toHaveCount(1);
+  await expect.poll(() => f.modelRequests.some((r) => JSON.stringify(r.messages ?? "").includes("data:image/png;base64,"))).toBe(true);
+  // Three steps in a finished turn fold into one line.
+  const live = chat.locator(".ai-chat-working");
+  await expect(live).toContainText("已完成 · 用时", { timeout: 20000 });
+  const group = chat.locator(".ai-step-group").last();
+  await expect(group).toContainText("已执行 3 个步骤");
+  await expect(group.locator(".ai-tool")).toHaveCount(0);
+  await group.locator(".ai-step-group-head").click();
+  await expect(group.locator(".ai-tool")).toHaveCount(3);
+
+  // Steering: sent while the turn runs, read by the model after the step.
+  await box.fill("[slow][run] 看一下进程");
+  await chat.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(chat.getByRole("button", { name: "停止", exact: true })).toBeVisible();
+  await page.waitForTimeout(150);
+  await box.fill("[md] 只看前 5 个");
+  await chat.getByRole("button", { name: "插话", exact: true }).click();
+  const steer = chat.locator(".ai-row.steer").last();
+  await expect(steer).toContainText("只看前 5 个");
+  await expect(steer).not.toHaveClass(/pending/, { timeout: 20000 });
+  await expect(live).toContainText("已完成 · 用时", { timeout: 20000 });
+  // Shown where the model read it: after the step that was running.
+  const order = await chat.locator(".ai-chat-transcript").evaluate((node) =>
+    [...node.querySelectorAll(".ai-tool, .ai-row.steer")]
+      .slice(-2)
+      .map((el) => (el.classList.contains("steer") ? "steer" : "tool")),
+  );
+  expect(order).toEqual(["tool", "steer"]);
+  const steered = f.modelRequests.at(-1).messages.at(-1);
+  expect(steered).toEqual({ role: "user", content: "[md] 只看前 5 个" });
+
+  // After a reload the picture and the steering message are where they were.
+  await page.reload();
+  await visible.getByRole("tab", { name: "AI", exact: true }).click();
+  await expect(chat.locator(".ai-row.steer")).toContainText("只看前 5 个");
+  const thumb = chat.locator(".ai-row.user .ai-image-thumb img").first();
+  await expect(thumb).toBeVisible();
+  expect(await thumb.evaluate((img) => img.naturalWidth)).toBe(1);
+  await chat.locator(".ai-row.user .ai-image-thumb").first().click();
+  await expect(page.locator(".ai-image-viewer img")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".ai-image-viewer")).toHaveCount(0);
+  expect(failures).toEqual([]);
+});

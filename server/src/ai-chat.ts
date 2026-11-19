@@ -43,9 +43,19 @@ import {
 } from "./extensions.js";
 import { aiRuns } from "./ai-runs.js";
 import {
+  ChatImages,
+  chatContent,
+  historyPrompt,
+  parseIds,
+  responsesContent,
+  type ChatImage,
+  type StoredSteer,
+} from "./ai-attachments.js";
+import {
   runStreams,
   RunStreams,
   type DetachedRun,
+  type SteerMessage,
 } from "./ai-streams.js";
 import {
   HOST_FANOUT,
@@ -225,9 +235,21 @@ export type ProposalView = {
   result: { output?: string; code?: number | null; backup?: string | null; revision?: string } | null;
 };
 
+/** A question needs words, pictures, or both. */
+const hasContent = (body: { message: string; images: unknown[] }) =>
+  body.message.length > 0 || body.images.length > 0;
+
+const SteerBody = z
+  .object({
+    message: z.string().trim().max(12000).default(""),
+    images: ChatImages,
+  })
+  .refine(hasContent, { message: "empty_message" });
+
 const ChatBody = z.object({
   conversationId: z.string().max(64).default(""),
-  message: z.string().trim().min(1).max(12000),
+  message: z.string().trim().max(12000).default(""),
+  images: ChatImages,
   root: z.string().min(1).max(4096),
   autoRun: z.enum(["off", "read", "all"]).default("read"),
   /** Empty means "whichever profile is active". */
@@ -241,7 +263,42 @@ const ChatBody = z.object({
     .array(z.number().int().positive())
     .max(MAX_CHAT_HOSTS)
     .optional(),
-});
+}).refine(hasContent, { message: "empty_message" });
+
+/** Stores pictures encrypted, like the prompt they belong to; returns their ids. */
+function saveImages(
+  db: Db,
+  secret: string,
+  owner: { conversationId: string; runId: string; userId: number },
+  images: ChatImage[],
+): string[] {
+  const insert = db.prepare(
+    "INSERT INTO ai_images (id, conversation_id, run_id, user_id, mime, data, created_at) VALUES (?,?,?,?,?,?,?)",
+  );
+  return images.map((image) => {
+    const id = randomUUID();
+    insert.run(
+      id,
+      owner.conversationId,
+      owner.runId,
+      owner.userId,
+      image.mime,
+      encryptText(image.data, secret),
+      Date.now(),
+    );
+    return id;
+  });
+}
+
+function parseSteers(secret: string, text: string): StoredSteer[] {
+  if (!text) return [];
+  try {
+    const value = JSON.parse(decodeField(secret, text)) as unknown;
+    return Array.isArray(value) ? (value as StoredSteer[]) : [];
+  } catch {
+    return [];
+  }
+}
 const Rename = z.object({
   title: z.string().trim().min(1).max(120),
 });
@@ -706,7 +763,7 @@ export function chatRouter(deps: ChatDeps) {
     if (!conversation) throw new WorkspaceError(404, "not_found");
     const runs = db
       .prepare(
-        "SELECT id, prompt, result, status, trace, created_at as createdAt FROM ai_runs WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 200",
+        "SELECT id, prompt, result, status, trace, images, steers, created_at as createdAt FROM ai_runs WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 200",
       )
       .all(conversation.id) as Array<{
       id: string;
@@ -714,6 +771,8 @@ export function chatRouter(deps: ChatDeps) {
       result: string;
       status: string;
       trace: string;
+      images: string;
+      steers: string;
       createdAt: number;
     }>;
     res.json({
@@ -754,6 +813,8 @@ export function chatRouter(deps: ChatDeps) {
           status: run.status,
           createdAt: run.createdAt,
           trace,
+          images: parseIds(run.images),
+          steers: parseSteers(secret, run.steers),
           proposals: readProposals(db, secret, run.id),
         };
       }),
@@ -835,6 +896,55 @@ export function chatRouter(deps: ChatDeps) {
     res.json({ ok: true, stopped: runStreams.abort(run.runId) });
   });
 
+  /**
+   * Adds a message to a turn that is still running (steering).
+   *
+   * It reaches the model before its next call: after the steps it is running
+   * now, or instead of stopping if it was about to give its final answer. A run
+   * that has already decided it is done answers 409, and the page sends the
+   * message as the next question instead.
+   */
+  router.post("/conversations/:cid/runs/:runId/steer", (req, res) => {
+    const userId = (req as AuthedRequest).user.id;
+    const conversation = db
+      .prepare("SELECT id FROM ai_conversations WHERE id = ? AND user_id = ?")
+      .get(req.params.cid, userId) as { id: string } | undefined;
+    if (!conversation) throw new WorkspaceError(404, "not_found");
+    const run = runStreams.get(req.params.runId);
+    if (!run || run.conversationId !== conversation.id || !runStreams.canSteer(run))
+      throw new WorkspaceError(409, "run_not_steerable");
+    const body = SteerBody.parse(req.body);
+    const imageIds = saveImages(
+      db,
+      secret,
+      { conversationId: conversation.id, runId: run.runId, userId },
+      body.images,
+    );
+    if (!runStreams.steer(run, { text: body.message, images: body.images, imageIds }))
+      throw new WorkspaceError(409, "run_not_steerable");
+    res.json({ ok: true });
+  });
+
+  /** A picture attached to a question, for the transcript. */
+  router.get("/conversations/:cid/images/:imageId", (req, res) => {
+    const userId = (req as AuthedRequest).user.id;
+    const row = db
+      .prepare(
+        "SELECT mime, data FROM ai_images WHERE id = ? AND conversation_id = ? AND user_id = ?",
+      )
+      .get(req.params.imageId, req.params.cid, userId) as
+      | { mime: string; data: string }
+      | undefined;
+    if (!row) throw new WorkspaceError(404, "not_found");
+    const bytes = Buffer.from(decodeField(secret, row.data), "base64");
+    res.setHeader("content-type", row.mime);
+    res.setHeader("content-length", String(bytes.length));
+    res.setHeader("content-security-policy", "default-src 'none'; sandbox");
+    // Immutable once written; the id is a random UUID.
+    res.setHeader("cache-control", "private, max-age=86400, immutable");
+    res.end(bytes);
+  });
+
   router.patch("/conversations/:cid", (req, res) => {
     const userId = (req as AuthedRequest).user.id;
     const { title } = Rename.parse(req.body);
@@ -858,6 +968,7 @@ export function chatRouter(deps: ChatDeps) {
     if (liveRunIdFor(conversation.id)) throw new WorkspaceError(409, "run_running");
     runStreams.forgetConversation(conversation.id);
     db.prepare("DELETE FROM ai_runs WHERE conversation_id = ?").run(conversation.id);
+    db.prepare("DELETE FROM ai_images WHERE conversation_id = ?").run(conversation.id);
     // The host rows have no cascade of their own (foreign keys are off by
     // default in SQLite), so they are removed explicitly.
     db.prepare("DELETE FROM ai_conversation_hosts WHERE conversation_id = ?").run(
@@ -912,7 +1023,7 @@ export function chatRouter(deps: ChatDeps) {
             conversationId,
             machineId,
             userId,
-            commandSummary(body.message, 40),
+            commandSummary(body.message || "[图片]", 40),
             body.root,
             config.model,
             Date.now(),
@@ -943,10 +1054,19 @@ export function chatRouter(deps: ChatDeps) {
           machineId,
           userId,
           body.root,
-          encryptText(body.message, secret),
+          encryptText(body.message || "\0", secret),
           startedAt,
           conversationId,
         );
+        const imageIds = saveImages(db, secret, { conversationId, runId, userId }, body.images);
+        if (imageIds.length)
+          db.prepare("UPDATE ai_runs SET images=? WHERE id=?").run(
+            JSON.stringify(imageIds),
+            runId,
+          );
+        // Messages the operator added while this turn ran, in the order the
+        // model saw them.
+        const steers: StoredSteer[] = [];
 
         // From here on the response is a stream, so failures have to travel as events.
         res.status(200);
@@ -1000,7 +1120,7 @@ export function chatRouter(deps: ChatDeps) {
           if (!force && now - progress.lastWrite < 1_000) return;
           progress.lastWrite = now;
           db.prepare(
-            "UPDATE ai_runs SET result=?, trace=?, usage=? WHERE id=? AND status='running'",
+            "UPDATE ai_runs SET result=?, trace=?, usage=?, steers=? WHERE id=? AND status='running'",
           ).run(
             // The `\0` sentinel keeps "no answer yet" decryptable, unlike an
             // empty-string ciphertext.
@@ -1009,6 +1129,7 @@ export function chatRouter(deps: ChatDeps) {
             // `null` when nothing was reported yet, which adds nothing to the
             // conversation total while the turn is still running.
             encryptText(JSON.stringify(turnUsage), secret),
+            encryptText(JSON.stringify(steers), secret),
             runId,
           );
         };
@@ -1061,17 +1182,22 @@ export function chatRouter(deps: ChatDeps) {
             hosts,
             root: body.root,
             message: body.message,
+            images: body.images,
+            steers,
+            takeSteers: () => runStreams.takeSteers(runStream),
+            closeSteers: () => runStreams.closeSteers(runStream),
             autoRun: body.autoRun,
             config,
             signal,
             guard,
           });
           db.prepare(
-            "UPDATE ai_runs SET status='completed', result=?, trace=?, usage=? WHERE id=?",
+            "UPDATE ai_runs SET status='completed', result=?, trace=?, usage=?, steers=? WHERE id=?",
           ).run(
             encryptText(answer || "已完成检查。", secret),
             encryptText(JSON.stringify(trace), secret),
             encryptText(JSON.stringify(turnUsage), secret),
+            encryptText(JSON.stringify(steers), secret),
             runId,
           );
           db.prepare(
@@ -1098,17 +1224,29 @@ export function chatRouter(deps: ChatDeps) {
               ? e.message
               : "ai_failed";
           db.prepare(
-            "UPDATE ai_runs SET status=?, result=?, trace=?, usage=? WHERE id=?",
+            "UPDATE ai_runs SET status=?, result=?, trace=?, usage=?, steers=? WHERE id=?",
           ).run(
             timedOut ? "failed" : signal.aborted ? "cancelled" : "failed",
             encryptText(progress.answer || "\0", secret),
             encryptText(JSON.stringify(trace), secret),
             encryptText(JSON.stringify(turnUsage), secret),
+            encryptText(JSON.stringify(steers), secret),
             runId,
           );
           emit({ type: "error", error, status: code });
           emit({ type: "done", runId, conversationId, proposals: readProposals(db, secret, runId) });
         } finally {
+          // Accepted but never shown to the model (a stop, an error): hand them
+          // back so the page can send them as the next question.
+          const unread = runStreams.closeSteers(runStream);
+          if (unread.length)
+            emit({
+              type: "steer_dropped",
+              messages: unread.map((message) => ({
+                text: message.text,
+                images: message.imageIds,
+              })),
+            });
           if (heartbeat) clearInterval(heartbeat);
           guard.stop();
           // Closing the run releases every reader (including one that attached
@@ -1146,6 +1284,12 @@ type TurnOptions = {
   hosts: ChatHost[];
   root: string;
   message: string;
+  /** Pictures sent with the question; only this turn sends them to the model. */
+  images?: ChatImage[];
+  /** Filled with the steering messages as they reach the model. */
+  steers?: StoredSteer[];
+  takeSteers?: () => SteerMessage[];
+  closeSteers?: () => SteerMessage[];
   autoRun: AutoRunMode;
   config: AIConfig;
   signal: AbortSignal;
@@ -1217,7 +1361,7 @@ async function turn(options: TurnOptions): Promise<string> {
 
   const previous = db
     .prepare(
-      "SELECT prompt, result FROM ai_runs WHERE conversation_id = ? AND id <> ? AND status = 'completed' ORDER BY created_at DESC, rowid DESC LIMIT ?",
+      "SELECT prompt, result, images, steers FROM ai_runs WHERE conversation_id = ? AND id <> ? AND status = 'completed' ORDER BY created_at DESC, rowid DESC LIMIT ?",
     )
     .all(
       options.conversationId,
@@ -1226,6 +1370,8 @@ async function turn(options: TurnOptions): Promise<string> {
     ) as Array<{
     prompt: string;
     result: string;
+    images: string;
+    steers: string;
   }>;
   const system = [
     `You are YAWS, a server operations assistant. This conversation works on ${options.hosts.length} server(s); every tool takes an optional "host" argument (a name or an id) and uses the primary host when it is omitted:`,
@@ -1270,7 +1416,11 @@ async function turn(options: TurnOptions): Promise<string> {
   const history: Array<{ prompt: string; result: string }> = [];
   let historyBytes = 0;
   for (const row of previous) {
-    const prompt = decodeField(secret, row.prompt);
+    const prompt = historyPrompt(
+      decodeField(secret, row.prompt),
+      parseIds(row.images).length,
+      parseSteers(secret, row.steers),
+    );
     const result = decodeField(secret, row.result);
     const size = prompt.length + result.length;
     if (history.length && historyBytes + size > CHAT_HISTORY_BUDGET) break;
@@ -1285,10 +1435,39 @@ async function turn(options: TurnOptions): Promise<string> {
     responses.push({ role: "user", content: row.prompt });
     responses.push({ role: "assistant", content: row.result });
   }
-  messages.push({ role: "user", content: message });
-  responses.push({ role: "user", content: message });
+  const images = options.images ?? [];
+  messages.push({ role: "user", content: chatContent(message, images) });
+  responses.push({ role: "user", content: responsesContent(message, images) });
 
   let answer = "";
+  /**
+   * Feeds messages the operator sent while this turn ran to the model, as user
+   * messages after the latest tool results. Returns how many there were.
+   */
+  const injectSteers = (): number => {
+    const waiting = options.takeSteers?.() ?? [];
+    for (const steer of waiting) {
+      const text = expandExtensionPrompt(extensions.prompts, steer.text);
+      const images = steer.images as ChatImage[];
+      messages.push({ role: "user", content: chatContent(text, images) });
+      responses.push({ role: "user", content: responsesContent(text, images) });
+      const stored: StoredSteer = {
+        text: steer.text,
+        images: steer.imageIds,
+        step: options.trace.length,
+        at: Date.now(),
+      };
+      options.steers?.push(stored);
+      emit({ type: "steer", steer: stored });
+    }
+    // Text written after the message is a new paragraph of the same answer.
+    if (waiting.length && answer && !answer.endsWith("\n\n")) {
+      const gap = answer.endsWith("\n") ? "\n" : "\n\n";
+      answer += gap;
+      emit({ type: "delta", text: gap });
+    }
+    return waiting.length;
+  };
   let contextBytes = 0;
   /** How many times the model was asked to finish an answer it cut short. */
   let continuations = 0;
@@ -1491,6 +1670,12 @@ async function turn(options: TurnOptions): Promise<string> {
         checkpoint(answer, true);
         continue;
       }
+      // The model was about to finish, but the operator added something while
+      // it worked: answer that too instead of ending the turn.
+      if (injectSteers()) continue;
+      // From here nothing more is accepted. Checking the inbox and closing it
+      // happen without an await in between, so a message cannot slip through.
+      options.closeSteers?.();
       // Out of rounds, or nothing was written to continue from: say so instead
       // of silently returning half an answer.
       if (result.truncated && result.content)
@@ -1511,6 +1696,9 @@ async function turn(options: TurnOptions): Promise<string> {
         output: text,
       });
     }
+    // Steering lands here: after the steps the model asked for, before it
+    // decides what to do next.
+    injectSteers();
     // The steps just ran are worth keeping even if the next model call hangs.
     checkpoint(answer);
   }

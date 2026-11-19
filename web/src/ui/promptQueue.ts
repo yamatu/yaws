@@ -1,12 +1,18 @@
 export const QUEUE_LIMIT = 5;
 
-export type Queued = { id: string; text: string };
+type QueuedImage = { id: string; mime: string; data: string };
+export type Queued = { id: string; text: string; images?: QueuedImage[] };
 
-/** Adds a follow-up; `null` when it is empty or the queue is full. */
-export function enqueue(queue: Queued[], text: string, id: string): Queued[] | null {
+/** Adds a follow-up; `null` when it has no content or the queue is full. */
+export function enqueue(
+  queue: Queued[],
+  text: string,
+  id: string,
+  images: QueuedImage[] = [],
+): Queued[] | null {
   const trimmed = text.trim();
-  if (!trimmed || queue.length >= QUEUE_LIMIT) return null;
-  return [...queue, { id, text: trimmed }];
+  if ((!trimmed && !images.length) || queue.length >= QUEUE_LIMIT) return null;
+  return [...queue, { id, text: trimmed, ...(images.length ? { images } : {}) }];
 }
 
 export function removeQueued(queue: Queued[], id: string): Queued[] {

@@ -323,7 +323,17 @@ function migrate(db: Db) {
     // Token usage of the turn, so the panel can show what a conversation has
     // cost as soon as it is reopened instead of only while an answer streams.
     { name: "usage", sql: "ALTER TABLE ai_runs ADD COLUMN usage TEXT NOT NULL DEFAULT ''" },
+    // JSON list of `ai_images` ids attached to the question.
+    { name: "images", sql: "ALTER TABLE ai_runs ADD COLUMN images TEXT NOT NULL DEFAULT ''" },
+    // Encrypted JSON of the messages the operator sent while the turn ran.
+    { name: "steers", sql: "ALTER TABLE ai_runs ADD COLUMN steers TEXT NOT NULL DEFAULT ''" },
   ]);
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS ai_images (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
+      run_id TEXT NOT NULL, user_id INTEGER NOT NULL, mime TEXT NOT NULL, data TEXT NOT NULL,
+      created_at INTEGER NOT NULL);
+     CREATE INDEX IF NOT EXISTS idx_ai_images_conversation ON ai_images(conversation_id);`,
+  );
   // The picker shows which model produced a conversation.
   ensureColumns(db, "ai_conversations", [
     { name: "model", sql: "ALTER TABLE ai_conversations ADD COLUMN model TEXT NOT NULL DEFAULT ''" },

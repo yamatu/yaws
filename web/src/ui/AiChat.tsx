@@ -9,7 +9,9 @@ import {
   Cpu,
   FileCode2,
   FolderTree,
+  ImagePlus,
   ListPlus,
+  MessageCircleReply,
   MessageSquarePlus,
   Pencil,
   PencilLine,
@@ -55,6 +57,15 @@ import {
   type SlashCommand,
 } from "./slashCommands";
 import { repairViewportScroll, useMediaQuery } from "./viewport";
+import {
+  MAX_IMAGES,
+  attachmentUrl,
+  imageFiles,
+  prepareImage,
+  type Attachment,
+} from "./imageAttach";
+import { ImageStrip, ImageViewer, type ImageRef } from "./ChatImages";
+import { groupSteps, stepSummary } from "./chatGroups";
 import {
   type Progress,
   acceptEvent,
@@ -139,7 +150,16 @@ type Proposal = {
   result: { output?: string; code?: number | null; backup?: string | null } | null;
 };
 type Entry =
-  | { key: string; kind: "user"; text: string }
+  | { key: string; kind: "user"; text: string; images?: ImageRef[] }
+  | {
+      key: string;
+      kind: "steer";
+      text: string;
+      images?: ImageRef[];
+      /** Sent, not yet seen by the model; keeps the pictures to re-queue it. */
+      pending?: Attachment[];
+      at?: number;
+    }
   | { key: string; kind: "assistant"; text: string }
   | { key: string; kind: "thinking"; text: string }
   | { key: string; kind: "tool"; tool: Tool }
@@ -154,7 +174,11 @@ type ChatTurn = {
   createdAt: number;
   trace: Tool[];
   proposals: Proposal[];
+  images?: string[];
+  steers?: StoredSteer[];
 };
+/** A message added while a turn ran; `step` is how many steps came before it. */
+type StoredSteer = { text: string; images: string[]; step: number; at: number };
 /** The conversation endpoint reports the extra servers of a stored chat. */
 type StoredConversation = { root: string; hosts?: HostOption[]; machineId?: number };
 export const AUTO_RUN_KEY = "yaws.ai.autorun";
@@ -303,6 +327,8 @@ export function AiChat({
   const [root, setRoot] = useState(initialRoot || "/");
   const [autoRun, setAutoRun] = useState<AutoRun>(storedAutoRun);
   const [entries, setEntries] = useState<Entry[]>([]);
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
   // The unsent question survives a reload, a collapsed dock and a switch to
   // another conversation; each conversation keeps its own.
   const [input, setInput] = useState(() => readDraft(draftKey(machineId, "")));
@@ -320,6 +346,13 @@ export function AiChat({
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [copied, setCopied] = useState("");
+  // Pictures waiting in the composer; too big for the saved draft.
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attaching, setAttaching] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const [viewer, setViewer] = useState("");
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   // A stream was lost (background tab, flaky network): refresh from the server
   // when the page is back instead of leaving a half-written answer.
   const stale = useRef(false);
@@ -505,9 +538,31 @@ export function AiChat({
     ) => {
       const restored: Entry[] = [];
       for (const turn of data.turns) {
-        restored.push({ key: `e${++counter.current}`, kind: "user", text: turn.prompt });
-        for (const tool of turn.trace ?? [])
+        restored.push({
+          key: `e${++counter.current}`,
+          kind: "user",
+          text: turn.prompt,
+          images: (turn.images ?? []).map((imageId) => ({ id: imageId })),
+        });
+        // Messages added mid-run go back between the steps they followed.
+        const steers = [...(turn.steers ?? [])].sort((a, b) => a.step - b.step);
+        const pushSteers = (upTo: number) => {
+          while (steers.length && steers[0].step <= upTo) {
+            const steer = steers.shift()!;
+            restored.push({
+              key: `e${++counter.current}`,
+              kind: "steer",
+              text: steer.text,
+              images: steer.images.map((imageId) => ({ id: imageId })),
+              at: steer.at,
+            });
+          }
+        };
+        (turn.trace ?? []).forEach((tool, index) => {
+          pushSteers(index);
           restored.push({ key: `e${++counter.current}`, kind: "tool", tool });
+        });
+        pushSteers(Number.POSITIVE_INFINITY);
         for (const proposal of turn.proposals ?? [])
           restored.push({ key: `e${++counter.current}`, kind: "proposal", proposal });
         if (turn.answer)
@@ -603,6 +658,55 @@ export function AiChat({
           }
           return [...copy, { key: nextKey(), kind: "thinking", text }];
         });
+    } else if (event.type === "steer") {
+      // The model has the message now. It was shown when it was sent; a replay
+      // after a reload or a message from another tab is added here.
+      const steer = event.steer as StoredSteer;
+      setEntries((old) => {
+        if (old.some((entry) => entry.kind === "steer" && entry.at === steer.at)) return old;
+        const index = old.findIndex(
+          (entry) => entry.kind === "steer" && entry.pending && entry.text === steer.text,
+        );
+        if (index >= 0) {
+          // Moved to where the model actually read it: after the steps that
+          // finished while it waited.
+          const found = old[index] as Extract<Entry, { kind: "steer" }>;
+          return [
+            ...old.slice(0, index),
+            ...old.slice(index + 1),
+            { ...found, pending: undefined, at: steer.at },
+          ];
+        }
+        return [
+          ...old,
+          {
+            key: nextKey(),
+            kind: "steer",
+            text: steer.text,
+            images: steer.images.map((imageId) => ({ id: imageId })),
+            at: steer.at,
+          },
+        ];
+      });
+    } else if (event.type === "steer_dropped") {
+      // The turn ended before the model read them: they become the next questions.
+      const dropped = entriesRef.current.filter(
+        (entry): entry is Extract<Entry, { kind: "steer" }> =>
+          entry.kind === "steer" && !!entry.pending,
+      );
+      if (dropped.length) {
+        const keys = new Set(dropped.map((entry) => entry.key));
+        setEntries((old) => old.filter((entry) => !keys.has(entry.key)));
+        setQueue((queue) => [
+          ...queue,
+          ...dropped.map((entry) => ({
+            id: newId(),
+            text: entry.text,
+            ...(entry.pending?.length ? { images: entry.pending } : {}),
+          })),
+        ]);
+        setNotice("这一轮结束前没来得及插话，消息已改为排队发送");
+      }
     } else if (event.type === "usage") {
       setUsage(event.usage as Usage);
     } else if (event.type === "delta") {
@@ -1107,45 +1211,108 @@ export function AiChat({
     else setNotice("当前没有正在运行的一轮");
   }
 
+  function clearBox() {
+    setInput("");
+    setAttachments([]);
+    cursor.current = NEW_CURSOR;
+  }
+
+  /** Keeps the box for after this turn; `false` when the queue is full. */
+  function queueBox(message: string, images: Attachment[]) {
+    const next = enqueue(queue, message, newId(), images);
+    if (!next) {
+      setError(`最多排队 ${QUEUE_LIMIT} 条消息`);
+      return false;
+    }
+    setQueue(next);
+    clearBox();
+    return true;
+  }
+
+  /**
+   * Sends the box into the running turn (steering): the model reads it after
+   * the step it is on, or instead of finishing. A turn that is already wrapping
+   * up refuses it, and the message is queued for right after.
+   */
+  async function steerBox() {
+    const message = input.trim();
+    const images = attachments;
+    if (!message && !images.length) return;
+    if (builtinCommand(message)) return void send();
+    const runId = attached.current.runId;
+    if (!runId || !conversationId) {
+      queueBox(message, images);
+      return;
+    }
+    const key = nextKey();
+    push({
+      key,
+      kind: "steer",
+      text: message,
+      images: images.map((image) => ({ src: attachmentUrl(image) })),
+      pending: images,
+    });
+    clearBox();
+    setStick(true);
+    try {
+      await apiFetch(`/api/ai/conversations/${conversationId}/runs/${runId}/steer`, {
+        method: "POST",
+        body: JSON.stringify({
+          message,
+          images: images.map(({ mime, data }) => ({ mime, data })),
+        }),
+      });
+    } catch (e) {
+      setEntries((old) => old.filter((entry) => entry.key !== key));
+      if ((e as Error)?.message === "run_not_steerable") {
+        const next = enqueue(queue, message, newId(), images);
+        if (next) setQueue(next);
+        setNotice("这一轮正在收尾，消息已改为排队，结束后自动发送");
+      } else {
+        setInput(message);
+        setAttachments(images);
+        setError(workspaceError(e));
+      }
+    }
+  }
+
   /**
    * Sends the box, or `text` when a queued follow-up goes out. While a turn is
    * running (here or watched after a reload) the box is queued instead: one
    * conversation runs one turn at a time on the server.
    */
-  async function send(text?: string) {
+  async function send(text?: string, queuedImages?: Attachment[]) {
     const fromBox = text === undefined;
     const message = (text ?? input).trim();
-    if (!message) return;
-    const builtin = builtinCommand(message);
+    const images = fromBox ? attachments : (queuedImages ?? []);
+    if (!message && !images.length) return;
+    const builtin = images.length ? null : builtinCommand(message);
     if (builtin) {
       if (fromBox) setInput("");
       runBuiltin(builtin);
       return;
     }
     if (busy || following) {
-      if (!fromBox) return;
-      const next = enqueue(queue, message, newId());
-      if (!next) {
-        setError(`最多排队 ${QUEUE_LIMIT} 条消息`);
-        return;
-      }
-      setQueue(next);
-      setInput("");
-      cursor.current = NEW_CURSOR;
+      if (fromBox) queueBox(message, images);
       return;
     }
-    if (fromBox) setInput("");
+    if (fromBox) clearBox();
     setHalted(false);
     stale.current = false;
     // The question just asked is now the newest one `up` reaches, and the box
     // stops browsing: recall is per conversation, so `setHistory` here is the
     // one place the list grows from the operator's own typing.
-    setHistory((old) => remember(old, message));
+    if (message) setHistory((old) => remember(old, message));
     cursor.current = NEW_CURSOR;
     setError("");
     setNotice("");
     setHostOpen(false);
-    push({ key: nextKey(), kind: "user", text: message });
+    push({
+      key: nextKey(),
+      kind: "user",
+      text: message,
+      images: images.map((image) => ({ src: attachmentUrl(image) })),
+    });
     setBusy(true);
     setProgress(startProgress());
     // The running total stays on screen while the new question is answered: it
@@ -1171,6 +1338,7 @@ export function AiChat({
         body: JSON.stringify({
           conversationId,
           message,
+          images: images.map(({ mime, data }) => ({ mime, data })),
           root,
           autoRun,
           profileId: activeProfile,
@@ -1301,24 +1469,52 @@ export function AiChat({
   );
   const pending = pendingList.length;
   const running = busy || following;
+  const hasContent = input.trim().length > 0 || attachments.length > 0;
   const flush = flushDecision({ running, queued: queue.length, pending, halted });
 
   useEffect(() => {
     if (flush !== "send") return;
     const [next, ...rest] = queue;
     setQueue(rest);
-    void send(next.text);
+    void send(next.text, next.images);
   }, [flush, queue]);
 
   function sendQueuedNow(item: Queued) {
     setQueue((old) => removeQueued(old, item.id));
-    void send(item.text);
+    void send(item.text, item.images);
   }
 
   function editQueued(item: Queued) {
     setQueue((old) => removeQueued(old, item.id));
     setInput((old) => (old.trim() ? `${item.text}\n${old}` : item.text));
+    if (item.images?.length)
+      setAttachments((old) => [...old, ...item.images!].slice(0, MAX_IMAGES));
     inputRef.current?.focus();
+  }
+
+  /** Pictures from the picker, a paste or a drop; downscaled before upload. */
+  async function addImages(files: File[]) {
+    if (!files.length) return;
+    const room = MAX_IMAGES - attachments.length;
+    if (room <= 0) {
+      setError(`每条消息最多 ${MAX_IMAGES} 张图片`);
+      return;
+    }
+    if (files.length > room) setNotice(`每条消息最多 ${MAX_IMAGES} 张图片，多出的已忽略`);
+    setAttaching(true);
+    try {
+      const prepared: Attachment[] = [];
+      for (const file of files.slice(0, room)) {
+        try {
+          prepared.push(await prepareImage(file, newId()));
+        } catch (e) {
+          setError(workspaceError(e));
+        }
+      }
+      setAttachments((old) => [...old, ...prepared].slice(0, MAX_IMAGES));
+    } finally {
+      setAttaching(false);
+    }
   }
 
   const slash = slashDismissed ? null : slashQuery(input, caret);
@@ -1417,6 +1613,276 @@ export function AiChat({
   const primaryName =
     hostOptions.find((option) => option.id === machineId)?.name ?? `#${machineId}`;
   const selectedNames = hostNames(hosts, hostOptions, primaryName);
+
+  const renderEntry = (entry: Entry) => {
+    if (entry.kind === "steer")
+      return (
+        <div
+          key={entry.key}
+          className={`ai-row user steer${entry.pending ? " pending" : ""}`}
+          aria-label="运行中插话"
+        >
+          <div className="ai-bubble">
+            <span className="ai-steer-tag">
+              <MessageCircleReply size={12} />
+              {entry.pending ? "插话 · 等这一步完成后送达" : "插话"}
+            </span>
+            {entry.images?.length ? (
+              <ImageStrip images={entry.images} conversationId={conversationId} onOpen={setViewer} />
+            ) : null}
+            {entry.text}
+          </div>
+        </div>
+      );
+    if (entry.kind === "user")
+      return (
+        <div key={entry.key} className="ai-row user">
+          <div className="ai-bubble">
+            {entry.images?.length ? (
+              <ImageStrip images={entry.images} conversationId={conversationId} onOpen={setViewer} />
+            ) : null}
+            {entry.text}
+          </div>
+          <div className="ai-msg-actions">
+            <button
+              type="button"
+              title="复制提问"
+              aria-label="复制提问"
+              onClick={() => void copyEntry(entry.key, entry.text)}
+            >
+              {copied === entry.key ? <Check size={13} /> : <Copy size={13} />}
+            </button>
+            <button
+              type="button"
+              title="放回输入框修改后再问"
+              aria-label="编辑后重新提问"
+              onClick={() => editPrompt(entry.text)}
+            >
+              <PencilLine size={13} />
+            </button>
+          </div>
+        </div>
+      );
+    if (entry.kind === "assistant")
+      return (
+        <div key={entry.key} className="ai-row answer">
+          <div className="ai-answer">
+            <Markdown text={entry.text} />
+          </div>
+          {entry.text.trim() ? (
+            <div className="ai-msg-actions">
+              <button
+                type="button"
+                title="复制回答（Markdown）"
+                aria-label="复制回答"
+                onClick={() => void copyEntry(entry.key, entry.text)}
+              >
+                {copied === entry.key ? <Check size={13} /> : <Copy size={13} />}
+                {copied === entry.key ? "已复制" : "复制"}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      );
+    if (entry.kind === "error")
+      return (
+        <div key={entry.key} role="alert" className="yaws-alert-error">
+          {entry.text}
+        </div>
+      );
+    if (entry.kind === "tool") {
+      const Icon = TOOL_ICON[entry.tool.name] ?? Terminal;
+      const open = openTools[entry.key] ?? entry.tool.state === "error";
+      return (
+        <div key={entry.key} className="ai-tool">
+          <button
+            type="button"
+            className="ai-tool-head"
+            aria-expanded={open}
+            onClick={() =>
+              setOpenTools((old) => ({ ...old, [entry.key]: !open }))
+            }
+          >
+            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <Icon size={14} />
+            <span className="ai-tool-name">{entry.tool.detail || entry.tool.name}</span>
+            {entry.tool.host ? (
+              <span className="ai-tag host" title="执行的主机">
+                {entry.tool.host}
+              </span>
+            ) : null}
+            {entry.tool.readOnly ? (
+              <span className="ai-tag">只读</span>
+            ) : null}
+            <span className={`ai-tool-state ${entry.tool.state}`}>
+              {TOOL_STATE[entry.tool.state]}
+            </span>
+          </button>
+          {open && entry.tool.output ? (
+            <pre className="ai-tool-out">{entry.tool.output}</pre>
+          ) : null}
+        </div>
+      );
+    }
+    if (entry.kind === "thinking") {
+      // Open while it is the newest thing on screen, collapsed once the
+      // answer it produced starts to arrive.
+      const open =
+        openThinking[entry.key] ??
+        (busy && entry.key === ordered[ordered.length - 1]?.key);
+      return (
+        <div key={entry.key} className="ai-thinking">
+          <button
+            type="button"
+            className="ai-thinking-head"
+            aria-expanded={open}
+            onClick={() =>
+              setOpenThinking((old) => ({ ...old, [entry.key]: !open }))
+            }
+          >
+            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <Sparkles size={13} />
+            <span>思考过程</span>
+          </button>
+          {open ? (
+            <div className="ai-thinking-text">{entry.text}</div>
+          ) : null}
+        </div>
+      );
+    }
+    const { proposal } = entry;
+    const dismissed = proposal.status === "rejected";
+    return (
+      <section
+        key={entry.key}
+        data-proposal={proposal.id}
+        className={`ai-proposal${dismissed ? " muted" : ""}${focusedProposal === proposal.id ? " focused" : ""}`}
+      >
+        <div className="workspace-toolbar">
+          <strong className="min-w-0 flex-1 break-all text-sm">
+            {proposal.host ? (
+              <span className="ai-tag host">{proposal.host}</span>
+            ) : null}
+            {proposal.kind === "command" ? "执行命令" : proposal.path}
+          </strong>
+          {proposal.status === "pending" ? (
+            <>
+              <button
+                className="yaws-btn tool-text"
+                onClick={() => void decide(proposal, "reject")}
+              >
+                忽略
+              </button>
+              <button
+                className="yaws-btn-primary tool-text"
+                onClick={() => void decide(proposal, "apply")}
+              >
+                {proposal.kind === "file" ? <Check size={16} /> : <Play size={16} />}
+                {proposal.kind === "file" ? "应用修改" : "执行命令"}
+              </button>
+            </>
+          ) : proposal.status === "applied" && proposal.kind === "file" ? (
+            <>
+              <span className="ai-tag ok">已应用</span>
+              <button
+                className="yaws-btn tool-text"
+                onClick={() => void decide(proposal, "revert")}
+              >
+                <Undo2 size={16} />
+                撤销
+              </button>
+            </>
+          ) : (
+            <span className={`ai-tag ${proposal.status}`}>
+              {proposal.status === "applied"
+                ? "已执行"
+                : proposal.status === "reverted"
+                  ? "已还原"
+                  : proposal.status === "rejected"
+                    ? "已忽略"
+                    : proposal.status === "failed"
+                      ? "执行失败"
+                      : proposal.status}
+            </span>
+          )}
+        </div>
+        {proposal.summary ? (
+          <div className="ai-proposal-note">{proposal.summary}</div>
+        ) : null}
+        {proposal.status === "pending" && proposal.kind === "command" ? (
+          <div className="ai-proposal-note">
+            <AlertTriangle size={13} /> 需要你确认后才会在服务器上执行
+          </div>
+        ) : null}
+        <pre className="diff-view">
+          {proposal.kind === "command"
+            ? proposal.after
+            : diffLines(proposal.before, proposal.after).map((part, i) => (
+                <span
+                  key={i}
+                  className={
+                    part.added
+                      ? "diff-add"
+                      : part.removed
+                        ? "diff-remove"
+                        : ""
+                  }
+                >
+                  {part.value.split("\n").map((line, j, all) =>
+                    j === all.length - 1 && line === "" ? null : (
+                      <span key={j} className="diff-line">
+                        {part.added ? "+" : part.removed ? "-" : " "} {line}
+                        {"\n"}
+                      </span>
+                    ),
+                  )}
+                </span>
+              ))}
+        </pre>
+        {proposal.result?.output ? (
+          <pre className="command-output">{proposal.result.output}</pre>
+        ) : null}
+      </section>
+    );
+  };
+
+  // Steps of the turn that is still running stay unfolded so progress is
+  // visible; finished turns fold long runs of steps into one line.
+  const lastUser = ordered.reduce(
+    (found, entry, index) => (entry.kind === "user" ? index : found),
+    -1,
+  );
+  const liveKeys = new Set(
+    running ? ordered.slice(lastUser + 1).map((entry) => entry.key) : [],
+  );
+  const transcriptItems = groupSteps(ordered);
+
+  const renderGroup = (item: Extract<ReturnType<typeof groupSteps<Entry>>[number], { type: "group" }>) => {
+    const open = openGroups[item.key] ?? liveKeys.has(item.entries[0].key);
+    const summary = stepSummary(
+      item.entries.flatMap((entry) => (entry.kind === "tool" ? [entry.tool.state] : [])),
+    );
+    return (
+      <div key={item.key} className="ai-step-group">
+        <button
+          type="button"
+          className="ai-step-group-head"
+          aria-expanded={open}
+          onClick={() => setOpenGroups((old) => ({ ...old, [item.key]: !open }))}
+        >
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          <span>已执行 {summary.total} 个步骤</span>
+          {summary.running ? <span className="ai-tool-state running">{summary.running} 个进行中</span> : null}
+          {summary.awaiting ? <span className="ai-tool-state awaiting">{summary.awaiting} 个待确认</span> : null}
+          {summary.failed ? <span className="ai-tool-state error">{summary.failed} 个失败</span> : null}
+          {!summary.running && !summary.failed && !summary.awaiting ? (
+            <span className="ai-tool-state ok">全部完成</span>
+          ) : null}
+        </button>
+        {open ? <div className="ai-step-group-body">{item.entries.map(renderEntry)}</div> : null}
+      </div>
+    );
+  };
 
   return (
     <div
@@ -1753,213 +2219,9 @@ export function AiChat({
             </div>
           </div>
         )}
-        {ordered.map((entry) => {
-          if (entry.kind === "user")
-            return (
-              <div key={entry.key} className="ai-row user">
-                <div className="ai-bubble">{entry.text}</div>
-                <div className="ai-msg-actions">
-                  <button
-                    type="button"
-                    title="复制提问"
-                    aria-label="复制提问"
-                    onClick={() => void copyEntry(entry.key, entry.text)}
-                  >
-                    {copied === entry.key ? <Check size={13} /> : <Copy size={13} />}
-                  </button>
-                  <button
-                    type="button"
-                    title="放回输入框修改后再问"
-                    aria-label="编辑后重新提问"
-                    onClick={() => editPrompt(entry.text)}
-                  >
-                    <PencilLine size={13} />
-                  </button>
-                </div>
-              </div>
-            );
-          if (entry.kind === "assistant")
-            return (
-              <div key={entry.key} className="ai-row answer">
-                <div className="ai-answer">
-                  <Markdown text={entry.text} />
-                </div>
-                {entry.text.trim() ? (
-                  <div className="ai-msg-actions">
-                    <button
-                      type="button"
-                      title="复制回答（Markdown）"
-                      aria-label="复制回答"
-                      onClick={() => void copyEntry(entry.key, entry.text)}
-                    >
-                      {copied === entry.key ? <Check size={13} /> : <Copy size={13} />}
-                      {copied === entry.key ? "已复制" : "复制"}
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            );
-          if (entry.kind === "error")
-            return (
-              <div key={entry.key} role="alert" className="yaws-alert-error">
-                {entry.text}
-              </div>
-            );
-          if (entry.kind === "tool") {
-            const Icon = TOOL_ICON[entry.tool.name] ?? Terminal;
-            const open = openTools[entry.key] ?? entry.tool.state === "error";
-            return (
-              <div key={entry.key} className="ai-tool">
-                <button
-                  type="button"
-                  className="ai-tool-head"
-                  aria-expanded={open}
-                  onClick={() =>
-                    setOpenTools((old) => ({ ...old, [entry.key]: !open }))
-                  }
-                >
-                  {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  <Icon size={14} />
-                  <span className="ai-tool-name">{entry.tool.detail || entry.tool.name}</span>
-                  {entry.tool.host ? (
-                    <span className="ai-tag host" title="执行的主机">
-                      {entry.tool.host}
-                    </span>
-                  ) : null}
-                  {entry.tool.readOnly ? (
-                    <span className="ai-tag">只读</span>
-                  ) : null}
-                  <span className={`ai-tool-state ${entry.tool.state}`}>
-                    {TOOL_STATE[entry.tool.state]}
-                  </span>
-                </button>
-                {open && entry.tool.output ? (
-                  <pre className="ai-tool-out">{entry.tool.output}</pre>
-                ) : null}
-              </div>
-            );
-          }
-          if (entry.kind === "thinking") {
-            // Open while it is the newest thing on screen, collapsed once the
-            // answer it produced starts to arrive.
-            const open =
-              openThinking[entry.key] ??
-              (busy && entry.key === ordered[ordered.length - 1]?.key);
-            return (
-              <div key={entry.key} className="ai-thinking">
-                <button
-                  type="button"
-                  className="ai-thinking-head"
-                  aria-expanded={open}
-                  onClick={() =>
-                    setOpenThinking((old) => ({ ...old, [entry.key]: !open }))
-                  }
-                >
-                  {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  <Sparkles size={13} />
-                  <span>思考过程</span>
-                </button>
-                {open ? (
-                  <div className="ai-thinking-text">{entry.text}</div>
-                ) : null}
-              </div>
-            );
-          }
-          const { proposal } = entry;
-          const dismissed = proposal.status === "rejected";
-          return (
-            <section
-              key={entry.key}
-              data-proposal={proposal.id}
-              className={`ai-proposal${dismissed ? " muted" : ""}${focusedProposal === proposal.id ? " focused" : ""}`}
-            >
-              <div className="workspace-toolbar">
-                <strong className="min-w-0 flex-1 break-all text-sm">
-                  {proposal.host ? (
-                    <span className="ai-tag host">{proposal.host}</span>
-                  ) : null}
-                  {proposal.kind === "command" ? "执行命令" : proposal.path}
-                </strong>
-                {proposal.status === "pending" ? (
-                  <>
-                    <button
-                      className="yaws-btn tool-text"
-                      onClick={() => void decide(proposal, "reject")}
-                    >
-                      忽略
-                    </button>
-                    <button
-                      className="yaws-btn-primary tool-text"
-                      onClick={() => void decide(proposal, "apply")}
-                    >
-                      {proposal.kind === "file" ? <Check size={16} /> : <Play size={16} />}
-                      {proposal.kind === "file" ? "应用修改" : "执行命令"}
-                    </button>
-                  </>
-                ) : proposal.status === "applied" && proposal.kind === "file" ? (
-                  <>
-                    <span className="ai-tag ok">已应用</span>
-                    <button
-                      className="yaws-btn tool-text"
-                      onClick={() => void decide(proposal, "revert")}
-                    >
-                      <Undo2 size={16} />
-                      撤销
-                    </button>
-                  </>
-                ) : (
-                  <span className={`ai-tag ${proposal.status}`}>
-                    {proposal.status === "applied"
-                      ? "已执行"
-                      : proposal.status === "reverted"
-                        ? "已还原"
-                        : proposal.status === "rejected"
-                          ? "已忽略"
-                          : proposal.status === "failed"
-                            ? "执行失败"
-                            : proposal.status}
-                  </span>
-                )}
-              </div>
-              {proposal.summary ? (
-                <div className="ai-proposal-note">{proposal.summary}</div>
-              ) : null}
-              {proposal.status === "pending" && proposal.kind === "command" ? (
-                <div className="ai-proposal-note">
-                  <AlertTriangle size={13} /> 需要你确认后才会在服务器上执行
-                </div>
-              ) : null}
-              <pre className="diff-view">
-                {proposal.kind === "command"
-                  ? proposal.after
-                  : diffLines(proposal.before, proposal.after).map((part, i) => (
-                      <span
-                        key={i}
-                        className={
-                          part.added
-                            ? "diff-add"
-                            : part.removed
-                              ? "diff-remove"
-                              : ""
-                        }
-                      >
-                        {part.value.split("\n").map((line, j, all) =>
-                          j === all.length - 1 && line === "" ? null : (
-                            <span key={j} className="diff-line">
-                              {part.added ? "+" : part.removed ? "-" : " "} {line}
-                              {"\n"}
-                            </span>
-                          ),
-                        )}
-                      </span>
-                    ))}
-              </pre>
-              {proposal.result?.output ? (
-                <pre className="command-output">{proposal.result.output}</pre>
-              ) : null}
-            </section>
-          );
-        })}
+        {transcriptItems.map((item) =>
+          item.type === "group" ? renderGroup(item) : renderEntry(item.entry),
+        )}
         </div>
         {/* Only offered while the update stream is off: the operator scrolled
             back to read something and the newest tokens are below the fold. */}
@@ -2120,7 +2382,10 @@ export function AiChat({
             {queue.map((item) => (
               <li key={item.id} className="ai-queue-item">
                 <span className="ai-queue-text" title={item.text}>
-                  {item.text}
+                  {item.images?.length ? (
+                    <span className="ai-tag">图片 {item.images.length}</span>
+                  ) : null}{" "}
+                  {item.text || "（仅图片）"}
                 </span>
                 {!running ? (
                   <button
@@ -2154,10 +2419,25 @@ export function AiChat({
         </div>
       ) : null}
       <form
-        className="ai-chat-composer"
+        className={`ai-chat-composer${dragOver ? " drag" : ""}`}
         onSubmit={(e) => {
           e.preventDefault();
-          void send();
+          void (running ? steerBox() : send());
+        }}
+        onDragOver={(e) => {
+          if (!Array.from(e.dataTransfer.types).includes("Files")) return;
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false);
+        }}
+        onDrop={(e) => {
+          const files = imageFiles(e.dataTransfer.files);
+          setDragOver(false);
+          if (!files.length) return;
+          e.preventDefault();
+          void addImages(files);
         }}
       >
         <button
@@ -2302,7 +2582,57 @@ export function AiChat({
             ))}
           </div>
         ) : null}
+        {attachments.length || attaching ? (
+          <div className="ai-attachments" aria-label="待发送的图片">
+            {attachments.map((image) => (
+              <span key={image.id} className="ai-attachment">
+                <button
+                  type="button"
+                  className="ai-attachment-view"
+                  aria-label="查看图片"
+                  onClick={() => setViewer(attachmentUrl(image))}
+                >
+                  <img src={attachmentUrl(image)} alt="" />
+                </button>
+                <button
+                  type="button"
+                  className="ai-attachment-remove"
+                  title="移除图片"
+                  aria-label="移除图片"
+                  onClick={() =>
+                    setAttachments((old) => old.filter((item) => item.id !== image.id))
+                  }
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
+            {attaching ? <span className="ai-attachment loading">处理中…</span> : null}
+          </div>
+        ) : null}
         <div className="ai-chat-input">
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/*"
+            multiple
+            hidden
+            onChange={(e) => {
+              const files = imageFiles(e.target.files);
+              e.target.value = "";
+              void addImages(files);
+            }}
+          />
+          <button
+            type="button"
+            className="icon-btn ai-attach"
+            title={`添加图片（也可以粘贴或拖进来，最多 ${MAX_IMAGES} 张）`}
+            aria-label="添加图片"
+            disabled={attachments.length >= MAX_IMAGES || attaching}
+            onClick={() => fileInput.current?.click()}
+          >
+            <ImagePlus size={17} />
+          </button>
           {slashOpen ? (
             <ul className="ai-slash-menu" role="listbox" aria-label="命令">
               {slashMatches.map((command, index) => (
@@ -2353,6 +2683,12 @@ export function AiChat({
               cursor.current = { ...cursor.current, index: 0 };
             }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
+            onPaste={(e) => {
+              const files = imageFiles(e.clipboardData.items);
+              if (!files.length) return;
+              e.preventDefault();
+              void addImages(files);
+            }}
             onBlur={() => {
               explicitShift.current = false;
               if (mobile) repairViewportScroll();
@@ -2399,7 +2735,7 @@ export function AiChat({
               );
               if (action === "send") {
                 e.preventDefault();
-                void send();
+                void (running ? steerBox() : send());
                 return;
               }
               if (action === "newline") return;
@@ -2444,23 +2780,35 @@ export function AiChat({
               </button>
             ) : null}
             {running ? (
-              input.trim() ? (
-                <button
-                  className="yaws-btn-primary tool-text"
-                  type="submit"
-                  title="本轮结束后自动发送"
-                  aria-label="排队发送"
-                >
-                  <ListPlus size={16} />
-                  <span className="ai-btn-label">排队</span>
-                </button>
+              hasContent ? (
+                <>
+                  <button
+                    type="button"
+                    className="yaws-btn tool-text"
+                    title="等这一轮结束后再发送"
+                    aria-label="排队发送"
+                    onClick={() => void send()}
+                  >
+                    <ListPlus size={16} />
+                    <span className="ai-btn-label">排队</span>
+                  </button>
+                  <button
+                    className="yaws-btn-primary tool-text"
+                    type="submit"
+                    title="现在就告诉助手：它做完手头这一步就会读到"
+                    aria-label="插话"
+                  >
+                    <MessageCircleReply size={16} />
+                    <span className="ai-btn-label">插话</span>
+                  </button>
+                </>
               ) : null
             ) : (
               <button
                 className="yaws-btn-primary tool-text"
                 type="submit"
                 aria-label="发送"
-                disabled={!input.trim()}
+                disabled={!hasContent}
               >
                 <Send size={16} />
                 <span className="ai-btn-label">发送</span>
@@ -2474,7 +2822,7 @@ export function AiChat({
             : enterPref === "newline"
               ? "回车换行，Shift+回车 / Ctrl+回车发送。"
               : "回车发送，Shift+回车换行。"}
-          运行中也可以继续输入，消息会排队。危险命令（rm -rf、mkfs、改密码等）永远需要确认；凭据文件不会被读取。
+          运行中发送是“插话”（做完当前这一步就读到），也可以选“排队”等结束后再发；图片可以粘贴、拖入或点图片按钮添加。危险命令（rm -rf、mkfs、改密码等）永远需要确认；凭据文件不会被读取。
         </div>
         <button
           type="button"
@@ -2486,6 +2834,7 @@ export function AiChat({
           <Trash2 size={12} /> 删除这轮对话
         </button>
       </form>
+      {viewer ? <ImageViewer src={viewer} onClose={() => setViewer("")} /> : null}
     </div>
   );
 

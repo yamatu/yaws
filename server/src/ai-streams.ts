@@ -44,6 +44,16 @@ const RUN_KEEP_MAX = 64;
 
 type Listener = (event: Record<string, unknown>) => void;
 
+/** Messages one run accepts while it is working; more is a runaway client. */
+export const MAX_STEERS_PER_RUN = 20;
+
+/** A message the operator sent into a running turn. */
+export type SteerMessage = {
+  text: string;
+  images: Array<{ mime: string; data: string }>;
+  imageIds: string[];
+};
+
 export type DetachedRun = {
   runId: string;
   conversationId: string;
@@ -57,6 +67,11 @@ export type DetachedRun = {
   replay: Array<Record<string, unknown>>;
   listeners: Set<Listener>;
   aborters: Set<() => void>;
+  /** Steering messages waiting for the next model round. */
+  inbox: SteerMessage[];
+  /** Cleared the moment the run decides it is done, so nothing is accepted and then lost. */
+  steerable: boolean;
+  steered: number;
 };
 
 export class RunStreams {
@@ -77,6 +92,9 @@ export class RunStreams {
       replay: [],
       listeners: new Set(),
       aborters: new Set(),
+      inbox: [],
+      steerable: true,
+      steered: 0,
     };
     this.runs.set(run.runId, run);
     return run;
@@ -202,6 +220,29 @@ export class RunStreams {
       }
     }
     return true;
+  }
+
+  /** Whether a steering message would still reach the model. */
+  canSteer(run: DetachedRun): boolean {
+    return !run.finished && run.steerable && run.steered < MAX_STEERS_PER_RUN;
+  }
+
+  steer(run: DetachedRun, message: SteerMessage): boolean {
+    if (!this.canSteer(run)) return false;
+    run.inbox.push(message);
+    run.steered += 1;
+    return true;
+  }
+
+  /** Hands the waiting messages to the agent loop. */
+  takeSteers(run: DetachedRun): SteerMessage[] {
+    return run.inbox.splice(0);
+  }
+
+  /** Stops accepting messages; returns any the run never got to. */
+  closeSteers(run: DetachedRun): SteerMessage[] {
+    run.steerable = false;
+    return run.inbox.splice(0);
   }
 
   /** Drops the record; only safe once nobody can re-attach any more. */
