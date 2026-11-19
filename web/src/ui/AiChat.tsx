@@ -9,13 +9,17 @@ import {
   Cpu,
   FileCode2,
   FolderTree,
+  ListPlus,
   MessageSquarePlus,
   Pencil,
+  PencilLine,
   Play,
   Plus,
+  RotateCcw,
   Send,
   Server,
   Settings2,
+  SlidersHorizontal,
   Sparkles,
   Terminal,
   Trash2,
@@ -24,6 +28,33 @@ import {
 } from "lucide-react";
 import { diffLines } from "diff";
 import { apiFetch } from "./api";
+import { copyText } from "./clipboard";
+import {
+  ENTER_PREFERENCES,
+  MOBILE_INPUT_QUERY,
+  enterAction,
+  readEnterPreference,
+  writeEnterPreference,
+  type EnterPreference,
+} from "./promptEnter";
+import { draftKey, readDraft, writeDraft } from "./promptDrafts";
+import {
+  QUEUE_LIMIT,
+  enqueue,
+  flushDecision,
+  removeQueued,
+  type Queued,
+} from "./promptQueue";
+import {
+  BUILTIN_COMMANDS,
+  applyCommand,
+  builtinCommand,
+  matchCommands,
+  slashQuery,
+  type BuiltinCommand,
+  type SlashCommand,
+} from "./slashCommands";
+import { repairViewportScroll, useMediaQuery } from "./viewport";
 import {
   type Progress,
   acceptEvent,
@@ -257,10 +288,13 @@ export function AiChat({
   machineId,
   initialRoot,
   compact = false,
+  onClose,
 }: {
   machineId: number;
   initialRoot: string;
   compact?: boolean;
+  /** Shown as a close button in the header when the chat owns the whole screen. */
+  onClose?: () => void;
 }) {
   const [profiles, setProfiles] = useState<Draft[]>([]);
   const [activeProfile, setActiveProfile] = useState("");
@@ -269,7 +303,26 @@ export function AiChat({
   const [root, setRoot] = useState(initialRoot || "/");
   const [autoRun, setAutoRun] = useState<AutoRun>(storedAutoRun);
   const [entries, setEntries] = useState<Entry[]>([]);
-  const [input, setInput] = useState("");
+  // The unsent question survives a reload, a collapsed dock and a switch to
+  // another conversation; each conversation keeps its own.
+  const [input, setInput] = useState(() => readDraft(draftKey(machineId, "")));
+  const mobile = useMediaQuery(MOBILE_INPUT_QUERY);
+  const [enterPref, setEnterPref] = useState<EnterPreference>(readEnterPreference);
+  const explicitShift = useRef(false);
+  // Follow-ups typed while a turn is running go out one by one once it ends.
+  const [queue, setQueue] = useState<Queued[]>([]);
+  // The last turn was stopped or failed: queued questions wait for the operator.
+  const [halted, setHalted] = useState(false);
+  const [metaOpen, setMetaOpen] = useState(false);
+  const [commands, setCommands] = useState<SlashCommand[]>(BUILTIN_COMMANDS);
+  const commandsLoaded = useRef(false);
+  const [caret, setCaret] = useState(0);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const [copied, setCopied] = useState("");
+  // A stream was lost (background tab, flaky network): refresh from the server
+  // when the page is back instead of leaving a half-written answer.
+  const stale = useRef(false);
   /**
    * Questions this conversation was asked, newest last, plus where the arrow
    * keys currently sit in them. Unlike the transcript this is only about the
@@ -343,6 +396,9 @@ export function AiChat({
   }, []);
   const counter = useRef(0);
   const nextKey = () => `e${++counter.current}`;
+  // Read by listeners that outlive a render (page resume).
+  const live = useRef({ busy, following, conversationId });
+  live.current = { busy, following, conversationId };
 
   useEffect(() => setRoot(initialRoot || "/"), [initialRoot]);
 
@@ -468,7 +524,7 @@ export function AiChat({
         data.turns.map((turn) => turn.prompt).filter((text) => text.trim()),
       );
       cursor.current = NEW_CURSOR;
-      setInput("");
+      setInput(readDraft(draftKey(machineId, id)));
       setConversationId(id);
       // The stored total the server kept, so the usage line is complete the
       // moment a conversation is opened rather than after the next answer.
@@ -499,6 +555,9 @@ export function AiChat({
   const handleEvent = useCallback((event: Record<string, any>) => {
     setProgress((old) => acceptEvent(old, event));
     if (event.type === "start") {
+      // A new chat just got its id: whatever is typed now belongs to it, not
+      // to the next new chat.
+      if (!live.current.conversationId) writeDraft(draftKey(machineId, ""), "");
       setConversationId(event.conversationId);
       if (event.profile?.name || event.model)
         setSession({ name: event.profile?.name ?? "", model: event.model ?? "" });
@@ -574,6 +633,7 @@ export function AiChat({
         return [...copy, { key: nextKey(), kind: "assistant", text }];
       });
     } else if (event.type === "error") {
+      setHalted(true);
       setError(workspaceError(new Error(String(event.error ?? "请求失败"))));
     } else if (event.type === "note" && event.note === "answer_truncated") {
       // The model kept stopping at its own output cap and the automatic
@@ -623,8 +683,10 @@ export function AiChat({
       } catch (e) {
         // A dropped reconnect is not a failed run: the run keeps going and the
         // next mount attaches again. Only a real HTTP error is worth showing.
-        if (!ac.signal.aborted && workspaceError(e) !== "http_404")
-          setError(workspaceError(e));
+        if (!ac.signal.aborted) {
+          stale.current = true;
+          if (workspaceError(e) !== "http_404") setError(workspaceError(e));
+        }
       } finally {
         if (follower.current === ac) follower.current = null;
         setFollowing(false);
@@ -676,6 +738,10 @@ export function AiChat({
   const openConversation = useCallback(
     async (id: string) => {
       if (!id) return;
+      if (id !== live.current.conversationId) {
+        setQueue([]);
+        setHalted(false);
+      }
       try {
         const data = await apiFetch<{
           conversation: StoredConversation;
@@ -711,6 +777,50 @@ export function AiChat({
       cancelled = true;
     };
   }, [machineId, loadConversations, openConversation]);
+
+  // Phones kill background sockets. When the page is shown again (tab switch,
+  // unlock, network back) pick the run up again, or reload a transcript whose
+  // stream was cut, without touching what is typed in the box.
+  useEffect(() => {
+    let checking = false;
+    const resume = async () => {
+      if (document.visibilityState !== "visible" || checking) return;
+      const { busy: running, following: watching, conversationId: id } = live.current;
+      if (running || watching || !id) return;
+      checking = true;
+      try {
+        const data = await apiFetch<{
+          conversation: StoredConversation;
+          turns: ChatTurn[];
+          usage?: Usage;
+          liveRunId?: string;
+        }>(`/api/ai/conversations/${id}`);
+        const now = live.current;
+        if (now.busy || now.following || now.conversationId !== id) return;
+        if (!data.liveRunId && !stale.current) return;
+        stale.current = false;
+        setError("");
+        syncFollow(applyConversation(id, data), data.liveRunId ?? "");
+      } catch {
+        // still offline: the next resume tries again
+      } finally {
+        checking = false;
+      }
+    };
+    const onResume = () => void resume();
+    document.addEventListener("visibilitychange", onResume);
+    window.addEventListener("online", onResume);
+    window.addEventListener("pageshow", onResume);
+    return () => {
+      document.removeEventListener("visibilitychange", onResume);
+      window.removeEventListener("online", onResume);
+      window.removeEventListener("pageshow", onResume);
+    };
+  }, [applyConversation, syncFollow]);
+
+  useEffect(() => {
+    writeDraft(draftKey(machineId, conversationId), input);
+  }, [machineId, conversationId, input]);
 
   // Follow the transcript only while the operator is at the end of it. Steps
   // push the answer down from above, so jumping on every change is what made
@@ -794,6 +904,7 @@ export function AiChat({
   async function stopRun() {
     const runId = attached.current.runId;
     stopping.current = true;
+    setHalted(true);
     follower.current?.abort();
     controller.current?.abort();
     setFollowing(false);
@@ -824,6 +935,10 @@ export function AiChat({
     // just left.
     setHistory([]);
     cursor.current = NEW_CURSOR;
+    setInput(readDraft(draftKey(machineId, "")));
+    setQueue([]);
+    setHalted(false);
+    stale.current = false;
     setConversationId("");
     setError("");
     setNotice("");
@@ -976,6 +1091,7 @@ export function AiChat({
   async function removeConversation(id: string) {
     try {
       await apiFetch(`/api/ai/conversations/${id}`, { method: "DELETE" });
+      writeDraft(draftKey(machineId, id), "");
       setConversations((old) => old.filter((item) => item.id !== id));
       if (id === conversationId) newChat();
       setNotice("已删除对话");
@@ -984,18 +1100,43 @@ export function AiChat({
     }
   }
 
-  async function send() {
-    const message = input.trim();
-    // `busy` is this view's own run. `following` is a run that belongs to this
-    // conversation but is being watched rather than started here; asking again
-    // would be refused by the server (one conversation runs one turn at a
-    // time), so the refusal is shown instead of swallowing the question.
-    if (!message || busy) return;
-    if (following) {
-      setError("这个对话正在运行，请等它结束或先停止");
+  function runBuiltin(command: BuiltinCommand) {
+    if (command === "new") newChat();
+    else if (command === "settings") setSettings(true);
+    else if (busy || following) void stopRun();
+    else setNotice("当前没有正在运行的一轮");
+  }
+
+  /**
+   * Sends the box, or `text` when a queued follow-up goes out. While a turn is
+   * running (here or watched after a reload) the box is queued instead: one
+   * conversation runs one turn at a time on the server.
+   */
+  async function send(text?: string) {
+    const fromBox = text === undefined;
+    const message = (text ?? input).trim();
+    if (!message) return;
+    const builtin = builtinCommand(message);
+    if (builtin) {
+      if (fromBox) setInput("");
+      runBuiltin(builtin);
       return;
     }
-    setInput("");
+    if (busy || following) {
+      if (!fromBox) return;
+      const next = enqueue(queue, message, newId());
+      if (!next) {
+        setError(`最多排队 ${QUEUE_LIMIT} 条消息`);
+        return;
+      }
+      setQueue(next);
+      setInput("");
+      cursor.current = NEW_CURSOR;
+      return;
+    }
+    if (fromBox) setInput("");
+    setHalted(false);
+    stale.current = false;
     // The question just asked is now the newest one `up` reaches, and the box
     // stops browsing: recall is per conversation, so `setHistory` here is the
     // one place the list grows from the operator's own typing.
@@ -1059,6 +1200,8 @@ export function AiChat({
       void loadConversations();
     } catch (e) {
       const aborted = ac.signal.aborted || (e as Error)?.name === "AbortError";
+      setHalted(true);
+      if (!stopping.current) stale.current = true;
       // A stopped request no longer stops the run (the run is detached now), so
       // the wording must not claim it did.
       if (stopping.current) {
@@ -1157,6 +1300,108 @@ export function AiChat({
     [entries],
   );
   const pending = pendingList.length;
+  const running = busy || following;
+  const flush = flushDecision({ running, queued: queue.length, pending, halted });
+
+  useEffect(() => {
+    if (flush !== "send") return;
+    const [next, ...rest] = queue;
+    setQueue(rest);
+    void send(next.text);
+  }, [flush, queue]);
+
+  function sendQueuedNow(item: Queued) {
+    setQueue((old) => removeQueued(old, item.id));
+    void send(item.text);
+  }
+
+  function editQueued(item: Queued) {
+    setQueue((old) => removeQueued(old, item.id));
+    setInput((old) => (old.trim() ? `${item.text}\n${old}` : item.text));
+    inputRef.current?.focus();
+  }
+
+  const slash = slashDismissed ? null : slashQuery(input, caret);
+  const slashMatches = useMemo(
+    () => (slash === null ? [] : matchCommands(commands, slash)),
+    [commands, slash],
+  );
+  const slashOpen = slashMatches.length > 0;
+
+  useEffect(() => {
+    if (slash === null || commandsLoaded.current) return;
+    commandsLoaded.current = true;
+    void (async () => {
+      try {
+        const data = await apiFetch<{
+          prompts: Array<{ name: string; description?: string; packageName?: string }>;
+        }>("/api/ai/extensions");
+        setCommands([
+          ...BUILTIN_COMMANDS,
+          ...data.prompts.map((prompt) => ({
+            name: prompt.name,
+            description: prompt.description || "扩展提示模板",
+            source: "extension" as const,
+            packageName: prompt.packageName,
+          })),
+        ]);
+      } catch {
+        // built-in commands still work
+      }
+    })();
+  }, [slash]);
+
+  useEffect(() => setSlashIndex(0), [slash]);
+
+  function chooseCommand(command: SlashCommand) {
+    if (command.source === "builtin") {
+      setInput("");
+      runBuiltin(command.name as BuiltinCommand);
+      return;
+    }
+    const next = applyCommand(input, command.name);
+    setInput(next);
+    setCaret(next.length);
+    requestAnimationFrame(() => {
+      const node = inputRef.current;
+      if (!node) return;
+      node.focus();
+      node.setSelectionRange(next.length, next.length);
+    });
+  }
+
+  // The box grows with the question up to a cap, instead of a fixed height
+  // plus a drag handle that is unusable on a phone.
+  useEffect(() => {
+    const node = inputRef.current;
+    if (!node) return;
+    node.style.height = "auto";
+    node.style.height = `${Math.min(node.scrollHeight + 2, mobile ? 168 : 240)}px`;
+  }, [input, mobile]);
+
+  async function copyEntry(key: string, text: string) {
+    if (!(await copyText(text))) {
+      setError("复制失败，请手动选择文本");
+      return;
+    }
+    setCopied(key);
+    window.setTimeout(() => setCopied((old) => (old === key ? "" : old)), 1500);
+  }
+
+  function editPrompt(text: string) {
+    setInput(text);
+    cursor.current = NEW_CURSOR;
+    requestAnimationFrame(() => {
+      const node = inputRef.current;
+      if (!node) return;
+      node.focus();
+      node.setSelectionRange(text.length, text.length);
+    });
+  }
+
+  const lastPrompt = history.at(-1) ?? "";
+  const runLabel =
+    AUTO_RUN_MODES.find((mode) => mode.value === autoRun)?.label.replace(/（.*）/, "") ?? "";
   // The elapsed time freezes as soon as the stream is over.
   const elapsed = clock.current.start
     ? Math.max(0, (clock.current.end || Date.now()) - clock.current.start)
@@ -1174,7 +1419,9 @@ export function AiChat({
   const selectedNames = hostNames(hosts, hostOptions, primaryName);
 
   return (
-    <div className={`ai-chat${compact ? " compact" : ""}${settings ? " ai-settings-open" : ""}`}>
+    <div
+      className={`ai-chat${compact ? " compact" : ""}${settings ? " ai-settings-open" : ""}${mobile ? " touch" : ""}`}
+    >
       <div className="workspace-toolbar ai-chat-head">
         <Sparkles size={16} />
         <strong className="flex-1 min-w-0 truncate text-sm">AI 助手</strong>
@@ -1230,6 +1477,16 @@ export function AiChat({
         >
           <Settings2 size={17} />
         </button>
+        {onClose ? (
+          <button
+            className="icon-btn"
+            title="收起 AI 助手"
+            aria-label="收起 AI 助手"
+            onClick={onClose}
+          >
+            <X size={18} />
+          </button>
+        ) : null}
       </div>
       {settings && (
         <form
@@ -1501,6 +1758,24 @@ export function AiChat({
             return (
               <div key={entry.key} className="ai-row user">
                 <div className="ai-bubble">{entry.text}</div>
+                <div className="ai-msg-actions">
+                  <button
+                    type="button"
+                    title="复制提问"
+                    aria-label="复制提问"
+                    onClick={() => void copyEntry(entry.key, entry.text)}
+                  >
+                    {copied === entry.key ? <Check size={13} /> : <Copy size={13} />}
+                  </button>
+                  <button
+                    type="button"
+                    title="放回输入框修改后再问"
+                    aria-label="编辑后重新提问"
+                    onClick={() => editPrompt(entry.text)}
+                  >
+                    <PencilLine size={13} />
+                  </button>
+                </div>
               </div>
             );
           if (entry.kind === "assistant")
@@ -1509,6 +1784,19 @@ export function AiChat({
                 <div className="ai-answer">
                   <Markdown text={entry.text} />
                 </div>
+                {entry.text.trim() ? (
+                  <div className="ai-msg-actions">
+                    <button
+                      type="button"
+                      title="复制回答（Markdown）"
+                      aria-label="复制回答"
+                      onClick={() => void copyEntry(entry.key, entry.text)}
+                    >
+                      {copied === entry.key ? <Check size={13} /> : <Copy size={13} />}
+                      {copied === entry.key ? "已复制" : "复制"}
+                    </button>
+                  </div>
+                ) : null}
               </div>
             );
           if (entry.kind === "error")
@@ -1725,8 +2013,28 @@ export function AiChat({
         ) : null}
       </div>
       {error && (
-        <div role="alert" className="yaws-alert-error">
-          {error}
+        <div role="alert" className="yaws-alert-error ai-chat-error">
+          <span>{error}</span>
+          {!running && lastPrompt && error !== "已停止" ? (
+            <button
+              type="button"
+              className="ai-error-retry"
+              title={`重新发送：${lastPrompt}`}
+              onClick={() => void send(lastPrompt)}
+            >
+              <RotateCcw size={13} />
+              重试
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="ai-error-close"
+            title="关闭"
+            aria-label="关闭提示"
+            onClick={() => setError("")}
+          >
+            <X size={13} />
+          </button>
         </div>
       )}
       {notice && <div className="workspace-notice">{notice}</div>}
@@ -1796,6 +2104,55 @@ export function AiChat({
           ) : null}
         </div>
       ) : null}
+      {queue.length ? (
+        <div className="ai-queue" aria-label="排队中的消息">
+          <div className="ai-queue-head">
+            <ListPlus size={13} />
+            <span>
+              {flush === "hold"
+                ? halted
+                  ? "上一轮已停止或出错，排队消息暂不自动发送"
+                  : "处理完待确认操作后自动发送"
+                : `排队 ${queue.length} 条，本轮结束后依次发送`}
+            </span>
+          </div>
+          <ol className="ai-queue-list">
+            {queue.map((item) => (
+              <li key={item.id} className="ai-queue-item">
+                <span className="ai-queue-text" title={item.text}>
+                  {item.text}
+                </span>
+                {!running ? (
+                  <button
+                    type="button"
+                    title="立即发送"
+                    aria-label="立即发送"
+                    onClick={() => sendQueuedNow(item)}
+                  >
+                    <Send size={13} />
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  title="放回输入框编辑"
+                  aria-label="编辑"
+                  onClick={() => editQueued(item)}
+                >
+                  <PencilLine size={13} />
+                </button>
+                <button
+                  type="button"
+                  title="移除"
+                  aria-label="移除"
+                  onClick={() => setQueue((old) => removeQueued(old, item.id))}
+                >
+                  <X size={13} />
+                </button>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
       <form
         className="ai-chat-composer"
         onSubmit={(e) => {
@@ -1803,7 +2160,20 @@ export function AiChat({
           void send();
         }}
       >
-        <div className="ai-chat-meta">
+        <button
+          type="button"
+          className="ai-meta-toggle"
+          aria-expanded={metaOpen}
+          aria-controls="ai-chat-meta"
+          onClick={() => setMetaOpen((v) => !v)}
+        >
+          <SlidersHorizontal size={13} />
+          <span className="ai-meta-summary">
+            {root} · {runLabel} · {hostSummary(hosts, hostOptions.length || 1)}
+          </span>
+          {metaOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button>
+        <div id="ai-chat-meta" className={`ai-chat-meta${metaOpen ? " open" : ""}`}>
           <label className="ai-meta-root flex items-center gap-1">
             目录
             <input
@@ -1902,6 +2272,25 @@ export function AiChat({
               {session.model}
             </span>
           ) : null}
+          <label className="ai-meta-enter flex items-center gap-1">
+            回车键
+            <select
+              className="yaws-select"
+              aria-label="回车键行为"
+              value={enterPref}
+              onChange={(e) => {
+                const value = e.target.value as EnterPreference;
+                setEnterPref(value);
+                writeEnterPreference(value);
+              }}
+            >
+              {ENTER_PREFERENCES.map((pref) => (
+                <option key={pref.value} value={pref.value}>
+                  {pref.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
         {selectedNames.length > 1 ? (
           <div className="ai-host-chips" aria-label="本轮主机">
@@ -1914,25 +2303,106 @@ export function AiChat({
           </div>
         ) : null}
         <div className="ai-chat-input">
+          {slashOpen ? (
+            <ul className="ai-slash-menu" role="listbox" aria-label="命令">
+              {slashMatches.map((command, index) => (
+                <li key={`${command.source}-${command.name}`} role="presentation">
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={index === slashIndex}
+                    className={index === slashIndex ? "active" : ""}
+                    // Keep the focus (and the phone keyboard) in the box.
+                    onPointerDown={(e) => e.preventDefault()}
+                    onClick={() => chooseCommand(command)}
+                  >
+                    <span className="ai-slash-name">/{command.name}</span>
+                    <span className="ai-slash-desc">{command.description}</span>
+                    {command.packageName ? (
+                      <span className="ai-tag">{command.packageName}</span>
+                    ) : command.source === "builtin" ? (
+                      <span className="ai-tag">内置</span>
+                    ) : null}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
           <textarea
             className="yaws-input"
-            rows={compact ? 2 : 3}
+            rows={mobile ? 1 : compact ? 2 : 3}
             value={input}
             ref={inputRef}
-            placeholder="问点什么，例如：帮我看看 nginx 为什么 502    （↑ / ↓ 可翻回之前问过的问题）"
+            placeholder={
+              mobile
+                ? "问点什么… 输入 / 查看命令"
+                : "问点什么，例如：帮我看看 nginx 为什么 502    （↑ / ↓ 翻历史问题，/ 查看命令）"
+            }
             aria-label="问题"
+            enterKeyHint={
+              enterAction({ key: "Enter", shiftKey: false }, mobile, enterPref) === "send"
+                ? "send"
+                : "enter"
+            }
             onChange={(e) => {
               setInput(e.target.value);
+              setCaret(e.target.selectionStart ?? e.target.value.length);
+              setSlashDismissed(false);
               // Editing is not browsing: the recalled question becomes the
               // operator's own text, so `down` must not silently replace it.
               cursor.current = { ...cursor.current, index: 0 };
             }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
+            onBlur={() => {
+              explicitShift.current = false;
+              if (mobile) repairViewportScroll();
+            }}
+            onKeyUp={(e) => {
+              if (e.key === "Shift") explicitShift.current = false;
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (e.key === "Shift") {
+                explicitShift.current = true;
+                return;
+              }
+              if (slashOpen) {
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  const step = e.key === "ArrowDown" ? 1 : -1;
+                  setSlashIndex(
+                    (old) => (old + step + slashMatches.length) % slashMatches.length,
+                  );
+                  return;
+                }
+                if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+                  e.preventDefault();
+                  chooseCommand(slashMatches[slashIndex] ?? slashMatches[0]);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setSlashDismissed(true);
+                  return;
+                }
+              }
+              const action = enterAction(
+                {
+                  key: e.key,
+                  shiftKey: e.shiftKey,
+                  ctrlKey: e.ctrlKey,
+                  metaKey: e.metaKey,
+                  composing: e.nativeEvent.isComposing || e.keyCode === 229,
+                  explicitShift: explicitShift.current,
+                },
+                mobile,
+                enterPref,
+              );
+              if (action === "send") {
                 e.preventDefault();
                 void send();
                 return;
               }
+              if (action === "newline") return;
               if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
               if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
               // In a multi-line question the arrow keys first have to move the
@@ -1960,41 +2430,51 @@ export function AiChat({
               });
             }}
           />
-          {busy ? (
-            <button
-              type="button"
-              className="yaws-btn tool-text"
-              title="停止"
-              aria-label="停止"
-              onClick={() => void stopRun()}
-            >
-              <CircleStop size={16} />
-              停止
-            </button>
-          ) : following ? (
-            <button
-              type="button"
-              className="yaws-btn tool-text"
-              title="停止这一轮"
-              aria-label="停止"
-              onClick={() => void stopRun()}
-            >
-              <CircleStop size={16} />
-              停止
-            </button>
-          ) : (
-            <button
-              className="yaws-btn-primary tool-text"
-              type="submit"
-              disabled={!input.trim()}
-            >
-              <Send size={16} />
-              发送
-            </button>
-          )}
+          <div className="ai-chat-buttons">
+            {running ? (
+              <button
+                type="button"
+                className="yaws-btn tool-text ai-btn-stop"
+                title="停止这一轮"
+                aria-label="停止"
+                onClick={() => void stopRun()}
+              >
+                <CircleStop size={16} />
+                <span className="ai-btn-label">停止</span>
+              </button>
+            ) : null}
+            {running ? (
+              input.trim() ? (
+                <button
+                  className="yaws-btn-primary tool-text"
+                  type="submit"
+                  title="本轮结束后自动发送"
+                  aria-label="排队发送"
+                >
+                  <ListPlus size={16} />
+                  <span className="ai-btn-label">排队</span>
+                </button>
+              ) : null
+            ) : (
+              <button
+                className="yaws-btn-primary tool-text"
+                type="submit"
+                aria-label="发送"
+                disabled={!input.trim()}
+              >
+                <Send size={16} />
+                <span className="ai-btn-label">发送</span>
+              </button>
+            )}
+          </div>
         </div>
         <div className="ai-chat-hint">
-          危险命令（rm -rf、mkfs、改密码等）永远需要确认；凭据文件不会被读取。
+          {mobile && enterPref !== "send"
+            ? "回车换行，点按钮发送。"
+            : enterPref === "newline"
+              ? "回车换行，Shift+回车 / Ctrl+回车发送。"
+              : "回车发送，Shift+回车换行。"}
+          运行中也可以继续输入，消息会排队。危险命令（rm -rf、mkfs、改密码等）永远需要确认；凭据文件不会被读取。
         </div>
         <button
           type="button"
@@ -2013,6 +2493,7 @@ export function AiChat({
     if (!conversationId || !window.confirm("删除这轮对话记录？")) return;
     try {
       await apiFetch(`/api/ai/conversations/${conversationId}`, { method: "DELETE" });
+      writeDraft(draftKey(machineId, conversationId), "");
       newChat();
       void loadConversations();
     } catch (e) {

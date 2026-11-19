@@ -846,33 +846,45 @@ browserTest(
       await page.getByRole("button", { name: "确认并信任此指纹" }).click();
     }
     await expect(page.locator(".workspace-header")).toContainText("已连接");
-    // The assistant dock fits a phone screen without horizontal overflow and can
-    // still be dragged out of the way of the touch key bar.
+    // On a phone the assistant is a full-screen sheet, not a floating window:
+    // nothing to drag around the key bar, and no horizontal overflow.
     await page.getByRole("button", { name: "AI 助手", exact: true }).click();
-    await expect(page.locator(".ai-dock")).toBeVisible();
-    expect(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= innerWidth,
-      ),
-    ).toBe(true);
     const dock = page.locator(".ai-dock");
-    const phone = await dock.boundingBox();
-    await page.mouse.move(phone.x + 60, phone.y + 14);
-    await page.mouse.down();
-    await page.mouse.move(phone.x + 40, phone.y - 90, { steps: 8 });
-    await page.mouse.up();
-    const lifted = await dock.boundingBox();
-    expect(lifted.y).toBeLessThan(phone.y - 40);
-    expect(lifted.x + lifted.width).toBeLessThanOrEqual(390);
+    await expect(dock).toBeVisible();
+    await expect(dock).toHaveClass(/sheet/);
+    const sheet = await dock.boundingBox();
+    expect(Math.round(sheet.x)).toBe(0);
+    expect(Math.round(sheet.width)).toBe(390);
+    expect(sheet.height).toBeGreaterThan(800);
+    await expect(page.locator(".ai-dock-resize")).toHaveCount(0);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
+    // Directory, run mode and hosts fold behind one summary line.
+    await expect(dock.locator(".ai-chat-meta")).toBeHidden();
+    await dock.locator(".ai-meta-toggle").click();
+    await expect(dock.getByLabel("工作目录", { exact: true })).toBeVisible();
+    await expect(dock.getByLabel("回车键行为", { exact: true })).toHaveValue("auto");
+    await dock.locator(".ai-meta-toggle").click();
+    await expect(dock.locator(".ai-chat-meta")).toBeHidden();
+    // Enter writes a newline on a phone; 16px text keeps iOS from zooming in.
+    const box = dock.getByLabel("问题", { exact: true });
+    await box.fill("第一行");
+    await box.press("Enter");
+    await box.pressSequentially("第二行");
+    await expect(box).toHaveValue("第一行\n第二行");
+    expect(await box.evaluate((node) => getComputedStyle(node).fontSize)).toBe("16px");
     await page.screenshot({
       path: "test-results/ai-mobile.png",
       fullPage: true,
     });
+    // The unsent question survives closing and reopening the sheet.
+    await page.getByRole("button", { name: "收起 AI 助手", exact: true }).click();
+    await page.getByRole("button", { name: "AI 助手", exact: true }).click();
+    await expect(dock.getByLabel("问题", { exact: true })).toHaveValue("第一行\n第二行");
+    await dock.getByLabel("问题", { exact: true }).fill("");
     await page.getByRole("button", { name: "收起 AI 助手", exact: true }).click();
     // In the stacked layout the divider resizes the two panes vertically.
     await page.getByRole("tab", { name: "文件", exact: true }).click();
@@ -1083,6 +1095,20 @@ browserTest(
     );
     await expect(live).toContainText("已完成 · 用时");
     await expect(live).toHaveAttribute("data-tone", "ok");
+    // A follow-up typed while a turn is running is queued and goes out by
+    // itself once the turn ends.
+    await visible.getByLabel("问题").fill("[slow] 看一下内存");
+    await visible.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(live).toContainText("正在思考");
+    await visible.getByLabel("问题").fill("顺便看下负载");
+    await visible.getByRole("button", { name: "排队发送", exact: true }).click();
+    await expect(visible.locator(".ai-queue-item")).toContainText("顺便看下负载");
+    await expect(visible.getByLabel("问题")).toHaveValue("");
+    await expect(visible.locator(".ai-bubble").last()).toContainText("顺便看下负载", {
+      timeout: 20000,
+    });
+    await expect(visible.locator(".ai-queue")).toHaveCount(0);
+    await expect(live).toContainText("已完成 · 用时");
     // Cancelling is its own outcome, not a finished answer.
     await visible.getByLabel("问题").fill("[slow][run] 再看一次磁盘");
     await visible.getByRole("button", { name: "发送", exact: true }).click();

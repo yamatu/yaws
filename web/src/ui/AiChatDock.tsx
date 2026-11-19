@@ -10,6 +10,9 @@ import {
   viewportOf,
   type Box,
 } from "./dockBox";
+import { useMediaQuery, useVisibleArea } from "./viewport";
+
+const PHONE_QUERY = "(max-width: 760px)";
 
 function storedBox(): Box | null {
   try {
@@ -45,6 +48,10 @@ export function AiChatDock({
   const [drag, setDrag] = useState<"move" | "size" | "">("");
   const panel = useRef<HTMLElement | null>(null);
   const origin = useRef({ x: 0, y: 0, box: null as Box | null });
+  // A phone has no room for a floating window: the panel becomes a full-screen
+  // sheet that follows the visible area, so the keyboard never covers the input.
+  const phone = useMediaQuery(PHONE_QUERY);
+  const area = useVisibleArea(phone && open);
 
   const save = useCallback((next: Box | null) => {
     try {
@@ -128,6 +135,22 @@ export function AiChatDock({
         <Sparkles size={17} />
         AI 助手
       </button>
+    );
+
+  if (phone)
+    return (
+      <aside
+        className="ai-dock sheet"
+        aria-label="AI 助手"
+        style={area ? { top: area.top, height: area.height } : undefined}
+      >
+        <AiChat
+          machineId={machineId}
+          initialRoot={initialRoot}
+          compact
+          onClose={() => onToggle(false)}
+        />
+      </aside>
     );
 
   const start = (mode: "move" | "size") => (event: React.PointerEvent) => {

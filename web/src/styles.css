@@ -295,8 +295,12 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .ai-chip { padding: 6px 12px; border: 1px solid #3d4249; border-radius: 999px; background: #23272c; font-size: 12px; color: #d9e0e6; }
 .ai-chip:hover { border-color: #38bdf8; color: #7dd3fc; }
-.ai-row { display: flex; }
-.ai-row.user { justify-content: flex-end; }
+.ai-row { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.ai-row.user { align-items: flex-end; }
+.ai-msg-actions { display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
+.ai-row:hover .ai-msg-actions, .ai-row:focus-within .ai-msg-actions { opacity: 1; }
+.ai-msg-actions button { display: inline-flex; align-items: center; gap: 4px; min-width: 26px; height: 24px; padding: 0 6px; border: 0; border-radius: 5px; background: none; color: #7b848e; font-size: 11px; cursor: pointer; }
+.ai-msg-actions button:hover { background: #23272c; color: #7dd3fc; }
 /* The answer always closes a turn (see `orderTurnEntries`), so a hairline marks
    where the finished steps end and the reply begins. */
 .ai-chat-transcript > :not(.ai-row.answer) + .ai-row.answer { margin-top: 2px; padding-top: 9px; border-top: 1px dashed #2f353b; }
@@ -365,8 +369,28 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-host-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .ai-host-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; background: #1d2b38; color: #7dd3fc; font-size: 11px; }
 .ai-host-chip em { font-style: normal; padding: 0 3px; border-radius: 999px; background: #2c3238; color: #a8b2bd; font-size: 10px; }
-.ai-chat-input { display: flex; gap: 8px; align-items: flex-end; }
-.ai-chat-input textarea { flex: 1; resize: vertical; }
+.ai-chat-input { position: relative; display: flex; gap: 8px; align-items: flex-end; }
+.ai-chat-input textarea { flex: 1; min-height: 38px; resize: none; overflow-y: auto; line-height: 1.5; }
+.ai-chat-buttons { display: flex; flex: 0 0 auto; gap: 6px; }
+.ai-chat-error { display: flex; align-items: center; gap: 8px; }
+.ai-chat-error > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ai-error-retry, .ai-error-close { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid currentColor; border-radius: 6px; background: none; color: inherit; font-size: 12px; cursor: pointer; }
+.ai-error-close { padding: 3px 5px; border-color: transparent; }
+.ai-slash-menu { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 20; max-height: min(260px, 40dvh); overflow: auto; margin: 0; padding: 4px; list-style: none; border: 1px solid #3d4249; border-radius: 8px; background: #1b1f24; box-shadow: 0 -12px 28px rgba(0,0,0,.5); }
+.ai-slash-menu button { display: flex; width: 100%; align-items: center; gap: 8px; min-height: 34px; padding: 5px 8px; border: 0; border-radius: 5px; background: none; color: #cfd6de; font-size: 12px; text-align: left; cursor: pointer; }
+.ai-slash-menu button:hover, .ai-slash-menu button.active { background: #173840; }
+.ai-slash-name { flex: 0 0 auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #7dd3fc; }
+.ai-slash-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8d97a2; }
+.ai-queue { flex: 0 0 auto; padding: 6px 12px; border-top: 1px solid #2c3238; background: #171c21; font-size: 12px; }
+.ai-queue-head { display: flex; align-items: center; gap: 6px; color: #7dd3fc; }
+.ai-queue-list { display: grid; gap: 4px; max-height: 132px; overflow: auto; margin: 5px 0 0; padding: 0; list-style: none; }
+.ai-queue-item { display: flex; align-items: center; gap: 2px; padding: 3px 3px 3px 9px; border: 1px dashed #2b5a75; border-radius: 6px; color: #d9e0e6; }
+.ai-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-queue-item button { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 5px; background: none; color: #8d97a2; cursor: pointer; }
+.ai-queue-item button:hover { background: #23272c; color: #7dd3fc; }
+.ai-meta-toggle { display: none; align-items: center; gap: 6px; min-width: 0; padding: 4px 2px; border: 0; background: none; color: #8d97a2; font-size: 12px; text-align: left; cursor: pointer; }
+.ai-meta-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-meta-enter { display: none !important; }
 .ai-chat-hint { font-size: 11px; color: #7b848e; }
 .ai-chat-clear { justify-self: start; display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; color: #8d97a2; font-size: 11px; cursor: pointer; }
 .ai-chat-clear:hover { color: #fda4af; }
@@ -381,6 +405,54 @@ body.resizing { user-select: none; cursor: nwse-resize; }
 .ai-fab:hover { border-color: #38bdf8; background: #1b4a5a; }
 .ai-fab.lifted { bottom: calc(112px + env(safe-area-inset-bottom, 0px)); }
 .ai-fab:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+/* Phone: the dock is a full-screen sheet. `top`/`height` come from the visual
+   viewport in AiChatDock, so the composer stays above the on-screen keyboard. */
+.ai-dock.sheet { top: 0; right: 0; bottom: auto; left: 0; z-index: 70; width: 100%; height: 100dvh; border: 0; border-radius: 0; box-shadow: none; }
+.ai-dock.sheet .ai-chat-composer { padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
+.ai-chat button, .ai-fab { touch-action: manipulation; }
+/* Touch screens (phones and tablets): bigger targets, 16px text so iOS does
+   not zoom into the box, and controls that are hover-only on desktop shown. */
+@media (pointer: coarse), (max-width: 760px) {
+  .ai-meta-enter { display: flex !important; }
+  .ai-chat-input textarea { font-size: 16px; }
+  .ai-chat .ai-chat-meta .yaws-input, .ai-chat .ai-chat-meta .yaws-select { font-size: 16px; }
+  .ai-chat-input .yaws-btn-primary, .ai-chat-input .yaws-btn { min-width: 44px; min-height: 44px; padding: 0 12px; }
+  .ai-chat-head .icon-btn { width: 40px; height: 40px; flex-basis: 40px; }
+  .ai-tool-head, .ai-thinking-head { min-height: 40px; }
+  .ai-pending-toggle { min-height: 40px; }
+  .ai-pending-actions .tool-text, .ai-proposal .workspace-toolbar .tool-text { min-height: 36px; }
+  .ai-chat-jump { padding: 8px 14px; font-size: 13px; }
+  .ai-msg-actions { opacity: 1; }
+  .ai-msg-actions button { height: 30px; min-width: 32px; }
+  .ai-queue-item button { width: 36px; height: 36px; }
+  .ai-slash-menu button { min-height: 44px; }
+}
+@media (hover: none) {
+  .ai-conv-actions { opacity: 1; }
+  .ai-conv-actions .icon-btn, .ai-conv-confirm .icon-btn { width: 32px; height: 32px; }
+}
+@media (max-width: 760px) {
+  .ai-chat-head { gap: 6px; padding: 6px 8px; }
+  .ai-chat-head > svg, .ai-chat-head > strong { display: none; }
+  .ai-chat-head .ai-chat-profile { flex: 1 1 0; max-width: none; min-width: 0; }
+  .ai-chat-head .ai-conv { flex: 1 1 0; min-width: 0; }
+  .ai-chat-head .ai-conv-trigger { width: 100%; max-width: 100%; min-height: 36px; }
+  .ai-chat .ai-chat-composer { gap: 6px; padding: 6px 8px 8px; }
+  .ai-meta-toggle { display: flex; }
+  .ai-chat-meta:not(.open) { display: none; }
+  .ai-chat-meta.open { padding: 6px 0 2px; }
+  .ai-chat .ai-chat-meta label { flex: 1 1 100%; }
+  .ai-chat .ai-chat-meta .yaws-input, .ai-chat .ai-chat-meta .yaws-select { flex: 1; width: auto; min-width: 0; }
+  .ai-chat-hint, .ai-chat-clear { display: none; }
+  .ai-btn-label { display: none; }
+  .ai-usage { flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; padding: 3px 10px 5px; scrollbar-width: none; }
+  .ai-usage::-webkit-scrollbar { display: none; }
+  .ai-usage > * { flex: 0 0 auto; }
+  .ai-pending-list { max-height: 34dvh; }
+  .ai-bubble { max-width: 92%; }
+  .ai-answer { max-width: 100%; }
+  .ai-queue { padding: 5px 8px; }
+}
 .monitor-page { min-width: 0; }
 .monitor-form { display: grid; grid-template-columns: minmax(0,1.3fr) minmax(0,1fr) 100px auto; gap: 12px; align-items: end; padding-bottom: 22px; border-bottom: 1px solid #40464d; }
 .monitor-content { display: grid; grid-template-columns: 250px minmax(0,1fr); margin-top: 18px; gap: 20px; }
