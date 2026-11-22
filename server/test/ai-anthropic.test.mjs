@@ -563,6 +563,140 @@ test("anthropic endpoints", async (t) => {
     }
   });
 
+  await t.test("a profile served as the official Claude Code client", async () => {
+    // The operator can ask for the CLI's identity up front, for a relay that
+    // never says `claude_code_required` but quietly requires it. That covers
+    // everything the client sends: headers, betas, metadata, its own system
+    // prompt, and its tool names -- and the calls still resolve to yaws' tools.
+    const seen = [];
+    let round = 0;
+    const api = await relay(async (req, res) => {
+      const body = JSON.parse(await drain(req));
+      seen.push({ headers: req.headers, body });
+      round += 1;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(frame(started));
+      res.write(
+        (round === 1
+          ? [
+              frame({
+                type: "content_block_start",
+                index: 0,
+                content_block: { type: "tool_use", id: "toolu_1", name: "Read", input: {} },
+              }),
+              frame({
+                type: "content_block_delta",
+                index: 0,
+                delta: { type: "input_json_delta", partial_json: '{"path":"/srv/app/config.json"}' },
+              }),
+              frame({ type: "content_block_stop", index: 0 }),
+            ]
+          : textBlock("config.json 里 enabled 是 false。")
+        ).join(""),
+      );
+      res.write(stopped(round === 1 ? "tool_use" : "end_turn").join(""));
+      res.end();
+    });
+    t.after(() => api.server.close());
+    assert.equal(
+      (
+        await request(f, "/api/ai/settings", "PUT", {
+          ...settings(api.base),
+          claudeCode: true,
+        })
+      ).status,
+      200,
+    );
+    // The setting survives the round trip through the settings API.
+    const saved = await request(f, "/api/ai/settings");
+    assert.equal(saved.body.claudeCode, true);
+
+    const turn = await chat(f, { root: "/srv/app", message: "配置里是什么", autoRun: "read" });
+    assert.equal(turn.status, 200, turn.body);
+    assert.equal(turn.events.find((e) => e.type === "answer").text, "config.json 里 enabled 是 false。");
+    // One request, and the tool runs under yaws' name although the model was
+    // told the CLI's: the card names the file it read, so the call resolved.
+    assert.equal(seen.length, 2, turn.body);
+    const tool = turn.events.filter((e) => e.type === "tool").at(-1).tool;
+    assert.equal(tool.name, "read_file");
+    assert.equal(tool.detail, "/srv/app/config.json");
+    assert.equal(tool.state, "ok", turn.body);
+
+    const first = seen[0];
+    // The identity the client presents, on every request.
+    assert.match(first.headers["user-agent"], /^claude-cli\/\d+\.\d+\.\d+ \(external, cli\)$/);
+    assert.equal(first.headers["x-app"], "cli");
+    const session = first.headers["x-claude-code-session-id"];
+    assert.match(session ?? "", /^[0-9a-f-]{36}$/);
+    // The same conversation keeps its session, so the relay sees a session and
+    // not a new client on every round.
+    assert.equal(seen[1].headers["x-claude-code-session-id"], session);
+    const identity = JSON.parse(first.body.metadata.user_id);
+    assert.match(identity.device_id, /^[0-9a-f]{64}$/);
+    assert.equal(identity.session_id, session);
+    // The beta list the CLI asks for, next to whatever pi added. The SDK lifts
+    // it out of the body onto the header, which is where it has to be.
+    const betas = String(first.headers["anthropic-beta"] ?? "");
+    assert.ok(betas.includes("claude-code-20250219"), betas);
+    assert.ok(betas.includes("oauth-2025-04-20"), betas);
+    // Its system prompt, with this conversation's environment filled in, and
+    // none of yaws' own text left in `system`: that rides in the task instead.
+    assert.equal(first.body.system.length, 1, JSON.stringify(first.body.system).slice(0, 300));
+    assert.equal(first.body.system[0].type, "text");
+    assert.ok(first.body.system[0].text.startsWith("You are Claude Code, Anthropic's official CLI for Claude."));
+    assert.ok(first.body.system[0].text.includes("Primary working directory: /"));
+    assert.equal(
+      first.body.system.some((part) => part.text.includes("YAWS, a server operations assistant")),
+      false,
+    );
+    // The tools are declared under the CLI's names...
+    const names = first.body.tools.map((entry) => entry.name);
+    assert.ok(names.includes("Read"), names.join(","));
+    assert.ok(names.includes("Bash"), names.join(","));
+    assert.equal(names.includes("read_file"), false);
+    // ...and what the operator asked still travels as the task the CLI wraps.
+    const task = first.body.messages[0];
+    assert.equal(task.role, "user");
+    const taskText =
+      typeof task.content === "string"
+        ? task.content
+        : task.content.map((part) => part.text ?? "").join("");
+    assert.ok(taskText.startsWith("# Task\n\n"), taskText.slice(0, 200));
+    assert.ok(taskText.includes("YAWS, a server operations assistant"));
+    assert.ok(taskText.includes("配置里是什么"));
+    // The replayed call is the CLI's name too, which is what the API requires.
+    const replayed = seen[1].body.messages.flatMap((m) =>
+      Array.isArray(m.content) ? m.content.map((part) => part.name ?? part.type) : [],
+    );
+    assert.ok(replayed.includes("Read"), JSON.stringify(replayed));
+  });
+
+  await t.test("a relay that keeps refusing reports the provider error", async () => {
+    // Wrapped requests are sent wrapped; a gate that still refuses is not a
+    // reason to send a plain one, so exactly one request goes out.
+    let calls = 0;
+    const api = await relay((req, res) => {
+      calls += 1;
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({ error: { code: "claude_code_required", message: "still not Claude Code" } }),
+      );
+    });
+    t.after(() => api.server.close());
+    assert.equal(
+      (
+        await request(f, "/api/ai/settings", "PUT", {
+          ...settings(api.base),
+          claudeCode: true,
+        })
+      ).status,
+      200,
+    );
+    const turn = await chat(f, { root: "/srv/app", message: "磁盘怎么样", autoRun: "read" });
+    assert.equal(turn.events.find((e) => e.type === "error")?.error, "model_http_403");
+    assert.equal(calls, 2);
+  });
+
   await t.test("the old single-shot endpoint points at the chat page", async () => {
     const api = await relay(speak);
     t.after(() => api.server.close());

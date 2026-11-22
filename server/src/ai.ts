@@ -1058,6 +1058,7 @@ export function aiRouter(
           reasoning: "",
           protocol: "chat",
           allowPrivate: false,
+          claudeCode: false,
           hasKey: false,
           profileId: "",
           profileName: "",

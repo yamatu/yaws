@@ -1,4 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import type {
@@ -7,6 +9,18 @@ import type {
   Model,
   ThinkingLevel,
 } from "@earendil-works/pi-ai";
+import {
+  claudeCodeBetas,
+  claudeCodeBody,
+  claudeCodeHeaders,
+  claudeCodePrompt,
+  claudeCodeSystem,
+  claudeCodeToolName,
+  claudeCodeTools,
+  claudeCodeUserId,
+  restoreToolName,
+  type ClaudeCodeFacts,
+} from "./ai-claude-code.js";
 import type { AIConfig } from "./ai-profiles.js";
 import { officialModel, toContext } from "./ai-official.js";
 import { WorkspaceError } from "./ssh.js";
@@ -231,11 +245,10 @@ function repairStream(
 /**
  * Relays that resell a Claude Code subscription gate `/v1/messages` on the
  * identity Claude Code presents, and refuse everything else with a
- * `claude_code_required` error. The refusal names what is missing, so the
- * request is sent again carrying it. An endpoint that asked once is remembered
- * and later requests carry the identity from the start, which is why only the
- * first call pays for the extra round trip. Keyed by request URL, which holds
- * no secret: the key travels in a header.
+ * `claude_code_required` error. An endpoint that asked once is remembered, so
+ * later requests carry the identity from the start and only the first call
+ * pays for the extra round trip. Keyed by request URL, which holds no secret:
+ * the key travels in a header.
  */
 const claudeCodeRelays = new Set<string>();
 
@@ -243,26 +256,23 @@ const claudeCodeRelays = new Set<string>();
 const CLAUDE_CODE_REQUIRED = "claude_code_required";
 
 /**
- * The identity of the official client, read off the shipped one (2.1.286): its
- * `uw()` returns exactly `x-app`, `User-Agent` and `X-Claude-Code-Session-Id`,
- * and `qNe()` builds `metadata.user_id` out of a 64 hex `device_id` (its own
- * regexp insists on that shape), the account's uuid, and the very session uuid
- * the header carries. yaws sends values of its own under that shape -- a fixed
- * device id that hashes back to it, no account, one session per run -- rather
- * than claiming a real installation's identity or an account it does not have.
- * What such a relay checks is that the fields are present and well formed,
- * which is also what it must do to serve the real client.
+ * One session per conversation, the way the client has one per run of its own.
+ * The value is a uuid of yaws' making -- never an installation's identity --
+ * but it is stable for a conversation, which is what the header and
+ * `metadata.user_id` have to agree on.
  */
-const CLAUDE_CODE_HEADERS: Record<string, string> = {
-  "user-agent": "claude-cli/2.1.286 (external, cli)",
-  "x-app": "cli",
-};
-
-/** `device_id` is 64 hex characters in the client, so yaws uses 64 too. */
-const CLAUDE_CODE_DEVICE_ID = createHash("sha256").update("yaws").digest("hex");
-
-/** One session per run, the way the client has one session per conversation. */
-const CLAUDE_CODE_SESSION_ID = randomUUID();
+const claudeCodeSessions = new Map<string, string>();
+function claudeCodeSession(key: string): string {
+  const existing = claudeCodeSessions.get(key);
+  if (existing) return existing;
+  const session = randomUUID();
+  // Unbounded growth in a long-lived process would only cost memory; the cap
+  // is far above the number of conversations that run at once.
+  if (claudeCodeSessions.size >= 512)
+    claudeCodeSessions.delete(claudeCodeSessions.keys().next().value!);
+  claudeCodeSessions.set(key, session);
+  return session;
+}
 
 /**
  * Whether a refusal is that gate asking for an identity rather than a real
@@ -282,12 +292,19 @@ async function claudeCodeGate(response: Response) {
   return { gate: body.includes(CLAUDE_CODE_REQUIRED), response: refusal };
 }
 
-/** The same request, carrying the identity a Claude Code relay insists on. */
-function asClaudeCode(init?: RequestInit): RequestInit {
+/**
+ * The same request, carrying the identity a Claude Code relay insists on: the
+ * CLI's headers, its session in `X-Claude-Code-Session-Id`, and the
+ * `metadata.user_id` built around that same session. The body is only touched
+ * when it reaches the transport as a string, which is what the SDK sends.
+ */
+function asClaudeCode(
+  init: RequestInit | undefined,
+  session: string,
+): RequestInit {
   const headers = new Headers(init?.headers);
-  for (const [name, value] of Object.entries(CLAUDE_CODE_HEADERS))
+  for (const [name, value] of Object.entries(claudeCodeHeaders(session)))
     headers.set(name, value);
-  headers.set("x-claude-code-session-id", CLAUDE_CODE_SESSION_ID);
   let body = init?.body;
   if (typeof body === "string") {
     const params = parseJson(body) as Record<string, unknown> | null;
@@ -295,12 +312,7 @@ function asClaudeCode(init?: RequestInit): RequestInit {
       const sent = params.metadata;
       const metadata: Record<string, unknown> =
         sent && typeof sent === "object" ? { ...sent } : {};
-      if (!metadata.user_id)
-        metadata.user_id = JSON.stringify({
-          device_id: CLAUDE_CODE_DEVICE_ID,
-          account_uuid: "",
-          session_id: CLAUDE_CODE_SESSION_ID,
-        });
+      if (!metadata.user_id) metadata.user_id = claudeCodeUserId(session);
       body = JSON.stringify({ ...params, metadata });
       // The body changed length, so a stale header would break the request.
       headers.delete("content-length");
@@ -310,12 +322,75 @@ function asClaudeCode(init?: RequestInit): RequestInit {
 }
 
 /**
- * The `fetch` pi's Anthropic client goes through. Requests are untouched; the
- * reply is repaired so a relay cannot turn a working conversation into a parse
- * failure. A failing status is returned as it came, because the SDK already
- * turns those into an error carrying the status yaws reports.
+ * The environment the CLI would print in its prompt, read off this server and
+ * kept: a conversation asks the same question over many rounds, and `git` does
+ * not appear mid-turn.
  */
-function anthropicFetch(reply: AnthropicReply): typeof fetch {
+const claudeCodeEnvironments = new Map<string, ClaudeCodeFacts>();
+function claudeCodeEnvironment(cwd: string): ClaudeCodeFacts {
+  const cached = claudeCodeEnvironments.get(cwd);
+  if (cached) return cached;
+  let osVersion = `${process.platform} ${process.arch}`;
+  if (process.platform === "linux") {
+    try {
+      osVersion = `${readFileSync("/etc/os-release", "utf8")
+        .split(/\r?\n/)
+        .find((line) => line.startsWith("PRETTY_NAME="))
+        ?.slice("PRETTY_NAME=".length)
+        .replace(/^"|"$/g, "")} (${process.arch})`;
+    } catch {
+      // No os-release: the platform and arch already say enough.
+    }
+  } else if (process.platform === "win32") {
+    osVersion = `Windows (${process.arch})`;
+  } else if (process.platform === "darwin") {
+    osVersion = `MacOS (${process.arch})`;
+  }
+  const facts: ClaudeCodeFacts = {
+    cwd: cwd || "/",
+    git: existsSync(join(cwd || "/", ".git")),
+    platform: process.platform,
+    osVersion,
+  };
+  if (claudeCodeEnvironments.size >= 128) claudeCodeEnvironments.clear();
+  claudeCodeEnvironments.set(cwd, facts);
+  return facts;
+}
+
+/**
+ * How a request is reshaped into a CLI one, when the profile asks for it.
+ * `onPayload` runs before the SDK serializes the request, which is the only
+ * place the body can still be changed: the CLI's beta list is merged in, its
+ * tool names are used, yaws' instructions move into the first user message, and
+ * `system` carries the CLI's prompt and nothing else.
+ */
+function claudeCodePayload(
+  facts: ClaudeCodeFacts,
+): (payload: unknown) => Record<string, unknown> {
+  return (payload) => {
+    const params = (payload ?? {}) as Record<string, unknown>;
+    const body = claudeCodeBody(params);
+    if (Array.isArray(params.tools)) body.tools = claudeCodeTools(params.tools);
+    body.betas = claudeCodeBetas(params.betas);
+    // The CLI's prompt is the whole of what it sends as `system`; the
+    // operator's instructions now travel in the first user message.
+    body.system = claudeCodeSystem(facts);
+    return body;
+  };
+}
+
+/**
+ * The `fetch` pi's Anthropic client goes through. Requests are untouched
+ * unless the endpoint has asked for the CLI's identity; the reply is repaired
+ * so a relay cannot turn a working conversation into a parse failure. A
+ * failing status is returned as it came, because the SDK already turns those
+ * into an error carrying the status yaws reports.
+ */
+function anthropicFetch(
+  reply: AnthropicReply,
+  session: string,
+  disguise: boolean,
+): typeof fetch {
   const send = async (input: RequestInfo | URL, init?: RequestInit) => {
     const response = await fetch(input, init);
     if (!response.ok || !response.body) return response;
@@ -342,14 +417,17 @@ function anthropicFetch(reply: AnthropicReply): typeof fetch {
         : input.url;
   return async (input, init) => {
     const endpoint = endpointOf(input);
+    // Either the operator asked for this endpoint to be served as the CLI, or
+    // it refused a plain request before and is remembered for it.
+    const identity = disguise || claudeCodeRelays.has(endpoint);
     const response = await send(
       input,
-      claudeCodeRelays.has(endpoint) ? asClaudeCode(init) : init,
+      identity ? asClaudeCode(init, session) : init,
     );
     const refusal = await claudeCodeGate(response);
     if (!refusal.gate) return refusal.response;
     claudeCodeRelays.add(endpoint);
-    return send(input, asClaudeCode(init));
+    return send(input, asClaudeCode(init, session));
   };
 }
 
@@ -467,8 +545,36 @@ export async function streamAnthropic(
   )
     throw new WorkspaceError(400, "model_http_400");
   const model = anthropicModel(config);
-  const context = toContext(body, model);
+  let context = toContext(body, model);
   const reply: AnthropicReply = { frames: 0, empty: true, error: false };
+  // Served as the CLI, the tools travel under its names. Renaming here, on the
+  // context the adapter reads, is what makes the adapter itself emit the CLI's
+  // casing; the calls it returns are mapped back below before any of them run.
+  const served = config.claudeCode;
+  const declared = (context.tools ?? []).map((tool) => tool.name);
+  // Calls are mapped back to a yaws tool as they are announced, so the name on
+  // the card is the one the call runs under and a two-call turn cannot have
+  // one call's arguments decide the other's name.
+  const restored = new Map<string, string>();
+  if (served) {
+    context = {
+      ...context,
+      tools: (context.tools ?? []).map((tool) => ({
+        ...tool,
+        name: claudeCodeToolName(tool.name),
+      })),
+    };
+    if (context.tools?.length) {
+      context.systemPrompt = [
+        context.systemPrompt,
+        "",
+        `Tools available in this session: ${context.tools.map((tool) => tool.name).join(", ")}.`,
+      ]
+        .join("\n")
+        .trim();
+    }
+  }
+  const session = claudeCodeSession(config.baseUrl);
   let message: AssistantMessage | null = null;
   const events = anthropicMessagesApi().streamSimple(
     model,
@@ -476,7 +582,10 @@ export async function streamAnthropic(
     {
       apiKey: config.apiKey,
       signal,
-      fetch: anthropicFetch(reply),
+      fetch: anthropicFetch(reply, session, served),
+      ...(served
+        ? { onPayload: claudeCodePayload(claudeCodeEnvironment(String(body.root ?? ""))) }
+        : {}),
       ...(config.reasoning
         ? { reasoning: config.reasoning as ThinkingLevel }
         : {}),
@@ -492,12 +601,11 @@ export async function streamAnthropic(
         break;
       case "toolcall_start": {
         const part = event.partial.content[event.contentIndex];
-        if (part?.type === "toolCall")
-          onDelta({
-            type: "toolcall",
-            index: event.contentIndex,
-            name: part.name,
-          });
+        if (part?.type === "toolCall") {
+          const name = restoreToolName(part.name, declared, part.arguments ?? {});
+          restored.set(`${part.id}\u0000${part.name}`, name);
+          onDelta({ type: "toolcall", index: event.contentIndex, name });
+        }
         break;
       }
       case "done":
@@ -526,7 +634,12 @@ export async function streamAnthropic(
       .filter((part) => part.type === "toolCall")
       .map((part) => ({
         id: part.id,
-        name: part.name,
+        // A wrapped request declares the CLI's tool names, so the model answers
+        // with those; `restoreToolName` hands back the one yaws declared so
+        // the call resolves to exactly one tool before anything runs.
+        name: restored.get(
+          `${part.id}\u0000${part.name}`,
+        ) ?? restoreToolName(part.name, declared, part.arguments ?? {}),
         arguments: JSON.stringify(part.arguments ?? {}),
       })),
     usage,

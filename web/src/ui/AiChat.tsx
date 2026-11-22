@@ -117,6 +117,12 @@ type Profile = {
   reasoning: string;
   speed: string;
   allowPrivate: boolean;
+  /**
+   * Serve the Messages protocol as the official Claude Code client (its
+   * headers, beta list, tool names and system prompt) instead of as yaws.
+   * Meant for relays that resell a Claude Code subscription.
+   */
+  claudeCode?: boolean;
   hasKey?: boolean;
   officialProvider?: string;
 };
@@ -219,6 +225,7 @@ function blankDraft(): Draft {
     reasoning: "",
     speed: "",
     allowPrivate: false,
+    claudeCode: false,
     officialProvider: "",
     apiKey: "",
     dropKey: false,
@@ -2153,6 +2160,29 @@ export function AiChat({
                 />
                 允许内网 / HTTP 接口
               </label>}
+              {!current.officialProvider && current.protocol === "anthropic" && (
+                <>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={!!current.claudeCode}
+                      onChange={(e) =>
+                        patch(current.id, { claudeCode: e.target.checked })
+                      }
+                    />
+                    伪装成 Claude Code 客户端
+                  </label>
+                  <p className="ai-profile-note">
+                    打开后请求会带上官方客户端的身份：
+                    <code>user-agent: claude-cli/…</code>、<code>x-app: cli</code>、
+                    <code>X-Claude-Code-Session-Id</code>、
+                    <code>anthropic-beta</code>（含 <code>claude-code-20250219</code>）、
+                    <code>metadata.user_id</code>，系统提示词换成客户端那段（后面接本对话的运行环境），
+                    工具名也换成它的写法（执行前会换回来）。
+                    用于只给 Claude Code 订阅通道开门的中转站；直接连官方接口时不必打开。
+                  </p>
+                </>
+              )}
               {current.officialProvider && <p className="ai-profile-keynote">
                 官方账号授权 · {current.officialProvider}；地址与协议由 pi 固定，不能修改。
                 退出登录请在上方「登录官方模型」中操作。

@@ -43,6 +43,13 @@ export const AIConfigSchema = z.object({
     .default(""),
   apiKey: z.string().max(4096).default(""),
   allowPrivate: z.boolean().default(false),
+  /**
+   * Serve the Anthropic protocol as the official Claude Code client instead of
+   * as yaws: its identity headers, beta list and a real CLI system prompt (see
+   * `claudeCodeBody` in `ai-anthropic.ts`). Relays that resell a Claude Code
+   * subscription gate on that; a plain Messages API everywhere else.
+   */
+  claudeCode: z.boolean().default(false),
   /** Empty for custom API keys; official providers use pi's native transport. */
   officialProvider: z.string().max(40).default(""),
 });
@@ -200,6 +207,7 @@ export function publicProfiles(profiles: AIProfile[], activeId: string) {
       reasoning: p.reasoning,
       speed: p.speed,
       allowPrivate: p.allowPrivate,
+      claudeCode: p.claudeCode,
       officialProvider: p.officialProvider,
       hasKey: !!p.apiKey,
     })),
