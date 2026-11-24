@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 import {
   parseMarkdown,
@@ -7,6 +7,7 @@ import {
   type Inline,
   type ListItem,
 } from "./markdown";
+import { stableBoundary } from "./markdownChunks";
 import { copyText } from "./clipboard";
 
 /**
@@ -231,8 +232,49 @@ function BlockRun({ blocks }: { blocks: Block[] }) {
   );
 }
 
-export const Markdown = memo(function Markdown({ text }: { text: string }) {
-  const blocks = useMemo(() => parseMarkdown(text), [text]);
-  if (!blocks.length) return null;
+/**
+ * One stretch of an answer that will never change again.
+ *
+ * Memoised on its blocks: while the rest of the answer is still streaming, the
+ * chunks above it are the same element with the same data and React skips them
+ * instead of rebuilding the whole reply on every token.
+ */
+const Chunk = memo(function Chunk({ blocks }: { blocks: Block[] }) {
   return <BlockRun blocks={blocks} />;
+});
+
+/** What has been frozen so far for one growing answer. */
+type Frozen = { source: string; boundary: number; chunks: ReactNode[] };
+
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
+  const cache = useRef<Frozen>({ source: "", boundary: 0, chunks: [] });
+  // Only the tail is parsed again on the next token; the frozen part is parsed
+  // once, no matter how long the answer gets (see `markdownChunks`).
+  const nodes = useMemo(() => {
+    const state = cache.current;
+    // A replaced answer (an edit, a replay after a reconnect) is not an append:
+    // the old chunks do not describe any part of it, so they are dropped.
+    let boundary = state.boundary;
+    let chunks = state.chunks;
+    if (!text.startsWith(state.source)) {
+      boundary = 0;
+      chunks = [];
+    }
+    const next = stableBoundary(text, boundary);
+    if (next > boundary) {
+      const blocks = parseMarkdown(text.slice(boundary, next));
+      if (blocks.length)
+        chunks = [...chunks, <Chunk key={`c${boundary}`} blocks={blocks} />];
+      boundary = next;
+    }
+    cache.current = { source: text, boundary, chunks };
+    const tail = parseMarkdown(text.slice(boundary));
+    return (
+      <>
+        {chunks}
+        {tail.length ? <Chunk blocks={tail} /> : null}
+      </>
+    );
+  }, [text]);
+  return <>{nodes}</>;
 });

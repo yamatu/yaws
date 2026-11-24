@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -81,6 +81,7 @@ import { ConversationPicker } from "./ConversationPicker";
 import { McpSettings } from "./McpSettings";
 import { ExtensionSettings } from "./ExtensionSettings";
 import { Markdown } from "./MarkdownView";
+import { type StreamBatch, createStreamBatch } from "./streamBatch";
 import { orderTurnEntries } from "./chatOrder";
 import { cacheStats, formatTokens } from "./aiUsage";
 import type { Usage } from "./aiUsage";
@@ -315,6 +316,269 @@ const TOOL_STATE: Record<Tool["state"], string> = {
   awaiting: "等待确认",
 };
 
+/** What a transcript row may ask the chat to do. Held in one object that only
+ *  changes when a handler does, so an unchanged row can skip re-rendering. */
+type RowActions = {
+  copy: (key: string, text: string) => void;
+  edit: (text: string) => void;
+  openImage: (url: string) => void;
+  toggle: (key: string, open: boolean, thinking: boolean) => void;
+  decide: (proposal: Proposal, action: "apply" | "revert" | "reject") => void;
+};
+type RowContext = { conversationId: string; actions: RowActions };
+
+/**
+ * One entry of the transcript.
+ *
+ * Memoised on the entry itself: a long conversation used to be rebuilt from its
+ * first message on every streamed token, which is what made the page crawl while
+ * an answer was being written. Now only the row whose own data changed
+ * re-renders; every other row is skipped because React sees the same entry
+ * object, the same flags and the same handlers as last time.
+ */
+const Row = memo(function Row({
+  entry,
+  ctx,
+  copied,
+  focused,
+  open,
+}: {
+  entry: Entry;
+  ctx: RowContext;
+  /** This row's copy button just succeeded. */
+  copied: boolean;
+  /** This approval card is the one that was just scrolled to. */
+  focused: boolean;
+  /** A tool card or a thinking block is unfolded. */
+  open: boolean;
+}) {
+  if (entry.kind === "steer")
+    return (
+      <div
+        className={`ai-row user steer${entry.pending ? " pending" : ""}`}
+        aria-label="运行中插话"
+      >
+        <div className="ai-bubble">
+          <span className="ai-steer-tag">
+            <MessageCircleReply size={12} />
+            {entry.pending ? "插话 · 等这一步完成后送达" : "插话"}
+          </span>
+          {entry.images?.length ? (
+            <ImageStrip
+              images={entry.images}
+              conversationId={ctx.conversationId}
+              onOpen={ctx.actions.openImage}
+            />
+          ) : null}
+          {entry.text}
+        </div>
+      </div>
+    );
+  if (entry.kind === "user")
+    return (
+      <div className="ai-row user">
+        <div className="ai-bubble">
+          {entry.images?.length ? (
+            <ImageStrip
+              images={entry.images}
+              conversationId={ctx.conversationId}
+              onOpen={ctx.actions.openImage}
+            />
+          ) : null}
+          {entry.text}
+        </div>
+        <div className="ai-msg-actions">
+          <button
+            type="button"
+            title="复制提问"
+            aria-label="复制提问"
+            onClick={() => ctx.actions.copy(entry.key, entry.text)}
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+          </button>
+          <button
+            type="button"
+            title="放回输入框修改后再问"
+            aria-label="编辑后重新提问"
+            onClick={() => ctx.actions.edit(entry.text)}
+          >
+            <PencilLine size={13} />
+          </button>
+        </div>
+      </div>
+    );
+  if (entry.kind === "assistant")
+    return (
+      <div className="ai-row answer">
+        <div className="ai-answer">
+          <Markdown text={entry.text} />
+        </div>
+        {entry.text.trim() ? (
+          <div className="ai-msg-actions">
+            <button
+              type="button"
+              title="复制回答（Markdown）"
+              aria-label="复制回答"
+              onClick={() => ctx.actions.copy(entry.key, entry.text)}
+            >
+              {copied ? <Check size={13} /> : <Copy size={13} />}
+              {copied ? "已复制" : "复制"}
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
+  if (entry.kind === "error")
+    return (
+      <div role="alert" className="yaws-alert-error">
+        {entry.text}
+      </div>
+    );
+  if (entry.kind === "tool") {
+    const Icon = TOOL_ICON[entry.tool.name] ?? Terminal;
+    return (
+      <div className="ai-tool">
+        <button
+          type="button"
+          className="ai-tool-head"
+          aria-expanded={open}
+          onClick={() => ctx.actions.toggle(entry.key, open, false)}
+        >
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          <Icon size={14} />
+          <span className="ai-tool-name">{entry.tool.detail || entry.tool.name}</span>
+          {entry.tool.host ? (
+            <span className="ai-tag host" title="执行的主机">
+              {entry.tool.host}
+            </span>
+          ) : null}
+          {entry.tool.readOnly ? (
+            <span className="ai-tag">只读</span>
+          ) : null}
+          <span className={`ai-tool-state ${entry.tool.state}`}>
+            {TOOL_STATE[entry.tool.state]}
+          </span>
+        </button>
+        {open && entry.tool.output ? (
+          <pre className="ai-tool-out">{entry.tool.output}</pre>
+        ) : null}
+      </div>
+    );
+  }
+  if (entry.kind === "thinking") {
+    return (
+      <div className="ai-thinking">
+        <button
+          type="button"
+          className="ai-thinking-head"
+          aria-expanded={open}
+          onClick={() => ctx.actions.toggle(entry.key, open, true)}
+        >
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          <Sparkles size={13} />
+          <span>思考过程</span>
+        </button>
+        {open ? (
+          <div className="ai-thinking-text">{entry.text}</div>
+        ) : null}
+      </div>
+    );
+  }
+  const { proposal } = entry;
+  const dismissed = proposal.status === "rejected";
+  return (
+    <section
+      data-proposal={proposal.id}
+      className={`ai-proposal${dismissed ? " muted" : ""}${focused ? " focused" : ""}`}
+    >
+      <div className="workspace-toolbar">
+        <strong className="min-w-0 flex-1 break-all text-sm">
+          {proposal.host ? (
+            <span className="ai-tag host">{proposal.host}</span>
+          ) : null}
+          {proposal.kind === "command" ? "执行命令" : proposal.path}
+        </strong>
+        {proposal.status === "pending" ? (
+          <>
+            <button
+              className="yaws-btn tool-text"
+              onClick={() => ctx.actions.decide(proposal, "reject")}
+            >
+              忽略
+            </button>
+            <button
+              className="yaws-btn-primary tool-text"
+              onClick={() => ctx.actions.decide(proposal, "apply")}
+            >
+              {proposal.kind === "file" ? <Check size={16} /> : <Play size={16} />}
+              {proposal.kind === "file" ? "应用修改" : "执行命令"}
+            </button>
+          </>
+        ) : proposal.status === "applied" && proposal.kind === "file" ? (
+          <>
+            <span className="ai-tag ok">已应用</span>
+            <button
+              className="yaws-btn tool-text"
+              onClick={() => ctx.actions.decide(proposal, "revert")}
+            >
+              <Undo2 size={16} />
+              撤销
+            </button>
+          </>
+        ) : (
+          <span className={`ai-tag ${proposal.status}`}>
+            {proposal.status === "applied"
+              ? "已执行"
+              : proposal.status === "reverted"
+                ? "已还原"
+                : proposal.status === "rejected"
+                  ? "已忽略"
+                  : proposal.status === "failed"
+                    ? "执行失败"
+                    : proposal.status}
+          </span>
+        )}
+      </div>
+      {proposal.summary ? (
+        <div className="ai-proposal-note">{proposal.summary}</div>
+      ) : null}
+      {proposal.status === "pending" && proposal.kind === "command" ? (
+        <div className="ai-proposal-note">
+          <AlertTriangle size={13} /> 需要你确认后才会在服务器上执行
+        </div>
+      ) : null}
+      <pre className="diff-view">
+        {proposal.kind === "command"
+          ? proposal.after
+          : diffLines(proposal.before, proposal.after).map((part, i) => (
+              <span
+                key={i}
+                className={
+                  part.added
+                    ? "diff-add"
+                    : part.removed
+                      ? "diff-remove"
+                      : ""
+                }
+              >
+                {part.value.split("\n").map((line, j, all) =>
+                  j === all.length - 1 && line === "" ? null : (
+                    <span key={j} className="diff-line">
+                      {part.added ? "+" : part.removed ? "-" : " "} {line}
+                      {"\n"}
+                    </span>
+                  ),
+                )}
+              </span>
+            ))}
+      </pre>
+      {proposal.result?.output ? (
+        <pre className="command-output">{proposal.result.output}</pre>
+      ) : null}
+    </section>
+  );
+});
+
 export function AiChat({
   machineId,
   initialRoot,
@@ -436,6 +700,41 @@ export function AiChat({
   }, []);
   const counter = useRef(0);
   const nextKey = () => `e${++counter.current}`;
+  /**
+   * Streamed text is applied once per animation frame instead of once per
+   * frame that arrives (see `streamBatch`). A provider can send ten times more
+   * deltas per second than the screen can show, and re-rendering the transcript
+   * for each of them is what made a long answer lock the page up.
+   */
+  const stream = useRef<StreamBatch | null>(null);
+  if (!stream.current)
+    stream.current = createStreamBatch((answer, thinking) => {
+      if (thinking)
+        setEntries((old) => {
+          const copy = old.slice();
+          const last = copy[copy.length - 1];
+          if (last?.kind === "thinking") {
+            copy[copy.length - 1] = { ...last, text: last.text + thinking };
+            return copy;
+          }
+          return [...copy, { key: nextKey(), kind: "thinking", text: thinking }];
+        });
+      if (answer)
+        setEntries((old) => {
+          const copy = old.slice();
+          for (let i = copy.length - 1; i >= 0; i--) {
+            const entry = copy[i];
+            if (entry.kind === "user") break;
+            if (entry.kind === "assistant") {
+              copy[i] = { ...entry, text: entry.text + answer };
+              return copy;
+            }
+          }
+          return [...copy, { key: nextKey(), kind: "assistant", text: answer }];
+        });
+    });
+  // A frame that is still scheduled when the chat goes away must not apply.
+  useEffect(() => () => stream.current?.cancel(), []);
   // Read by listeners that outlive a render (page resume).
   const live = useRef({ busy, following, conversationId });
   live.current = { busy, following, conversationId };
@@ -543,6 +842,9 @@ export function AiChat({
         usage?: Usage;
       },
     ) => {
+      // The transcript is replaced wholesale: text buffered for the previous one
+      // must not land in the new one.
+      stream.current?.cancel();
       const restored: Entry[] = [];
       for (const turn of data.turns) {
         restored.push({
@@ -615,6 +917,11 @@ export function AiChat({
    * answer exactly the way the original request did.
    */
   const handleEvent = useCallback((event: Record<string, any>) => {
+    // A step, the final answer or the end of the run must see the text that
+    // arrived before it, so anything still buffered is applied first. The two
+    // text channels are the only ones that are batched.
+    if (event.type !== "delta" && event.type !== "thinking")
+      stream.current?.flush();
     setProgress((old) => acceptEvent(old, event));
     if (event.type === "start") {
       // A new chat just got its id: whatever is typed now belongs to it, not
@@ -654,17 +961,7 @@ export function AiChat({
     } else if (event.type === "thinking") {
       // Reasoning streams on its own channel: it is shown apart from the answer
       // so a model that thinks out loud cannot be mistaken for a reply.
-      const text = String(event.text ?? "");
-      if (text)
-        setEntries((old) => {
-          const copy = old.slice();
-          const last = copy[copy.length - 1];
-          if (last?.kind === "thinking") {
-            copy[copy.length - 1] = { ...last, text: last.text + text };
-            return copy;
-          }
-          return [...copy, { key: nextKey(), kind: "thinking", text }];
-        });
+      stream.current?.thinking(String(event.text ?? ""));
     } else if (event.type === "steer") {
       // The model has the message now. It was shown when it was sent; a replay
       // after a reload or a message from another tab is added here.
@@ -717,18 +1014,7 @@ export function AiChat({
     } else if (event.type === "usage") {
       setUsage(event.usage as Usage);
     } else if (event.type === "delta") {
-      setEntries((old) => {
-        const copy = old.slice();
-        for (let i = copy.length - 1; i >= 0; i--) {
-          const entry = copy[i];
-          if (entry.kind === "user") break;
-          if (entry.kind === "assistant") {
-            copy[i] = { ...entry, text: entry.text + String(event.text) };
-            return copy;
-          }
-        }
-        return [...copy, { key: nextKey(), kind: "assistant", text: String(event.text) }];
-      });
+      stream.current?.answer(String(event.text));
     } else if (event.type === "answer") {
       const text = String(event.text ?? "");
       setEntries((old) => {
@@ -787,7 +1073,11 @@ export function AiChat({
         await readFrames(response, (event) => {
           // The server closes the stream when the run ends; `stream_end` is only
           // the control frame that says so, and it is not a frame of the run.
-          if (event.type === "stream_end") return;
+          if (event.type === "stream_end") {
+            // The run is over: paint whatever arrived with the closing frame.
+            stream.current?.flush();
+            return;
+          }
           attached.current.frames += 1;
           handleEvent(event);
         });
@@ -799,6 +1089,7 @@ export function AiChat({
           if (workspaceError(e) !== "http_404") setError(workspaceError(e));
         }
       } finally {
+        stream.current?.flush();
         if (follower.current === ac) follower.current = null;
         setFollowing(false);
         clock.current.end = clock.current.end || Date.now();
@@ -1395,6 +1686,9 @@ export function AiChat({
           /^http_5/.test(workspaceError(e)));
       if (runId && offline) void followRun(runId, attached.current.frames);
     } finally {
+      // Nothing may still be buffered once the run is reported as over: the
+      // last tokens belong to the answer the operator is reading.
+      stream.current?.flush();
       // The run clock stops here: the status line keeps the final duration.
       clock.current.end = clock.current.end || Date.now();
       setBusy(false);
@@ -1402,60 +1696,7 @@ export function AiChat({
     }
   }
 
-  async function decide(proposal: Proposal, action: "apply" | "revert" | "reject") {
-    // The card knows which server it belongs to; the conversation root is only
-    // a fallback for cards written before the multi-host assistant existed.
-    const where = proposal.host ? `主机 ${proposal.host} 上` : "服务器上";
-    const confirmText =
-      action === "apply"
-        ? proposal.kind === "command"
-          ? `在${where}的目录 ${proposal.path || root} 执行以下命令？\n\n${proposal.after}`
-          : `写入${where}的 ${proposal.path}？修改前的版本会自动备份。`
-        : action === "revert"
-          ? `撤销对${where} ${proposal.path} 的修改？`
-          : `忽略这条待确认操作？`;
-    if (!window.confirm(confirmText)) return;
-    setError("");
-    setNotice("");
-    try {
-      if (action === "reject") {
-        await apiFetch(
-          `/api/ai/machines/${machineId}/proposals/${proposal.id}/reject`,
-          { method: "POST", body: JSON.stringify({ confirm: true }) },
-        );
-        updateProposal({ ...proposal, status: "rejected" });
-        setNotice("已忽略该操作");
-        return;
-      }
-      const data = await apiFetch<{
-        result: {
-          output?: string;
-          code?: number | null;
-          backup?: string | null;
-          revision?: string;
-        };
-      }>(
-        `/api/ai/machines/${machineId}/proposals/${proposal.id}/${action}`,
-        { method: "POST", body: JSON.stringify({ confirm: true }) },
-      );
-      updateProposal({
-        ...proposal,
-        status: action === "apply" ? "applied" : "reverted",
-        result: data.result ?? null,
-      });
-      setNotice(
-        action === "revert"
-          ? `已还原 ${proposal.path}`
-          : proposal.kind === "command"
-            ? `命令执行完成（退出码 ${data.result?.code ?? "未知"}）`
-            : `已保存 ${proposal.path}${data.result?.backup ? ` · 备份 ${data.result.backup}` : ""}`,
-      );
-    } catch (e) {
-      setError(workspaceError(e));
-    }
-  }
-
-  function updateProposal(proposal: Proposal) {
+  const updateProposal = useCallback((proposal: Proposal) => {
     setEntries((old) =>
       old.map((entry) =>
         entry.kind === "proposal" && entry.proposal.id === proposal.id
@@ -1463,7 +1704,63 @@ export function AiChat({
           : entry,
       ),
     );
-  }
+  }, []);
+
+  const decide = useCallback(
+    async (proposal: Proposal, action: "apply" | "revert" | "reject") => {
+      // The card knows which server it belongs to; the conversation root is only
+      // a fallback for cards written before the multi-host assistant existed.
+      const where = proposal.host ? `主机 ${proposal.host} 上` : "服务器上";
+      const confirmText =
+        action === "apply"
+          ? proposal.kind === "command"
+            ? `在${where}的目录 ${proposal.path || root} 执行以下命令？\n\n${proposal.after}`
+            : `写入${where}的 ${proposal.path}？修改前的版本会自动备份。`
+          : action === "revert"
+            ? `撤销对${where} ${proposal.path} 的修改？`
+            : `忽略这条待确认操作？`;
+      if (!window.confirm(confirmText)) return;
+      setError("");
+      setNotice("");
+      try {
+        if (action === "reject") {
+          await apiFetch(
+            `/api/ai/machines/${machineId}/proposals/${proposal.id}/reject`,
+            { method: "POST", body: JSON.stringify({ confirm: true }) },
+          );
+          updateProposal({ ...proposal, status: "rejected" });
+          setNotice("已忽略该操作");
+          return;
+        }
+        const data = await apiFetch<{
+          result: {
+            output?: string;
+            code?: number | null;
+            backup?: string | null;
+            revision?: string;
+          };
+        }>(
+          `/api/ai/machines/${machineId}/proposals/${proposal.id}/${action}`,
+          { method: "POST", body: JSON.stringify({ confirm: true }) },
+        );
+        updateProposal({
+          ...proposal,
+          status: action === "apply" ? "applied" : "reverted",
+          result: data.result ?? null,
+        });
+        setNotice(
+          action === "revert"
+            ? `已还原 ${proposal.path}`
+            : proposal.kind === "command"
+              ? `命令执行完成（退出码 ${data.result?.code ?? "未知"}）`
+              : `已保存 ${proposal.path}${data.result?.backup ? ` · 备份 ${data.result.backup}` : ""}`,
+        );
+      } catch (e) {
+        setError(workspaceError(e));
+      }
+    },
+    [machineId, root, updateProposal],
+  );
 
   const pendingList = useMemo(
     () =>
@@ -1582,16 +1879,16 @@ export function AiChat({
     node.style.height = `${Math.min(node.scrollHeight + 2, mobile ? 168 : 240)}px`;
   }, [input, mobile]);
 
-  async function copyEntry(key: string, text: string) {
+  const copyEntry = useCallback(async (key: string, text: string) => {
     if (!(await copyText(text))) {
       setError("复制失败，请手动选择文本");
       return;
     }
     setCopied(key);
     window.setTimeout(() => setCopied((old) => (old === key ? "" : old)), 1500);
-  }
+  }, []);
 
-  function editPrompt(text: string) {
+  const editPrompt = useCallback((text: string) => {
     setInput(text);
     cursor.current = NEW_CURSOR;
     requestAnimationFrame(() => {
@@ -1600,7 +1897,16 @@ export function AiChat({
       node.focus();
       node.setSelectionRange(text.length, text.length);
     });
-  }
+  }, []);
+
+  /** Folds or unfolds one tool card or thinking block. */
+  const toggleRow = useCallback(
+    (key: string, open: boolean, thinking: boolean) => {
+      const set = thinking ? setOpenThinking : setOpenTools;
+      set((old) => ({ ...old, [key]: !open }));
+    },
+    [],
+  );
 
   const lastPrompt = history.at(-1) ?? "";
   const runLabel =
@@ -1621,238 +1927,6 @@ export function AiChat({
     hostOptions.find((option) => option.id === machineId)?.name ?? `#${machineId}`;
   const selectedNames = hostNames(hosts, hostOptions, primaryName);
 
-  const renderEntry = (entry: Entry) => {
-    if (entry.kind === "steer")
-      return (
-        <div
-          key={entry.key}
-          className={`ai-row user steer${entry.pending ? " pending" : ""}`}
-          aria-label="运行中插话"
-        >
-          <div className="ai-bubble">
-            <span className="ai-steer-tag">
-              <MessageCircleReply size={12} />
-              {entry.pending ? "插话 · 等这一步完成后送达" : "插话"}
-            </span>
-            {entry.images?.length ? (
-              <ImageStrip images={entry.images} conversationId={conversationId} onOpen={setViewer} />
-            ) : null}
-            {entry.text}
-          </div>
-        </div>
-      );
-    if (entry.kind === "user")
-      return (
-        <div key={entry.key} className="ai-row user">
-          <div className="ai-bubble">
-            {entry.images?.length ? (
-              <ImageStrip images={entry.images} conversationId={conversationId} onOpen={setViewer} />
-            ) : null}
-            {entry.text}
-          </div>
-          <div className="ai-msg-actions">
-            <button
-              type="button"
-              title="复制提问"
-              aria-label="复制提问"
-              onClick={() => void copyEntry(entry.key, entry.text)}
-            >
-              {copied === entry.key ? <Check size={13} /> : <Copy size={13} />}
-            </button>
-            <button
-              type="button"
-              title="放回输入框修改后再问"
-              aria-label="编辑后重新提问"
-              onClick={() => editPrompt(entry.text)}
-            >
-              <PencilLine size={13} />
-            </button>
-          </div>
-        </div>
-      );
-    if (entry.kind === "assistant")
-      return (
-        <div key={entry.key} className="ai-row answer">
-          <div className="ai-answer">
-            <Markdown text={entry.text} />
-          </div>
-          {entry.text.trim() ? (
-            <div className="ai-msg-actions">
-              <button
-                type="button"
-                title="复制回答（Markdown）"
-                aria-label="复制回答"
-                onClick={() => void copyEntry(entry.key, entry.text)}
-              >
-                {copied === entry.key ? <Check size={13} /> : <Copy size={13} />}
-                {copied === entry.key ? "已复制" : "复制"}
-              </button>
-            </div>
-          ) : null}
-        </div>
-      );
-    if (entry.kind === "error")
-      return (
-        <div key={entry.key} role="alert" className="yaws-alert-error">
-          {entry.text}
-        </div>
-      );
-    if (entry.kind === "tool") {
-      const Icon = TOOL_ICON[entry.tool.name] ?? Terminal;
-      const open = openTools[entry.key] ?? entry.tool.state === "error";
-      return (
-        <div key={entry.key} className="ai-tool">
-          <button
-            type="button"
-            className="ai-tool-head"
-            aria-expanded={open}
-            onClick={() =>
-              setOpenTools((old) => ({ ...old, [entry.key]: !open }))
-            }
-          >
-            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            <Icon size={14} />
-            <span className="ai-tool-name">{entry.tool.detail || entry.tool.name}</span>
-            {entry.tool.host ? (
-              <span className="ai-tag host" title="执行的主机">
-                {entry.tool.host}
-              </span>
-            ) : null}
-            {entry.tool.readOnly ? (
-              <span className="ai-tag">只读</span>
-            ) : null}
-            <span className={`ai-tool-state ${entry.tool.state}`}>
-              {TOOL_STATE[entry.tool.state]}
-            </span>
-          </button>
-          {open && entry.tool.output ? (
-            <pre className="ai-tool-out">{entry.tool.output}</pre>
-          ) : null}
-        </div>
-      );
-    }
-    if (entry.kind === "thinking") {
-      // Open while it is the newest thing on screen, collapsed once the
-      // answer it produced starts to arrive.
-      const open =
-        openThinking[entry.key] ??
-        (busy && entry.key === ordered[ordered.length - 1]?.key);
-      return (
-        <div key={entry.key} className="ai-thinking">
-          <button
-            type="button"
-            className="ai-thinking-head"
-            aria-expanded={open}
-            onClick={() =>
-              setOpenThinking((old) => ({ ...old, [entry.key]: !open }))
-            }
-          >
-            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            <Sparkles size={13} />
-            <span>思考过程</span>
-          </button>
-          {open ? (
-            <div className="ai-thinking-text">{entry.text}</div>
-          ) : null}
-        </div>
-      );
-    }
-    const { proposal } = entry;
-    const dismissed = proposal.status === "rejected";
-    return (
-      <section
-        key={entry.key}
-        data-proposal={proposal.id}
-        className={`ai-proposal${dismissed ? " muted" : ""}${focusedProposal === proposal.id ? " focused" : ""}`}
-      >
-        <div className="workspace-toolbar">
-          <strong className="min-w-0 flex-1 break-all text-sm">
-            {proposal.host ? (
-              <span className="ai-tag host">{proposal.host}</span>
-            ) : null}
-            {proposal.kind === "command" ? "执行命令" : proposal.path}
-          </strong>
-          {proposal.status === "pending" ? (
-            <>
-              <button
-                className="yaws-btn tool-text"
-                onClick={() => void decide(proposal, "reject")}
-              >
-                忽略
-              </button>
-              <button
-                className="yaws-btn-primary tool-text"
-                onClick={() => void decide(proposal, "apply")}
-              >
-                {proposal.kind === "file" ? <Check size={16} /> : <Play size={16} />}
-                {proposal.kind === "file" ? "应用修改" : "执行命令"}
-              </button>
-            </>
-          ) : proposal.status === "applied" && proposal.kind === "file" ? (
-            <>
-              <span className="ai-tag ok">已应用</span>
-              <button
-                className="yaws-btn tool-text"
-                onClick={() => void decide(proposal, "revert")}
-              >
-                <Undo2 size={16} />
-                撤销
-              </button>
-            </>
-          ) : (
-            <span className={`ai-tag ${proposal.status}`}>
-              {proposal.status === "applied"
-                ? "已执行"
-                : proposal.status === "reverted"
-                  ? "已还原"
-                  : proposal.status === "rejected"
-                    ? "已忽略"
-                    : proposal.status === "failed"
-                      ? "执行失败"
-                      : proposal.status}
-            </span>
-          )}
-        </div>
-        {proposal.summary ? (
-          <div className="ai-proposal-note">{proposal.summary}</div>
-        ) : null}
-        {proposal.status === "pending" && proposal.kind === "command" ? (
-          <div className="ai-proposal-note">
-            <AlertTriangle size={13} /> 需要你确认后才会在服务器上执行
-          </div>
-        ) : null}
-        <pre className="diff-view">
-          {proposal.kind === "command"
-            ? proposal.after
-            : diffLines(proposal.before, proposal.after).map((part, i) => (
-                <span
-                  key={i}
-                  className={
-                    part.added
-                      ? "diff-add"
-                      : part.removed
-                        ? "diff-remove"
-                        : ""
-                  }
-                >
-                  {part.value.split("\n").map((line, j, all) =>
-                    j === all.length - 1 && line === "" ? null : (
-                      <span key={j} className="diff-line">
-                        {part.added ? "+" : part.removed ? "-" : " "} {line}
-                        {"\n"}
-                      </span>
-                    ),
-                  )}
-                </span>
-              ))}
-        </pre>
-        {proposal.result?.output ? (
-          <pre className="command-output">{proposal.result.output}</pre>
-        ) : null}
-      </section>
-    );
-  };
-
   // Steps of the turn that is still running stay unfolded so progress is
   // visible; finished turns fold long runs of steps into one line.
   const lastUser = ordered.reduce(
@@ -1862,9 +1936,47 @@ export function AiChat({
   const liveKeys = new Set(
     running ? ordered.slice(lastUser + 1).map((entry) => entry.key) : [],
   );
-  const transcriptItems = groupSteps(ordered);
+  const transcriptItems = useMemo(() => groupSteps(ordered), [ordered]);
+  // Everything a row may call, in one object that only changes when a handler
+  // does. Together with the memoised `Row` this is what keeps a reply that is
+  // already on screen from being re-rendered token by token.
+  const actions = useMemo<RowActions>(
+    () => ({
+      copy: copyEntry,
+      edit: editPrompt,
+      openImage: setViewer,
+      toggle: toggleRow,
+      decide,
+    }),
+    [copyEntry, editPrompt, toggleRow, decide],
+  );
+  const rowCtx = useMemo(
+    () => ({ conversationId, actions }),
+    [conversationId, actions],
+  );
+  // A thinking block is unfolded while it is the newest thing on screen and
+  // folds itself once the answer it produced starts to arrive.
+  const newest = ordered.at(-1)?.key ?? "";
 
-  const renderGroup = (item: Extract<ReturnType<typeof groupSteps<Entry>>[number], { type: "group" }>) => {
+  const renderRow = (entry: Entry) => (
+    <Row
+      key={entry.key}
+      entry={entry}
+      ctx={rowCtx}
+      copied={copied === entry.key}
+      focused={entry.kind === "proposal" && focusedProposal === entry.proposal.id}
+      open={
+        entry.kind === "tool"
+          ? (openTools[entry.key] ?? entry.tool.state === "error")
+          : entry.kind === "thinking" &&
+            (openThinking[entry.key] ?? (running && entry.key === newest))
+      }
+    />
+  );
+
+  const renderGroup = (
+    item: Extract<ReturnType<typeof groupSteps<Entry>>[number], { type: "group" }>,
+  ) => {
     const open = openGroups[item.key] ?? liveKeys.has(item.entries[0].key);
     const summary = stepSummary(
       item.entries.flatMap((entry) => (entry.kind === "tool" ? [entry.tool.state] : [])),
@@ -1886,7 +1998,9 @@ export function AiChat({
             <span className="ai-tool-state ok">全部完成</span>
           ) : null}
         </button>
-        {open ? <div className="ai-step-group-body">{item.entries.map(renderEntry)}</div> : null}
+        {open ? (
+          <div className="ai-step-group-body">{item.entries.map(renderRow)}</div>
+        ) : null}
       </div>
     );
   };
@@ -2250,7 +2364,7 @@ export function AiChat({
           </div>
         )}
         {transcriptItems.map((item) =>
-          item.type === "group" ? renderGroup(item) : renderEntry(item.entry),
+          item.type === "group" ? renderGroup(item) : renderRow(item.entry),
         )}
         </div>
         {/* Only offered while the update stream is off: the operator scrolled

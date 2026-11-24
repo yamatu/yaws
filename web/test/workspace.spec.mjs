@@ -1292,6 +1292,84 @@ browserTest(
   },
 );
 
+// A long answer is parsed and mounted in chunks (`markdownChunks`): everything
+// up to a finished block is rendered once and only the tail is re-parsed. The
+// blocks must still be exactly the blocks of one reply — a boundary that cuts in
+// the wrong place would duplicate or split them.
+browserTest(
+  "a long streamed answer is rendered block by block",
+  async ({ page }) => {
+    const failures = [];
+    page.on("pageerror", (e) => failures.push(e.message));
+    await page.goto(f.url + "/login");
+    await page.getByPlaceholder("请输入用户名").fill("fixture");
+    await page.getByPlaceholder("请输入密码").fill(f.password);
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    await page.evaluate(async (baseUrl) => {
+      const token = localStorage.getItem("yaws_token");
+      await fetch("/api/ai/profiles", {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          activeId: "streaming",
+          profiles: [
+            {
+              id: "streaming",
+              name: "流式模型",
+              baseUrl,
+              protocol: "chat",
+              model: "fixture-model",
+              reasoning: "",
+              apiKey: "fixture-key",
+              allowPrivate: true,
+            },
+          ],
+        }),
+      });
+    }, f.modelUrl);
+    const visible = page.locator(".remote-workspace:not([hidden])");
+    await page.goto(f.url + "/app/machines/1/ssh");
+    const knowsKey = !!f.db
+      .prepare("SELECT ssh_host_fingerprint as fp FROM machines WHERE id=1")
+      .get().fp;
+    if (!knowsKey) {
+      await visible
+        .getByRole("button", { name: "读取主机指纹", exact: true })
+        .click();
+      await visible.getByRole("button", { name: "确认并信任此指纹" }).click();
+    }
+    await expect(visible.locator(".workspace-header")).toContainText("已连接");
+    await page.getByRole("tab", { name: "AI", exact: true }).click();
+    // `[sse]` streams the answer in tiny pieces, so the answer really grows one
+    // token at a time instead of arriving in one frame.
+    await page.getByLabel("问题").fill("[sse][md] 长回答分块渲染");
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    const answer = page.locator(".ai-answer").last();
+    await expect(answer.locator("h2")).toHaveText("磁盘排查结论");
+    await expect(answer.locator("ol li")).toHaveCount(2);
+    await expect(answer.locator("ul.ai-md-tasks li")).toHaveCount(2);
+    await expect(answer.locator("blockquote")).toContainText("删除前请先备份。");
+    await expect(answer.locator(".ai-code pre code")).toContainText(
+      "journalctl --vacuum-size=200M",
+    );
+    await expect(answer.locator("table tbody tr")).toHaveCount(2);
+    await expect(answer.locator("a")).toHaveAttribute(
+      "href",
+      "https://example.com/disk",
+    );
+    // Nothing was spliced in twice and no block was left behind at a boundary.
+    await expect(answer.locator("h2")).toHaveCount(1);
+    await expect(answer.locator("table")).toHaveCount(1);
+    await expect(answer.locator(".ai-code")).toHaveCount(1);
+    expect((await answer.innerText()).trim().endsWith("。")).toBe(true);
+    expect(await page.locator(".ai-answer").count()).toBe(1);
+    expect(failures).toEqual([]);
+  },
+);
+
 // The OAuth exchange itself is integration-tested against an injected local
 // provider on the server. Here the browser only mocks those API responses: no
 // test should open a real login page or touch a third-party account.
