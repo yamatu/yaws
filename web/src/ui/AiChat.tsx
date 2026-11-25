@@ -194,7 +194,15 @@ export const AUTO_RUN_MODES: Array<{ value: AutoRun; label: string }> = [
   { value: "all", label: "修改类命令也自动执行" },
   { value: "off", label: "每条命令都先确认" },
 ];
-export const PROFILE_KEY = "yaws.ai.profile";
+/**
+ * The model each host last picked. Kept per machine next to the conversation id
+ * for the same reason: a choice made on one server is not a choice about the
+ * others. The server remembers it too; this only covers the first frame, before
+ * the profile list arrives.
+ */
+export function profileKey(machineId: number) {
+  return `yaws.ai.profile.${machineId}`;
+}
 const EXAMPLES = [
   "服务器磁盘和内存现在什么情况？",
   "Nginx 为什么启动失败，帮我查日志并给出修复命令",
@@ -251,6 +259,14 @@ function toBody(draft: Draft) {
 function storedConversation(machineId: number): string {
   try {
     return localStorage.getItem(chatKey(machineId)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function storedProfile(machineId: number): string {
+  try {
+    return localStorage.getItem(profileKey(machineId)) ?? "";
   } catch {
     return "";
   }
@@ -592,7 +608,9 @@ export function AiChat({
   onClose?: () => void;
 }) {
   const [profiles, setProfiles] = useState<Draft[]>([]);
-  const [activeProfile, setActiveProfile] = useState("");
+  const [activeProfile, setActiveProfile] = useState(() =>
+    storedProfile(machineId),
+  );
   const [editingId, setEditingId] = useState("");
   const [settings, setSettings] = useState(false);
   const [root, setRoot] = useState(initialRoot || "/");
@@ -801,12 +819,19 @@ export function AiChat({
     [],
   );
 
+  // Which machine the profile list was read for, so a switch resets the choice
+  // to that host's own instead of keeping the previous one.
+  const profilesHost = useRef(machineId);
   useEffect(() => {
     const ac = new AbortController();
+    if (profilesHost.current !== machineId) {
+      profilesHost.current = machineId;
+      setActiveProfile(storedProfile(machineId));
+    }
     void (async () => {
       try {
         const data = await apiFetch<{ activeId: string; profiles: Profile[] }>(
-          "/api/ai/profiles",
+          `/api/ai/profiles?machineId=${machineId}`,
           { signal: ac.signal },
         );
         // Nothing configured yet: start from a blank profile and open the editor.
@@ -825,7 +850,7 @@ export function AiChat({
       // made the assistant look "cancelled" halfway through real work. The run
       // finishes on the server and the transcript is reloaded next time.
     };
-  }, [applyProfiles]);
+  }, [applyProfiles, machineId]);
 
   // Leaving the page detaches this reader; the run keeps going. The stored run
   // id is what brings the transcript back on the next mount, and an explicit
@@ -1365,6 +1390,7 @@ export function AiChat({
           method: "PUT",
           body: JSON.stringify({
             activeId: activeProfile || profiles[0]?.id || "",
+            machineId,
             profiles: profiles.map(toBody),
           }),
         },
@@ -1380,14 +1406,14 @@ export function AiChat({
   async function activate(id: string) {
     setActiveProfile(id);
     try {
-      localStorage.setItem(PROFILE_KEY, id);
+      localStorage.setItem(profileKey(machineId), id);
     } catch {
       // ignore
     }
     try {
       await apiFetch("/api/ai/profiles/active", {
         method: "PUT",
-        body: JSON.stringify({ id }),
+        body: JSON.stringify({ id, machineId }),
       });
     } catch {
       // The next send still uses the profile that is selected here.
@@ -1449,7 +1475,7 @@ export function AiChat({
       try {
         await apiFetch("/api/ai/profiles", {
           method: "PUT",
-          body: JSON.stringify({ activeId: "", profiles: [] }),
+          body: JSON.stringify({ activeId: "", machineId, profiles: [] }),
         });
         setNotice("已删除全部配置");
       } catch (e) {
@@ -1464,6 +1490,7 @@ export function AiChat({
           method: "PUT",
           body: JSON.stringify({
             activeId: next,
+            machineId,
             profiles: rest.map(toBody),
           }),
         },
@@ -2309,6 +2336,7 @@ export function AiChat({
                 <button
                   type="button"
                   className="yaws-btn tool-text"
+                  title="这台服务器之后的提问都用该配置"
                   disabled={current.id === activeProfile}
                   onClick={() => void activate(current.id)}
                 >

@@ -37,6 +37,7 @@ import {
   pickProfile,
   publicProfiles,
   readProfiles,
+  setActiveProfileId,
   writeProfiles,
   type AIConfig,
   type LoadedProfile,
@@ -61,8 +62,13 @@ const MODEL_TIMEOUT_MS = 300_000;
 const ProfilesBody = z.object({
   profiles: z.array(AIProfileInputSchema).min(1).max(MAX_PROFILES),
   activeId: z.string().max(64).default(""),
+  /** The host the choice belongs to; 0 keeps the shared fallback. */
+  machineId: z.number().int().nonnegative().default(0),
 });
-const ProfileRef = z.object({ id: z.string().trim().min(1).max(64) });
+const ProfileRef = z.object({
+  id: z.string().trim().min(1).max(64),
+  machineId: z.number().int().nonnegative().default(0),
+});
 const McpBody = z.object({
   servers: z.array(MCPServerSchema).max(50),
 });
@@ -873,8 +879,12 @@ export function aiRouter(
   db.prepare(
     "UPDATE ai_proposals SET status='failed' WHERE status='applying'",
   ).run();
-  const load = (profileId = ""): LoadedProfile => {
-    const profile = pickProfile(readProfiles(db, secret), activeProfileId(db), profileId);
+  const load = (profileId = "", machineId = 0): LoadedProfile => {
+    const profile = pickProfile(
+      readProfiles(db, secret),
+      activeProfileId(db, machineId),
+      profileId,
+    );
     if (!profile) throw new WorkspaceError(409, "ai_not_configured");
     const bad = endpointError(profile.baseUrl);
     if (bad) throw new WorkspaceError(400, bad);
@@ -905,8 +915,11 @@ export function aiRouter(
     await official.logout(String(req.params.id));
     res.json({ ok: true });
   }));
-  router.get("/profiles", (_req, res) => {
-    res.json(publicProfiles(readProfiles(db, secret), activeProfileId(db)));
+  router.get("/profiles", (req, res) => {
+    const machineId = Math.max(0, Math.trunc(Number(req.query.machineId ?? 0)) || 0);
+    res.json(
+      publicProfiles(readProfiles(db, secret), activeProfileId(db, machineId)),
+    );
   });
   router.put("/profiles", (req, res) => {
     const body = ProfilesBody.parse(req.body);
@@ -919,15 +932,15 @@ export function aiRouter(
     }
     const next = mergeProfileKeys(body.profiles, readProfiles(db, secret));
     for (const profile of next) checkOfficialConfig(profile);
-    writeProfiles(db, secret, next, body.activeId);
-    res.json(publicProfiles(next, body.activeId));
+    writeProfiles(db, secret, next, body.activeId, body.machineId);
+    res.json(publicProfiles(next, activeProfileId(db, body.machineId)));
   });
   router.put("/profiles/active", (req, res) => {
-    const { id } = ProfileRef.parse(req.body);
+    const { id, machineId } = ProfileRef.parse(req.body);
     const list = readProfiles(db, secret);
     if (!list.some((p) => p.id === id))
       throw new WorkspaceError(404, "not_found");
-    writeProfiles(db, secret, list, id);
+    setActiveProfileId(db, id, machineId);
     res.json({ ok: true, activeId: id });
   });
   // MCP servers: mounted tools the assistant may call next to its built-ins.
@@ -1090,7 +1103,7 @@ export function aiRouter(
       const machineId = Number(req.params.id),
         userId = (req as AuthedRequest).user.id;
       sshMachine(db, machineId);
-      const config = load().config;
+      const config = load("", machineId).config;
       // The old JSON-only endpoint predates provider-native streaming.
       if (config.officialProvider)
         throw new WorkspaceError(400, "official_use_chat");

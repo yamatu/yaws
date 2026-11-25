@@ -6,6 +6,7 @@ import {
   AIProfileSchema,
   MAX_PROFILES,
   activeProfileId,
+  setActiveProfileId,
   endpointError,
   mergeProfileKeys,
   pickProfile,
@@ -173,6 +174,47 @@ test("ai profiles", async (t) => {
       // Deleting every profile stays empty; the legacy config must not come back.
       writeProfiles(db, secret, [], "a");
       assert.deepEqual(readProfiles(db, secret), []);
+    } finally {
+      db.close();
+    }
+  });
+
+  await t.test("each machine remembers its own model", () => {
+    const db = openDb(":memory:");
+    try {
+      writeProfiles(
+        db,
+        secret,
+        [profile({ id: "a", name: "A" }), profile({ id: "b", name: "B" })],
+        "a",
+      );
+      setActiveProfileId(db, "b", 1);
+      setActiveProfileId(db, "a", 2);
+      // Two hosts, two models: the second choice does not move the first.
+      assert.equal(activeProfileId(db, 1), "b");
+      assert.equal(activeProfileId(db, 2), "a");
+      // A host that never chose falls back to the shared one, and so does a
+      // caller that is not about a machine at all.
+      assert.equal(activeProfileId(db, 3), "a");
+      assert.equal(activeProfileId(db), "a");
+      // A machine pointing at a deleted profile must not keep a dead id.
+      writeProfiles(db, secret, [profile({ id: "b", name: "B" })], "b");
+      assert.equal(activeProfileId(db, 2), "b");
+      // Neither must a save from one host move the other one.
+      writeProfiles(
+        db,
+        secret,
+        [profile({ id: "a", name: "A" }), profile({ id: "b", name: "B" })],
+        "b",
+      );
+      writeProfiles(db, secret, readProfiles(db, secret), "a", 2);
+      assert.equal(activeProfileId(db, 2), "a");
+      assert.equal(activeProfileId(db, 1), "b");
+      // Wiping the list clears the per-machine choices as well: host 1 stops
+      // resolving to the profile it had picked.
+      writeProfiles(db, secret, [], "", 1);
+      assert.equal(activeProfileId(db, 1), "a");
+      assert.equal(activeProfileId(db, 2), "a");
     } finally {
       db.close();
     }

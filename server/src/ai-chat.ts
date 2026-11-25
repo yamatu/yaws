@@ -635,9 +635,10 @@ export type ChatDeps = {
   secret: string;
   /**
    * Reads a stored model profile; throws `ai_not_configured` when there is
-   * none. An empty id selects the active profile.
+   * none. An empty id selects the profile active for `machineId`, so a turn on
+   * one host uses the model that host picked.
    */
-  load: (profileId?: string) => LoadedProfile;
+  load: (profileId?: string, machineId?: number) => LoadedProfile;
   /** Streams one model completion, reporting tokens through `onDelta`. */
   stream: (
     config: AIConfig,
@@ -985,7 +986,7 @@ export function chatRouter(deps: ChatDeps) {
         userId = (req as AuthedRequest).user.id;
       const machine = sshMachine(db, machineId);
       const body = ChatBody.parse(req.body);
-      const profile = deps.load(body.profileId);
+      const profile = deps.load(body.profileId, machineId);
       const config = profile.config;
       remotePath(body.root);
 

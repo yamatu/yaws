@@ -279,6 +279,92 @@ test("ai chat", async (t) => {
     );
   });
 
+  await t.test("each machine keeps the model it picked", async () => {
+    // The operator picks a model per host: choosing one for host 2 must leave
+    // host 1 on its own, or a turn on one server would answer with the model
+    // somebody selected on another.
+    for (const [machineId, id] of [
+      [1, "fast"],
+      [2, "smart"],
+    ]) {
+      assert.equal(
+        (await request(f, "/api/ai/profiles/active", "PUT", { id, machineId }))
+          .status,
+        200,
+      );
+    }
+    assert.equal(
+      (await request(f, "/api/ai/profiles?machineId=1")).body.activeId,
+      "fast",
+    );
+    assert.equal(
+      (await request(f, "/api/ai/profiles?machineId=2")).body.activeId,
+      "smart",
+    );
+    // A host that never chose still reads the shared value, and so does a
+    // caller that is not about a machine (the legacy settings endpoints).
+    assert.equal((await request(f, "/api/ai/profiles")).body.activeId, "smart");
+    assert.equal(
+      (await request(f, "/api/ai/profiles?machineId=9")).body.activeId,
+      "smart",
+    );
+    // A turn that names no profile of its own uses its host's choice.
+    const turn = await chat(f, {
+      root: "/srv/app",
+      message: "[run] 这台机器用哪个模型",
+      autoRun: "read",
+    });
+    assert.equal(
+      turn.events.find((e) => e.type === "start").profile.name,
+      "快速模型 v2",
+    );
+    assert.equal(
+      f.modelRequests.at(-1).headers.authorization,
+      "Bearer fast-key",
+    );
+    // Saving the whole list from host 2 only resets host 2.
+    const saved = await request(f, "/api/ai/profiles", "PUT", {
+      activeId: "smart",
+      machineId: 2,
+      profiles: [
+        {
+          id: "fast",
+          name: "快速模型 v2",
+          baseUrl: f.modelUrl,
+          model: "fixture-model",
+          reasoning: "medium",
+          allowPrivate: true,
+        },
+        {
+          id: "smart",
+          name: "强推理模型",
+          baseUrl: f.modelUrl,
+          model: "fixture-model",
+          reasoning: "high",
+          allowPrivate: true,
+        },
+      ],
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.equal(
+      (await request(f, "/api/ai/profiles?machineId=1")).body.activeId,
+      "fast",
+    );
+    assert.equal(
+      (await request(f, "/api/ai/profiles?machineId=2")).body.activeId,
+      "smart",
+    );
+    // Put host 1 back on the shared choice: the subtests below drive the legacy
+    // `/settings` endpoint, which patches one profile for everybody.
+    assert.equal(
+      (await request(f, "/api/ai/profiles/active", "PUT", {
+        id: "smart",
+        machineId: 1,
+      })).status,
+      200,
+    );
+  });
+
   await t.test("read-only commands run without approval", async () => {
     const before = f.commands.length;
     const turn = await chat(f, {

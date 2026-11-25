@@ -75,6 +75,19 @@ export const MAX_PROFILES = 20;
 const CONFIG_KEY = "ai_config_enc";
 const PROFILES_KEY = "ai_profiles_enc";
 const ACTIVE_KEY = "ai_active_profile";
+/**
+ * Machine id → profile id, as JSON.
+ *
+ * One chat turn belongs to one host, so the model it uses does too: picking a
+ * model on server A must not redirect the answers of server B. `ACTIVE_KEY`
+ * stays the fallback for callers that are not about a single machine (the
+ * legacy settings endpoints, and rows written before this map existed).
+ */
+const ACTIVE_BY_MACHINE_KEY = "ai_active_profile_by_machine";
+const ActiveByMachineSchema = z.record(
+  z.string().regex(/^\d+$/),
+  z.string().max(64),
+);
 export const DEFAULT_PROFILE_ID = "default";
 export const DEFAULT_PROFILE_NAME = "默认配置";
 
@@ -139,27 +152,70 @@ export function readProfiles(db: Db, secret: string): AIProfile[] {
   }
 }
 
+function activeByMachine(db: Db): Record<string, string> {
+  try {
+    return ActiveByMachineSchema.parse(
+      JSON.parse(setting(db, ACTIVE_BY_MACHINE_KEY)),
+    );
+  } catch {
+    // A corrupt map only costs the per-machine choices, never the profiles.
+    return {};
+  }
+}
+
+/** Writes the map as JSON; `writeProfiles` prunes ids of deleted profiles. */
+function writeActiveByMachine(db: Db, map: Record<string, string>) {
+  put(db, ACTIVE_BY_MACHINE_KEY, JSON.stringify(map));
+}
+
 export function writeProfiles(
   db: Db,
   secret: string,
   profiles: AIProfile[],
   activeId: string,
+  machineId = 0,
 ) {
   if (!profiles.length) {
     // Keep the legacy key as the source of truth when everything is deleted.
     put(db, PROFILES_KEY, encryptText(JSON.stringify([]), secret));
+    writeActiveByMachine(db, {});
     return;
   }
   put(db, PROFILES_KEY, encryptText(JSON.stringify(profiles), secret));
-  put(
-    db,
-    ACTIVE_KEY,
-    profiles.some((p) => p.id === activeId) ? activeId : profiles[0].id,
+  const chosen = profiles.some((p) => p.id === activeId)
+    ? activeId
+    : profiles[0].id;
+  put(db, ACTIVE_KEY, chosen);
+  const kept = new Set(profiles.map((p) => p.id));
+  const map = Object.fromEntries(
+    Object.entries(activeByMachine(db)).filter(([, id]) => kept.has(id)),
   );
+  if (machineId > 0) map[String(machineId)] = chosen;
+  writeActiveByMachine(db, map);
 }
 
-export function activeProfileId(db: Db): string {
+/**
+ * The profile a caller falls back to when it names none of its own. Asking for
+ * a machine returns that machine's choice; anything else gets the shared one.
+ */
+export function activeProfileId(db: Db, machineId = 0): string {
+  if (machineId > 0) {
+    const chosen = activeByMachine(db)[String(machineId)];
+    if (chosen) return chosen;
+  }
   return setting(db, ACTIVE_KEY);
+}
+
+/** Remembers the model one machine picked without touching the others. */
+export function setActiveProfileId(db: Db, id: string, machineId = 0) {
+  if (machineId <= 0) {
+    put(db, ACTIVE_KEY, id);
+    return;
+  }
+  writeActiveByMachine(db, {
+    ...activeByMachine(db),
+    [String(machineId)]: id,
+  });
 }
 
 /** Prefer the requested profile, then the active one, then the first. */

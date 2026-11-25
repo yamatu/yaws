@@ -1370,6 +1370,108 @@ browserTest(
   },
 );
 
+// The model is a property of the server being worked on: picking the strong one
+// for host 1 must not turn host 2 over to it, and the choice has to survive the
+// next visit (the server remembers it per machine, not one setting for all).
+browserTest("each machine keeps the model it picked", async ({ page }) => {
+  const failures = [];
+  page.on("pageerror", (error) => failures.push(error.message));
+  await page.goto(f.url + "/login");
+  await page.getByPlaceholder("请输入用户名").fill("fixture");
+  await page.getByPlaceholder("请输入密码").fill(f.password);
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.evaluate(async (baseUrl) => {
+    const token = localStorage.getItem("yaws_token");
+    await fetch("/api/ai/profiles", {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        activeId: "fast",
+        profiles: [
+          {
+            id: "fast",
+            name: "快速模型",
+            baseUrl,
+            protocol: "chat",
+            model: "fixture-model",
+            reasoning: "",
+            apiKey: "fast-key",
+            allowPrivate: true,
+          },
+          {
+            id: "smart",
+            name: "强推理模型",
+            baseUrl,
+            protocol: "chat",
+            model: "fixture-model",
+            reasoning: "high",
+            apiKey: "smart-key",
+            allowPrivate: true,
+          },
+        ],
+      }),
+    });
+  }, f.modelUrl);
+  const visible = page.locator(".remote-workspace:not([hidden])");
+  const openChat = async (machineId) => {
+    await page.goto(f.url + `/app/machines/${machineId}/ssh`);
+    const knowsKey = !!f.db
+      .prepare("SELECT ssh_host_fingerprint as fp FROM machines WHERE id=?")
+      .get(machineId).fp;
+    if (!knowsKey) {
+      await visible
+        .getByRole("button", { name: "读取主机指纹", exact: true })
+        .click();
+      await visible.getByRole("button", { name: "确认并信任此指纹" }).click();
+    }
+    await expect(visible.locator(".workspace-header")).toContainText("已连接");
+    // Every visited host keeps its own workspace mounted, so the panel of the
+    // host being looked at is the visible one.
+    await visible.getByRole("tab", { name: "AI", exact: true }).click();
+    return visible.getByLabel("模型配置");
+  };
+  const ask = async (question) => {
+    await visible.getByLabel("问题").fill(question);
+    await visible.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(visible.locator(".ai-answer").last()).toContainText(
+      "已生成配置修改与验证命令。",
+    );
+  };
+
+  // Both hosts start on the profile every host shares.
+  await expect(await openChat(1)).toHaveValue("fast");
+  await expect(await openChat(2)).toHaveValue("fast");
+
+  // Host 1 switches to the strong model.
+  const one = await openChat(1);
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().includes("/api/ai/profiles/active") &&
+        response.request().method() === "PUT",
+    ),
+    one.selectOption("smart"),
+  ]);
+  await ask("第一个服务器用哪个模型");
+  expect(f.modelRequests.at(-1).headers.authorization).toBe("Bearer smart-key");
+
+  // Host 2 is untouched by that choice, both in the picker and in what it asks
+  // the provider for.
+  await expect(await openChat(2)).toHaveValue("fast");
+  await ask("第二个服务器用哪个模型");
+  expect(f.modelRequests.at(-1).headers.authorization).toBe("Bearer fast-key");
+
+  // Coming back to host 1 still shows (and uses) its own model: the choice is
+  // remembered per host, not overwritten by the last one that was visited.
+  await expect(await openChat(1)).toHaveValue("smart");
+  await ask("再问一次第一个服务器");
+  expect(f.modelRequests.at(-1).headers.authorization).toBe("Bearer smart-key");
+  expect(failures).toEqual([]);
+});
+
 // The OAuth exchange itself is integration-tested against an injected local
 // provider on the server. Here the browser only mocks those API responses: no
 // test should open a real login page or touch a third-party account.
